@@ -100,12 +100,39 @@ npm run incremental
 
 Force the file-based account list instead of the DB: `-- --accounts=accounts.json`.
 
-## Daily cron
+## Daily cron (VPS)
 
 ```cron
 # 06:00 UTC daily — pull yesterday's trailing-30-day window for every account
 0 6 * * *  cd /home/YOUR_USER/sync-worker && /usr/bin/npm run incremental >> /var/log/bsllc-sync.log 2>&1
 ```
+
+## Running on GitHub Actions (no server — the default)
+
+`.github/workflows/` holds two scheduled/manual runners so this needs no VPS:
+
+- **`incremental.yml`** — runs daily at 06:00 UTC (and on demand).
+- **`backfill.yml`** — manual only, with `weeks` and `dry_run` inputs.
+
+Both check out this repo *and* the dashboard repo (to run `npm run sync`), then
+execute the worker with credentials injected from encrypted repository secrets.
+A failure posts to Slack when `SLACK_WEBHOOK_URL` is set.
+
+Add these under **repo Settings → Secrets and variables → Actions → New repository secret**:
+
+| Secret | What it is |
+| ------ | ---------- |
+| `GOOGLE_ADS_CLIENT_ID` | OAuth client id |
+| `GOOGLE_ADS_CLIENT_SECRET` | OAuth client secret |
+| `GOOGLE_ADS_DEVELOPER_TOKEN` | Standard-access developer token |
+| `GOOGLE_ADS_REFRESH_TOKEN` | Minted once (mint-token, or OAuth Playground) |
+| `DATABASE_URL` | Neon connection string |
+| `DASHBOARD_REPO_TOKEN` | Fine-grained PAT with **contents: read** on `BSLLC2/bsllc-account-health` (lets the workflow check out the dashboard) |
+| `SLACK_WEBHOOK_URL` | *(optional)* Slack incoming webhook for failure alerts |
+
+`GOOGLE_ADS_LOGIN_CUSTOMER_ID` is set in the workflow files (it is not secret).
+Then run **Backfill history** once from the Actions tab; the daily incremental
+takes over on its own.
 
 ## Exit codes
 
