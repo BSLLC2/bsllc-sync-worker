@@ -1,0 +1,12 @@
+# Secrets — NEVER commit. This is the whole point of the credential-isolation
+# design: tokens live only in the local .env on the VPS, never in git.
+.env
+.env.*
+!.env.example
+
+# Local client mapping (may contain nothing secret, but keep it local anyway)
+accounts.json
+
+node_modules/
+dist/
+*.log

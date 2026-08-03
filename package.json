@@ -1,0 +1,29 @@
+{
+  "name": "bsllc-sync-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted sync worker: pulls metrics from source APIs (v1: Google Ads) and feeds the BS LLC Account Health dashboard via `npm run sync`. Holds all third-party credentials; the only place tokens ever live.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "mint-token": "tsx src/mint-refresh-token.ts",
+    "backfill": "tsx src/index.ts --mode=backfill",
+    "incremental": "tsx src/index.ts --mode=incremental",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "google-ads-api": "^24.1.0",
+    "google-auth-library": "^11.0.0",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "@types/pg": "^8.20.3",
+    "tsx": "^4.23.5",
+    "typescript": "^7.0.2"
+  }
+}
