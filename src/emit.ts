@@ -7,8 +7,8 @@ import type { Config } from "./config.js";
 /** One entry in the dashboard's sync contract (see SYNC_INTERFACE.md). */
 export interface SyncEntry {
   client_id: string;
-  source: "google_ads";
-  external_id: string;
+  source: "google_ads" | "gsc" | "ga4" | "d365" | "hubspot" | "manual";
+  external_id?: string;
   period_start: string;
   period_end: string;
   /** Omitted for incremental (defaults to now()); set for backfill (backdated). */
@@ -24,7 +24,7 @@ export interface SyncEntry {
  * the child exit code (0 ok · 1 bad input · 2 one or more entries failed).
  */
 export function runDashboardSync(
-  cfg: Config,
+  cfg: Pick<Config, "dashboardDir" | "databaseUrl">,
   syncs: SyncEntry[],
   opts: { dryRun: boolean },
 ): number {
