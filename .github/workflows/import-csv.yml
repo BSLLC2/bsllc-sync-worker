@@ -1,0 +1,67 @@
+name: Import history from CSV (manual)
+
+# Plants historical data from a Google Ads UI CSV export as backdated snapshots.
+# Uses ZERO Google Ads API quota — it reads the committed CSV, not the API.
+on:
+  workflow_dispatch:
+    inputs:
+      csv_path:
+        description: "Path to the CSV in this repo (e.g. data/och-weekly.csv)"
+        required: true
+        default: "data/och-weekly.csv"
+      client:
+        description: "Dashboard client name or slug (e.g. Ohio Recovery Centers)"
+        required: true
+      customer:
+        description: "Google Ads customer id, digits only (e.g. 8350689003)"
+        required: true
+      dry_run:
+        description: "Validate only, write nothing"
+        type: boolean
+        required: true
+        default: true
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Import CSV
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npx tsx src/import-csv.ts --file="${{ inputs.csv_path }}" --client="${{ inputs.client }}" --customer="${{ inputs.customer }}" --dry-run
+          else
+            npx tsx src/import-csv.ts --file="${{ inputs.csv_path }}" --client="${{ inputs.client }}" --customer="${{ inputs.customer }}"
+          fi
