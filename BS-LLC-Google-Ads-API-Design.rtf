@@ -1,0 +1,37 @@
+{\rtf1\ansi\ansicpg1252\deff0
+{\fonttbl{\f0\fswiss Helvetica;}}
+\fs32\b BS LLC \'96 Google Ads API Integration\b0\fs22\par
+\i Design document for Google Ads API Basic access application\i0\par
+\par
+\fs26\b 1. Company overview\b0\fs22\par
+BS LLC (https://bsllc.biz) is a United States digital marketing agency (SEM/SEO). We manage Google Ads accounts on behalf of our clients under our Google Ads manager account (MCC 214-171-2409).\par
+\par
+\fs26\b 2. What the tool does\b0\fs22\par
+We are building an internal "Account Health" reporting dashboard for our own account managers. A scheduled background worker reads aggregated performance metrics from the Google Ads accounts we manage and stores them in our own Postgres database. An internal web dashboard then reads that database to display each client's current performance and trends. The tool is strictly read-only reporting \'96 it never creates, edits, pauses, or manages campaigns, budgets, or any account settings.\par
+\par
+\fs26\b 3. How the Google Ads API is used\b0\fs22\par
+The worker calls GoogleAdsService.Search (GAQL) against the customer resource for each managed account, over a trailing 30-day window, requesting these reporting metrics only:\par
+\bullet  metrics.cost_micros\par
+\bullet  metrics.impressions\par
+\bullet  metrics.clicks\par
+\bullet  metrics.conversions\par
+\bullet  metrics.cost_per_conversion\par
+\bullet  metrics.ctr\par
+\bullet  metrics.average_cpc\par
+No mutate operations of any kind are used.\par
+\par
+\fs26\b 4. Data flow\b0\fs22\par
+Scheduled worker (holds the API credentials) -> queries the Google Ads API (read only) -> writes the returned metrics to our Postgres database -> internal dashboard reads the database. The public-facing dashboard itself holds no Google credentials and never calls the Google Ads API directly; it only reads our database. Credentials live solely in the worker's secret store.\par
+\par
+\fs26\b 5. Access and audience\b0\fs22\par
+Internal users only \'96 BS LLC employees. The dashboard is restricted by Google Workspace single sign-on to our @bsllc.biz domain. The tool is not sold, resold, or exposed to the general public or to clients.\par
+\par
+\fs26\b 6. Request volume\b0\fs22\par
+Approximately 8-11 read requests per day (one aggregated query per managed account), plus an occasional one-time historical backfill of a few hundred read requests. This is well within Basic access limits.\par
+\par
+\fs26\b 7. Scope of accounts\b0\fs22\par
+Only Google Ads accounts managed under BS LLC's manager account (MCC 214-171-2409) are accessed.\par
+\par
+\fs26\b 8. Contact\b0\fs22\par
+sebastien@bsllc.biz\par
+}
