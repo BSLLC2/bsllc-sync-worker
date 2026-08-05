@@ -104,7 +104,7 @@ async function main() {
       ok++;
       process.stdout.write(`  [${i + 1}/${jobs.length}] ${res.state.padEnd(7)} ${label}\n`);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = formatError(err);
       syncs.push({ ...base, data_state: "error", error_message: message, metrics: {} });
       failed++;
       process.stdout.write(`  [${i + 1}/${jobs.length}] ERROR   ${label} — ${message}\n`);
@@ -127,6 +127,39 @@ async function main() {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * The google-ads-api client throws a GoogleAdsFailure object, not an Error, so
+ * `String(err)` yields a useless "[object Object]". Unwrap the real reason:
+ * each entry carries an error_code ({ authorization_error: "USER_PERMISSION_DENIED" })
+ * and a human message. Fall back to JSON so nothing is ever lost.
+ */
+function formatError(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (err && typeof err === "object") {
+    const anyErr = err as { errors?: unknown; message?: unknown };
+    if (Array.isArray(anyErr.errors) && anyErr.errors.length > 0) {
+      return anyErr.errors
+        .map((e) => {
+          const ge = e as { error_code?: Record<string, unknown>; message?: string };
+          const code = ge.error_code
+            ? Object.entries(ge.error_code)
+                .map(([k, v]) => `${k}=${v}`)
+                .join(",")
+            : "";
+          return [code, ge.message].filter(Boolean).join(" ");
+        })
+        .join(" | ");
+    }
+    if (typeof anyErr.message === "string" && anyErr.message) return anyErr.message;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      /* fall through */
+    }
+  }
+  return String(err);
 }
 
 main().catch((err) => {
