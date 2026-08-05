@@ -1,0 +1,64 @@
+name: Reset & reload Google Ads (manual)
+
+# Clears a client's existing google_ads snapshots (e.g. stale legacy weekly
+# data) and re-lays the clean 30-day history from a committed CSV, so there is
+# ONE consistent scale and the trend deltas are correct. Zero API quota.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Dashboard client slug (e.g. ohio-community-health-och)"
+        required: true
+      customer:
+        description: "Google Ads customer id, digits only (e.g. 8350689003)"
+        required: true
+      csv_path:
+        description: "Path to the CSV in this repo"
+        required: true
+        default: "data/och-weekly.csv"
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Purge old google_ads snapshots for this client
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npx tsx src/purge-source.ts --client="${{ inputs.client }}" --source=google_ads --confirm
+
+      - name: Re-import clean 30-day history
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: npx tsx src/import-csv.ts --file="${{ inputs.csv_path }}" --client="${{ inputs.client }}" --customer="${{ inputs.customer }}"
