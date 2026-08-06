@@ -1,0 +1,58 @@
+name: Import HubSpot CRM
+
+# Pulls companies / contacts / deals from HubSpot and upserts them into the
+# dashboard via `npm run crm-import` (idempotent by hubspot_id). Manual for now;
+# add a schedule once you're happy with the results.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max records per type (blank = full import). Use e.g. 20 for a smoke test first."
+        required: false
+        default: ""
+
+concurrency:
+  group: crm-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run crm-import`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run HubSpot import
+        working-directory: worker
+        env:
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ -n "${{ inputs.limit }}" ]; then
+            npm run import-hubspot -- --limit=${{ inputs.limit }}
+          else
+            npm run import-hubspot
+          fi
