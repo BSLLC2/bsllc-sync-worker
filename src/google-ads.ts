@@ -24,6 +24,7 @@ const GAQL = `
     metrics.impressions,
     metrics.clicks,
     metrics.conversions,
+    metrics.conversions_value,
     metrics.cost_per_conversion,
     metrics.ctr,
     metrics.average_cpc
@@ -85,6 +86,10 @@ export async function pullWindow(
       "ads.impressions": impressions,
       "ads.clicks": clicks,
       "ads.conversions": conversions,
+      // Dollar value Google Ads attributes to those conversions (account
+      // currency, not micros). Powers real revenue + ROAS on the Marketing tab.
+      // Null when there are no conversions so scoring/revenue skips it.
+      "ads.conversion_value": conversions > 0 ? num(m.conversions_value) : null,
       // Undefined at zero conversions — send null so scoring skips it.
       "ads.cost_per_conversion": conversions > 0 ? num(m.cost_per_conversion) : null,
       "ads.ctr": num(m.ctr),
