@@ -4,6 +4,8 @@ name: Import HubSpot CRM
 # dashboard via `npm run crm-import` (idempotent by hubspot_id). Manual for now;
 # add a schedule once you're happy with the results.
 on:
+  schedule:
+    - cron: "0 7 * * *" # 07:00 UTC daily — keeps the CRM in sync (idempotent)
   workflow_dispatch:
     inputs:
       limit:
