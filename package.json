@@ -12,6 +12,7 @@
     "import-csv": "tsx src/import-csv.ts",
     "import-hubspot": "tsx src/import-hubspot.ts",
     "import-och": "tsx src/import-och.ts",
+    "import-ga4": "tsx src/import-ga4.ts",
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",

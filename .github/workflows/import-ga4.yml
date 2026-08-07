@@ -1,0 +1,63 @@
+name: Import GA4 conversions
+
+# Reads GA4 monthly conversions with the shared service account and plants
+# `ga4.conversions` per client via `npm run sync`. The Marketing tab's source
+# waterfall prefers GA4 conversions over Ads. Idempotent — safe to re-run.
+#
+# Requires the GA4_PROPERTY_MAP secret: JSON of {"client-slug":"propertyId"}.
+on:
+  schedule:
+    - cron: "45 7 * * *" # 07:45 UTC daily, after HubSpot + OCH
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse + print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: ga4-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run GA4 import
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GA4_PROPERTY_MAP: ${{ secrets.GA4_PROPERTY_MAP }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-ga4 -- --dry-run
+          else
+            npm run import-ga4
+          fi
