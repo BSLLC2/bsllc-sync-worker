@@ -293,7 +293,10 @@ async function main() {
       external_id: `och-admissions-${ym}`,
       period_start: start,
       period_end: end,
-      synced_at: `${end}T12:00:00.000Z`,
+      // Leave synced_at unset → the dashboard stamps it "now" (actual pull
+      // time). The month each row covers lives in period_start/period_end, and
+      // trends + "current period" are computed from THAT, so freshness can
+      // honestly read "just now" instead of looking a month stale.
       data_state: "live",
       error_message: null,
       metrics,
