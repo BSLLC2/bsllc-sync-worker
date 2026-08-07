@@ -216,8 +216,15 @@ async function main() {
   );
   if (!dateCols.length) throw new Error("Could not find a date column in the header row.");
 
+  // Data-quality guard: ignore rows dated in the future (e.g. a "2027" typo for
+  // 2026). A future month would otherwise become the "latest" period and skew
+  // the revenue tile + break week/month/quarter deltas.
+  const now = new Date();
+  const currentYm = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+
   const byMonth = new Map<string, { total: number; attributable: number }>();
   const referentTally = new Map<string, number>();
+  let skippedFuture = 0;
   for (let r = hIdx + 1; r < rows.length; r++) {
     const row = rows[r] ?? [];
     if (!row.some((c) => c && c.toString().trim())) continue; // blank row
@@ -228,6 +235,7 @@ async function main() {
       if (ym) break;
     }
     if (!ym) continue;
+    if (ym > currentYm) { skippedFuture++; continue; } // future-dated typo — skip
     const bucket = byMonth.get(ym) ?? { total: 0, attributable: 0 };
     bucket.total += 1;
     const ref = (row[refCol] ?? "").toString().trim() || "(blank)";
@@ -238,6 +246,7 @@ async function main() {
 
   const months = [...byMonth.keys()].sort();
   if (!months.length) throw new Error("Parsed 0 admissions — check the date/status columns.");
+  if (skippedFuture) console.log(`Skipped ${skippedFuture} future-dated row(s) (likely a year typo).`);
 
   console.log(`\nAdmissions by referent (admitted rows):`);
   for (const [ref, n] of [...referentTally.entries()].sort((a, b) => b[1] - a[1])) {
