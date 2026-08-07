@@ -248,8 +248,13 @@ async function main() {
   for (const ym of months) {
     const { total, attributable } = byMonth.get(ym)!;
     const { start, end } = monthBounds(ym);
-    const metrics: Record<string, number> = { admissions: total, admissions_marketing: attributable };
-    if (valueCents != null) metrics.revenue_cents = attributable * valueCents;
+    // Metric keys MUST be namespaced (source.key) — the dashboard reads
+    // "manual.revenue_cents" and sync.ts stores the key verbatim.
+    const metrics: Record<string, number> = {
+      "manual.admissions": total,
+      "manual.admissions_marketing": attributable,
+    };
+    if (valueCents != null) metrics["manual.revenue_cents"] = attributable * valueCents;
     const revStr = valueCents != null ? ` · $${((attributable * valueCents) / 100).toLocaleString()}` : "";
     console.log(`  ${ym}: ${total} admissions (${attributable} ours)${revStr}`);
     syncs.push({

@@ -147,7 +147,7 @@ async function main() {
         synced_at: `${end}T12:00:00.000Z`,
         data_state: "live",
         error_message: null,
-        metrics: { conversions: val },
+        metrics: { "ga4.conversions": val }, // namespaced — sync.ts stores the key verbatim
       });
     }
   }
