@@ -110,7 +110,7 @@ async function main() {
   const hsDeals = await fetchAll(
     token,
     "deals",
-    ["dealname", "amount", "dealstage", "pipeline", "closedate", "hubspot_owner_id", "hs_analytics_source", "hs_is_closed_won", "hs_is_closed"],
+    ["dealname", "amount", "dealstage", "pipeline", "closedate", "hubspot_owner_id", "hs_analytics_source", "hs_is_closed_won", "hs_is_closed", "dealtype", "hs_priority", "hs_forecast_category", "closed_lost_reason", "hs_deal_score", "notes_last_contacted"],
     ["companies"],
     limit,
   );
@@ -154,6 +154,12 @@ async function main() {
       closeDate: d.properties.closedate ? String(d.properties.closedate).slice(0, 10) : null,
       ownerName: d.properties.hubspot_owner_id ? owners.get(String(d.properties.hubspot_owner_id)) ?? null : null,
       source: d.properties.hs_analytics_source || null,
+      dealType: d.properties.dealtype || null,
+      priority: d.properties.hs_priority || null,
+      forecastCategory: d.properties.hs_forecast_category || null,
+      closedLostReason: d.properties.closed_lost_reason || null,
+      dealScore: d.properties.hs_deal_score != null && d.properties.hs_deal_score !== "" ? Math.round(Number(d.properties.hs_deal_score)) : null,
+      lastContactedAt: d.properties.notes_last_contacted || null,
     };
   });
 
