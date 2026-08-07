@@ -1,0 +1,46 @@
+name: Import web inquiries
+
+# Reads the "Web Inquiries" tab of the OCH intake Google Sheet with the shared
+# service account and lands each form fill (with its gclid + UTM tags) in the
+# dashboard's web_inquiries table. Idempotent — safe to re-run; duplicates are
+# absorbed by uq_web_inquiries_identity. Writes Postgres directly, so no
+# dashboard checkout / `npm run sync` is needed.
+on:
+  schedule:
+    - cron: "50 7 * * *" # 07:50 UTC daily, just after the OCH admissions import
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse + print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: web-inquiries-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        run: npm ci
+
+      - name: Run web inquiries import
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-web-inquiries -- --dry-run
+          else
+            npm run import-web-inquiries
+          fi

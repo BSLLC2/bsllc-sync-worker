@@ -3,11 +3,11 @@ name: Incremental sync (daily)
 # Runs the trailing-30-day Google Ads pull every morning and feeds it to the
 # dashboard via `npm run sync`. No server needed — GitHub runs this on schedule.
 on:
-  # PAUSED until Google Ads Basic access is approved — Explorer's quota is too
-  # small and scheduled runs were failing with 429 and stamping "Update failed".
-  # Re-enable by uncommenting the schedule below.
-  # schedule:
-  #   - cron: "0 6 * * *" # 06:00 UTC daily
+  # Google Ads Basic access is approved, so the daily pull is live again.
+  # (Was paused under Explorer's tiny quota, which 429'd and stamped
+  # "Update failed".)
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
   workflow_dispatch: {} # still runnable by hand from the Actions tab
 
 concurrency:
