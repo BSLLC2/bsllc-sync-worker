@@ -1,0 +1,67 @@
+name: Import email activity
+
+# Reads team Google Workspace mailboxes (domain-wide delegation) and logs every
+# email that touches a known CRM contact/company onto that record's timeline,
+# via `npm run email-import`. Gmail + Superhuman both ride the same mailbox.
+# Idempotent (dedup by Gmail message id) and honors the admin "never log" list.
+on:
+  schedule:
+    - cron: "*/30 * * * *" # every 30 min — near-real-time team visibility
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days back to scan (default 2; use 30+ for a backfill)."
+        required: false
+        default: "2"
+      dry_run:
+        description: "Fetch + write payload only, do not upsert (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: email-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run email-import`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run email import
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          EMAIL_LOG_MAILBOXES: ${{ secrets.EMAIL_LOG_MAILBOXES }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          DAYS="${{ inputs.days }}"; DAYS="${DAYS:-2}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-email -- --days="$DAYS" --dry-run
+          else
+            npm run import-email -- --days="$DAYS"
+          fi

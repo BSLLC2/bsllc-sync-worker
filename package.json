@@ -13,6 +13,7 @@
     "import-hubspot": "tsx src/import-hubspot.ts",
     "import-och": "tsx src/import-och.ts",
     "import-ga4": "tsx src/import-ga4.ts",
+    "import-email": "tsx src/import-email.ts",
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",
