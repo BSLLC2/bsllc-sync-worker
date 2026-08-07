@@ -100,7 +100,13 @@ async function main() {
   console.log(`HubSpot → CRM import${limit ? ` (limit ${limit}/type — smoke test)` : " (full)"}…`);
   const owners = await fetchOwners(token);
   const hsCompanies = await fetchAll(token, "companies", ["name", "domain", "industry", "hubspot_owner_id"], [], limit);
-  const hsContacts = await fetchAll(token, "contacts", ["firstname", "lastname", "email", "phone", "jobtitle"], ["companies"], limit);
+  const hsContacts = await fetchAll(
+    token,
+    "contacts",
+    ["firstname", "lastname", "email", "phone", "jobtitle", "lifecyclestage", "hs_lead_status", "hs_analytics_source", "notes_last_contacted"],
+    ["companies"],
+    limit,
+  );
   const hsDeals = await fetchAll(
     token,
     "deals",
@@ -126,6 +132,10 @@ async function main() {
     email: c.properties.email || null,
     phone: c.properties.phone || null,
     title: c.properties.jobtitle || null,
+    lifecycleStage: c.properties.lifecyclestage || null,
+    leadStatus: c.properties.hs_lead_status || null,
+    originalSource: c.properties.hs_analytics_source || null,
+    lastContactedAt: c.properties.notes_last_contacted || null,
   }));
 
   const deals = hsDeals.map((d) => {
