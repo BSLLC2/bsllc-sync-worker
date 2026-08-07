@@ -37,9 +37,13 @@ const DEFAULT_CLIENT = "ohio-community-health-och";
 
 // Referent/origin values we count as driven by our marketing. Matched
 // case-insensitively as substrings, so "Google Search", "Web Form", "Website
-// form" all land. Everything else (physician referral, walk-in, word of
-// mouth, insurance list, …) is a real admission but not attributable to us.
-const ATTRIBUTABLE = ["google", "web form", "webform", "website", "organic", "ppc", "paid", "form", "search", "ads"];
+// form" all land. Covers paid social too (Facebook/Meta/Instagram). Everything
+// else (physician referral, walk-in, word of mouth, past client, insurance
+// list, …) is a real admission but not attributable to us.
+const ATTRIBUTABLE = [
+  "google", "web form", "webform", "website", "organic", "ppc", "paid",
+  "form", "search", "ads", "facebook", "meta", "instagram", "social", "fb ", "ig ",
+];
 
 interface Args {
   sheetId: string;
@@ -106,6 +110,14 @@ function findCol(header: string[], needles: string[]): number {
   const norm = header.map((h) => (h ?? "").toString().trim().toLowerCase());
   for (let i = 0; i < norm.length; i++) if (needles.some((n) => norm[i]!.includes(n))) return i;
   return -1;
+}
+
+/** All column indexes matching any needle, left-to-right (for date fallbacks). */
+function findCols(header: string[], needles: string[]): number[] {
+  const norm = header.map((h) => (h ?? "").toString().trim().toLowerCase());
+  const out: number[] = [];
+  for (let i = 0; i < norm.length; i++) if (needles.some((n) => norm[i]!.includes(n))) out.push(i);
+  return out;
 }
 
 /** Pick the header row: the first row (within the first few) with ≥3 non-empty cells. */
@@ -177,15 +189,24 @@ async function main() {
 
   const hIdx = findHeaderRow(rows);
   const header = rows[hIdx]!;
-  const dateCol = findCol(header, ["admit date", "admission date", "date", "intake"]);
+  // Date: prefer the actual admission date, fall back to projected, then the
+  // inquiry date — resolved per-row (some rows only fill one of them).
+  const dateCols = [
+    ...findCols(header, ["scheduled admission"]),
+    ...findCols(header, ["projected admission", "admission date"]),
+    ...findCols(header, ["admit date"]),
+    ...findCols(header, ["inquiry received", "inquiry"]),
+    ...findCols(header, ["intake"]),
+    ...findCols(header, ["date"]),
+  ].filter((v, i, a) => a.indexOf(v) === i);
   const refCol = findCol(header, ["referent", "referral", "source", "origin", "channel", "how did", "lead"]);
-  const statusCol = findCol(header, ["admit", "status", "disposition", "outcome"]);
-  const hasStatusCol = statusCol >= 0 && statusCol !== dateCol;
+  const statusCol = findCol(header, ["status", "disposition", "outcome", "admitted"]);
+  const hasStatusCol = statusCol >= 0 && !dateCols.includes(statusCol);
 
   console.log(
-    `Columns → date:${dateCol >= 0 ? header[dateCol] : "?"} · referent:${refCol >= 0 ? header[refCol] : "?"} · status:${hasStatusCol ? header[statusCol] : "(none — counting all rows)"}`,
+    `Columns → date:${dateCols.map((c) => header[c]).join(" / ") || "?"} · referent:${refCol >= 0 ? header[refCol] : "?"} · status:${hasStatusCol ? header[statusCol] : "(none — counting all rows)"}`,
   );
-  if (dateCol < 0) throw new Error("Could not find a date column in the header row.");
+  if (!dateCols.length) throw new Error("Could not find a date column in the header row.");
 
   const byMonth = new Map<string, { total: number; attributable: number }>();
   const referentTally = new Map<string, number>();
@@ -193,7 +214,11 @@ async function main() {
     const row = rows[r] ?? [];
     if (!row.some((c) => c && c.toString().trim())) continue; // blank row
     if (!isAdmitted(row[statusCol], hasStatusCol)) continue;
-    const ym = parseDateToMonth(row[dateCol] ?? "");
+    let ym: string | null = null;
+    for (const dc of dateCols) {
+      ym = parseDateToMonth(row[dc] ?? "");
+      if (ym) break;
+    }
     if (!ym) continue;
     const bucket = byMonth.get(ym) ?? { total: 0, attributable: 0 };
     bucket.total += 1;
