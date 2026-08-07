@@ -310,8 +310,45 @@ async function main() {
   const databaseUrl = process.env.DATABASE_URL?.trim();
   const dashboardDir = process.env.DASHBOARD_DIR?.trim();
   if (!databaseUrl || !dashboardDir) throw new Error("Missing DATABASE_URL / DASHBOARD_DIR.");
+
+  // Purge future-dated manual snapshots left behind by earlier imports (e.g. a
+  // "2027" year typo that predates the future-date guard). The guard stops us
+  // WRITING them, but rows already in the table would otherwise linger and, being
+  // backdated to a future synced_at, keep winning the "latest" pick. Idempotent.
+  if (!args.dryRun) {
+    const purged = await purgeFutureManualRows(databaseUrl, args.client).catch((e) => {
+      console.warn(`Could not purge future-dated rows: ${e instanceof Error ? e.message : e}`);
+      return 0;
+    });
+    if (purged > 0) console.log(`Purged ${purged} stale future-dated manual snapshot row(s).`);
+  }
+
   const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun: args.dryRun });
   process.exit(code);
+}
+
+/** Delete manual snapshot rows whose period starts in the future for this
+ *  client — artifacts of source-sheet date typos. Matches the client by
+ *  slugified name (the sheet importer speaks in slugs; the table keys on id). */
+async function purgeFutureManualRows(databaseUrl: string, slug: string): Promise<number> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query<{ id: string; name: string }>("SELECT id, name FROM clients");
+    const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const match = rows.find((r) => slugify(r.name) === slug);
+    if (!match) return 0;
+    const res = await client.query(
+      `DELETE FROM metric_snapshots
+        WHERE client_id = $1 AND source = 'manual'
+          AND metric_key LIKE 'manual.%'
+          AND period_start > now()`,
+      [match.id],
+    );
+    return res.rowCount ?? 0;
+  } finally {
+    await client.end();
+  }
 }
 
 main().catch((e) => {
