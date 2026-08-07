@@ -1,0 +1,46 @@
+name: Import offline conversions (close-the-loop)
+
+# Matches real admissions to the ad clicks (gclids) that produced them and
+# uploads them to Google Ads as offline conversions, so bidding optimizes toward
+# patients, not form fills. Idempotent (dedupe table) and self-healing: it
+# discovers the OCH Ads account and creates the conversion action if missing,
+# and exits cleanly when no gclids have been captured yet.
+on:
+  schedule:
+    - cron: "20 8 * * *" # 08:20 UTC daily, after admissions + web-inquiry imports
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Match + print only, upload nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: offline-conversions
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Upload offline conversions
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
+          OCH_ADS_CUSTOMER_ID: ${{ secrets.OCH_ADS_CUSTOMER_ID }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-offline-conversions -- --dry-run
+          else
+            npm run import-offline-conversions
+          fi

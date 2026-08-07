@@ -13,6 +13,7 @@
     "import-hubspot": "tsx src/import-hubspot.ts",
     "import-och": "tsx src/import-och.ts",
     "import-web-inquiries": "tsx src/import-web-inquiries.ts",
+    "import-offline-conversions": "tsx src/import-offline-conversions.ts",
     "import-ga4": "tsx src/import-ga4.ts",
     "import-email": "tsx src/import-email.ts",
     "backfill": "tsx src/index.ts --mode=backfill",
