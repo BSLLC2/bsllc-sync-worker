@@ -84,21 +84,21 @@ async function ga4Token(): Promise<string> {
 
 /** Run a monthly conversions report. Falls back to `keyEvents` (GA4's newer
  *  name for conversions) if `conversions` is rejected by the property. */
-async function runReport(token: string, propertyId: string, since: string, metric: string): Promise<any> {
+async function runReport(token: string, propertyId: string, since: string, metrics: string[]): Promise<any> {
   const res = await fetch(`https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       dateRanges: [{ startDate: since, endDate: "today" }],
       dimensions: [{ name: "yearMonth" }],
-      metrics: [{ name: metric }],
+      metrics: metrics.map((name) => ({ name })),
       orderBys: [{ dimension: { dimensionName: "yearMonth" } }],
     }),
   });
   if (!res.ok) {
     const body = await res.text();
     if (res.status === 403) throw new Error(`GA4 403 for property ${propertyId} — add the service account as a Viewer.`);
-    const err = new Error(`GA4 runReport ${propertyId} (${metric}) → ${res.status} ${body}`);
+    const err = new Error(`GA4 runReport ${propertyId} (${metrics.join(",")}) → ${res.status} ${body}`);
     (err as any).status = res.status;
     (err as any).body = body;
     throw err;
@@ -120,23 +120,26 @@ async function main() {
 
   const syncs: SyncEntry[] = [];
   for (const [slug, propertyId] of Object.entries(args.map)) {
+    // GA4 renamed "conversions" → "keyEvents". Ask for keyEvents first (current
+    // properties), fall back to conversions (older ones) on a 400. Always pull
+    // sessions too so the traffic tile lights up even when 0 conversions exist.
     let report: any;
-    let metricUsed = "conversions";
+    let convMetric = "keyEvents";
     try {
-      report = await runReport(token, propertyId, args.since, "conversions");
+      report = await runReport(token, propertyId, args.since, ["sessions", "keyEvents"]);
     } catch (e) {
-      // Newer GA4 properties expose "keyEvents" instead of "conversions".
       if ((e as any).status === 400) {
-        metricUsed = "keyEvents";
-        report = await runReport(token, propertyId, args.since, "keyEvents");
+        convMetric = "conversions";
+        report = await runReport(token, propertyId, args.since, ["sessions", "conversions"]);
       } else throw e;
     }
     const rows: any[] = report.rows ?? [];
-    console.log(`  ${slug} (property ${propertyId}) — ${rows.length} months via ${metricUsed}`);
+    let planted = 0;
     for (const row of rows) {
       const ym = row.dimensionValues?.[0]?.value; // "YYYYMM"
-      const val = Number(row.metricValues?.[0]?.value ?? 0);
       if (!ym || !/^\d{6}$/.test(ym)) continue;
+      const sessions = Number(row.metricValues?.[0]?.value ?? 0);
+      const conv = Number(row.metricValues?.[1]?.value ?? 0);
       const { start, end } = monthBounds(ym);
       syncs.push({
         client_id: slug,
@@ -147,12 +150,19 @@ async function main() {
         synced_at: `${end}T12:00:00.000Z`,
         data_state: "live",
         error_message: null,
-        metrics: { "ga4.conversions": val }, // namespaced — sync.ts stores the key verbatim
+        // namespaced keys — sync.ts stores them verbatim; dashboard reads ga4.*
+        metrics: { "ga4.conversions": conv, "ga4.sessions": sessions },
       });
+      planted++;
     }
+    console.log(`  ${slug} (property ${propertyId}) — ${planted} months via ${convMetric} (+sessions)`);
   }
 
-  if (!syncs.length) throw new Error("GA4 returned 0 rows across all properties.");
+  if (!syncs.length) {
+    // Not an error — a property may simply have no data in range. Exit clean.
+    console.log("GA4 returned no rows for any property — nothing to plant.");
+    process.exit(0);
+  }
   console.log(`\nPlanting ${syncs.length} monthly snapshots.`);
 
   const databaseUrl = process.env.DATABASE_URL?.trim();
