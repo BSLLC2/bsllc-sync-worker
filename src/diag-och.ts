@@ -12,12 +12,12 @@ async function main() {
   await c.connect();
   try {
     const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    const { rows: clients } = await c.query<{ id: string; name: string; slug: string | null; customer_value_cents: number | null }>(
-      "SELECT id, name, slug, customer_value_cents FROM clients",
+    const { rows: clients } = await c.query<{ id: string; name: string; customer_value_cents: number | null }>(
+      "SELECT id, name, customer_value_cents FROM clients",
     );
-    const och = clients.find((r) => (r.slug && r.slug === "ohio-community-health-och") || slugify(r.name) === "ohio-community-health-och" || /ohio community/i.test(r.name));
-    if (!och) { console.log("No OCH client found. Clients:", clients.map((r) => `${r.name} [${r.slug ?? slugify(r.name)}]`).join(", ")); return; }
-    console.log(`OCH client: id=${och.id} name="${och.name}" slug=${och.slug} customer_value_cents=${och.customer_value_cents}`);
+    const och = clients.find((r) => slugify(r.name) === "ohio-community-health-och" || /ohio community/i.test(r.name));
+    if (!och) { console.log("No OCH client found. Clients:", clients.map((r) => `${r.name} [${slugify(r.name)}]`).join(", ")); return; }
+    console.log(`OCH client: id=${och.id} name="${och.name}" slug=${slugify(och.name)} customer_value_cents=${och.customer_value_cents}`);
 
     for (const table of ["metric_snapshots", "manual_metrics"]) {
       const { rows } = await c.query(
