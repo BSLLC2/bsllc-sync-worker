@@ -35,15 +35,16 @@ import { runDashboardSync, type SyncEntry } from "./emit.js";
 const DEFAULT_SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
 const DEFAULT_CLIENT = "ohio-community-health-och";
 
-// Referent/origin values we count as driven by our marketing. Matched
-// case-insensitively as substrings, so "Google Search", "Web Form", "Website
-// form" all land. Covers paid social too (Facebook/Meta/Instagram). Everything
-// else (physician referral, walk-in, word of mouth, past client, insurance
-// list, …) is a real admission but not attributable to us.
-const ATTRIBUTABLE = [
-  "google", "web form", "webform", "website", "organic", "ppc", "paid",
-  "form", "search", "ads", "facebook", "meta", "instagram", "social", "fb ", "ig ",
-];
+// Referent/origin values we count as driven by our marketing. Matched on WHOLE
+// WORDS (not loose substrings — otherwise "Crossroads" trips on "ads" and a
+// referral center gets miscredited to us). Covers search, web, and paid social.
+// Everything else (professional referrals, past clients, word of mouth, walk-in,
+// insurance lists, …) is a real admission but not attributable to our efforts.
+const ATTRIBUTABLE_WORDS = new Set([
+  "google", "adwords", "ads", "ppc", "sem", "seo", "organic", "search",
+  "web", "webform", "website", "online", "form", "landing",
+  "facebook", "fb", "meta", "instagram", "ig", "social", "paid",
+]);
 
 interface Args {
   sheetId: string;
@@ -156,7 +157,9 @@ function isAdmitted(statusCell: string | undefined, hasStatusCol: boolean): bool
 function isAttributable(referent: string | undefined): boolean {
   const s = (referent ?? "").toString().trim().toLowerCase();
   if (!s) return false;
-  return ATTRIBUTABLE.some((n) => s.includes(n));
+  if (s.includes("web form") || s.includes("paid search")) return true;
+  const tokens = s.split(/[^a-z0-9]+/).filter(Boolean);
+  return tokens.some((t) => ATTRIBUTABLE_WORDS.has(t));
 }
 
 function monthBounds(ym: string): { start: string; end: string } {
