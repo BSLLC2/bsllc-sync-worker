@@ -171,9 +171,14 @@ function monthBounds(ym: string): { start: string; end: string } {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  // Conservative default net-revenue-per-admission estimate ($8,000). Residential
+  // behavioral-health admissions bill well into five figures; we lowball on
+  // purpose so the case-study number is defensible. Surfaced as an ESTIMATE in
+  // the UI. Override anytime with OCH_VALUE_PER_ADMISSION_CENTS (a real figure).
+  const DEFAULT_VALUE_PER_ADMISSION_CENTS = 800000;
   const valueCents = process.env.OCH_VALUE_PER_ADMISSION_CENTS
     ? Math.round(Number(process.env.OCH_VALUE_PER_ADMISSION_CENTS))
-    : null;
+    : DEFAULT_VALUE_PER_ADMISSION_CENTS;
 
   console.log(`OCH admissions import — sheet ${args.sheetId}${args.dryRun ? " (dry-run)" : ""}`);
   const token = await sheetsToken();
