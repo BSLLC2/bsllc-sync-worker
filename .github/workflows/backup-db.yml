@@ -1,0 +1,41 @@
+name: Nightly DB backup
+
+# Belt-and-suspenders on top of Neon's own point-in-time recovery: a nightly
+# pg_dump of the whole database, gzipped and kept as a GitHub artifact (30-day
+# retention) so we always have a portable, restorable snapshot off Neon.
+on:
+  schedule:
+    - cron: "0 8 * * *" # 08:00 UTC, after the daily imports
+  workflow_dispatch:
+
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install pg_dump 16 (matches Neon's server major)
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+
+      - name: Dump database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ts=$(date -u +%Y%m%dT%H%M%SZ)
+          pg_dump "$DATABASE_URL" --no-owner --no-privileges --format=plain \
+            | gzip -9 > "bsllc-db-$ts.sql.gz"
+          ls -lh bsllc-db-*.sql.gz
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup
+          path: "bsllc-db-*.sql.gz"
+          retention-days: 30
+          if-no-files-found: error
