@@ -11,6 +11,7 @@
     "mint-token": "tsx src/mint-refresh-token.ts",
     "import-csv": "tsx src/import-csv.ts",
     "import-hubspot": "tsx src/import-hubspot.ts",
+    "import-och": "tsx src/import-och.ts",
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",

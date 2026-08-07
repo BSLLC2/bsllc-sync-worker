@@ -1,0 +1,62 @@
+name: Import OCH admissions
+
+# Reads the OCH intake Google Sheet with the shared service account and plants
+# monthly admissions (total + marketing-attributable) as dashboard snapshots
+# via `npm run sync`. Revenue dollars appear once OCH_VALUE_PER_ADMISSION_CENTS
+# is set as a repo secret. Idempotent — safe to re-run.
+on:
+  schedule:
+    - cron: "30 7 * * *" # 07:30 UTC daily, just after the HubSpot import
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse + print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: och-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run OCH import
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          OCH_VALUE_PER_ADMISSION_CENTS: ${{ secrets.OCH_VALUE_PER_ADMISSION_CENTS }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-och -- --dry-run
+          else
+            npm run import-och
+          fi
