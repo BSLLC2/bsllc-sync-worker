@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import { JWT } from "google-auth-library";
+import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 
 /**
@@ -44,17 +45,30 @@ function parseArgs(argv: string[]): Args {
       const [slug, prop] = pair.split(":");
       if (slug && prop) map[slug.trim()] = prop.trim();
     }
-  } else if (process.env.GA4_PROPERTY_MAP) {
-    try {
-      Object.assign(map, JSON.parse(process.env.GA4_PROPERTY_MAP));
-    } catch {
-      throw new Error("GA4_PROPERTY_MAP is not valid JSON.");
-    }
-  }
-  if (!Object.keys(map).length) {
-    throw new Error("No property map. Pass --map=slug:propertyId,... or set GA4_PROPERTY_MAP.");
   }
   return { map, since, dryRun };
+}
+
+/**
+ * The source of truth for which client uses which GA4 property is the dashboard
+ * itself: Admin → Connectors, stored in connector_mappings (source='ga4',
+ * external_id = property id). Reading it here means "add the number in the
+ * admin" just works — no secret to maintain. The GA4_PROPERTY_MAP secret and
+ * --map arg are merged in as optional extras/overrides.
+ */
+async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query<{ client_id: string; external_id: string }>(
+      "SELECT client_id, external_id FROM connector_mappings WHERE source = 'ga4' AND enabled = true AND external_id IS NOT NULL AND external_id <> ''",
+    );
+    const m: Record<string, string> = {};
+    for (const r of rows) m[r.client_id] = r.external_id.trim();
+    return m;
+  } finally {
+    await client.end();
+  }
 }
 
 function serviceAccount(): { client_email: string; private_key: string } {
@@ -115,11 +129,26 @@ function monthBounds(ym: string): { start: string; end: string } {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  console.log(`GA4 conversions import — ${Object.keys(args.map).length} client(s), since ${args.since}${args.dryRun ? " (dry-run)" : ""}`);
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  const dashboardDir = process.env.DASHBOARD_DIR?.trim();
+  if (!databaseUrl || !dashboardDir) throw new Error("Missing DATABASE_URL / DASHBOARD_DIR.");
+
+  // Source of truth: GA4 property IDs entered in the dashboard (Admin →
+  // Connectors). Merge in the optional secret + --map as extras/overrides.
+  const map: Record<string, string> = await mapFromDb(databaseUrl);
+  const fromDb = Object.keys(map).length;
+  if (process.env.GA4_PROPERTY_MAP) {
+    try { Object.assign(map, JSON.parse(process.env.GA4_PROPERTY_MAP)); } catch { throw new Error("GA4_PROPERTY_MAP is not valid JSON."); }
+  }
+  Object.assign(map, args.map); // --map wins
+  if (!Object.keys(map).length) {
+    throw new Error("No GA4 property IDs found. Add them in the dashboard (Admin → Connectors → GA4) or set GA4_PROPERTY_MAP.");
+  }
+  console.log(`GA4 import — ${Object.keys(map).length} client(s) (${fromDb} from dashboard connectors), since ${args.since}${args.dryRun ? " (dry-run)" : ""}`);
   const token = await ga4Token();
 
   const syncs: SyncEntry[] = [];
-  for (const [slug, propertyId] of Object.entries(args.map)) {
+  for (const [slug, propertyId] of Object.entries(map)) {
     // GA4 renamed "conversions" → "keyEvents". Ask for keyEvents first (current
     // properties), fall back to conversions (older ones) on a 400. Always pull
     // sessions too so the traffic tile lights up even when 0 conversions exist.
@@ -164,10 +193,6 @@ async function main() {
     process.exit(0);
   }
   console.log(`\nPlanting ${syncs.length} monthly snapshots.`);
-
-  const databaseUrl = process.env.DATABASE_URL?.trim();
-  const dashboardDir = process.env.DASHBOARD_DIR?.trim();
-  if (!databaseUrl || !dashboardDir) throw new Error("Missing DATABASE_URL / DASHBOARD_DIR.");
   const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun: args.dryRun });
   process.exit(code);
 }
