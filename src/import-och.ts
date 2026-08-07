@@ -1,7 +1,25 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import { JWT } from "google-auth-library";
+import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
+
+/** The per-client customer value (value per conversion) set in the dashboard
+ *  header — the source of truth. Matched to the client by slugified name. */
+async function customerValueFromDb(databaseUrl: string, slug: string): Promise<number | null> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query<{ name: string; customer_value_cents: number | null }>(
+      "SELECT name, customer_value_cents FROM clients WHERE customer_value_cents IS NOT NULL",
+    );
+    const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    for (const r of rows) if (slugify(r.name) === slug) return r.customer_value_cents;
+    return null;
+  } finally {
+    await client.end();
+  }
+}
 
 /**
  * Ohio Community Health (OCH) admissions → dashboard revenue tracker.
@@ -176,9 +194,12 @@ async function main() {
   // purpose so the case-study number is defensible. Surfaced as an ESTIMATE in
   // the UI. Override anytime with OCH_VALUE_PER_ADMISSION_CENTS (a real figure).
   const DEFAULT_VALUE_PER_ADMISSION_CENTS = 800000;
-  const valueCents = process.env.OCH_VALUE_PER_ADMISSION_CENTS
-    ? Math.round(Number(process.env.OCH_VALUE_PER_ADMISSION_CENTS))
-    : DEFAULT_VALUE_PER_ADMISSION_CENTS;
+  // Priority: the editable dashboard "Customer value" field → env override → default.
+  const dbUrlForValue = process.env.DATABASE_URL?.trim();
+  const dbValue = dbUrlForValue ? await customerValueFromDb(dbUrlForValue, args.client).catch(() => null) : null;
+  const valueCents = dbValue
+    ?? (process.env.OCH_VALUE_PER_ADMISSION_CENTS ? Math.round(Number(process.env.OCH_VALUE_PER_ADMISSION_CENTS)) : DEFAULT_VALUE_PER_ADMISSION_CENTS);
+  console.log(`Value per admission: $${(valueCents / 100).toLocaleString()} (${dbValue != null ? "from dashboard Customer value" : "default/env"})`);
 
   console.log(`OCH admissions import — sheet ${args.sheetId}${args.dryRun ? " (dry-run)" : ""}`);
   const token = await sheetsToken();
