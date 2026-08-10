@@ -86,7 +86,7 @@ async function main() {
         const cc = await mcc.query(`SELECT customer_client.id, customer_client.descriptive_name, customer_client.manager FROM customer_client`);
         const hit = cc.find((c: any) => !c.customer_client?.manager && /ohio community|och/i.test(c.customer_client?.descriptive_name ?? ""));
         customerId = hit?.customer_client?.id ? digits(String(hit.customer_client.id)) : null;
-        if (customerId) PASS(`Discovered OCH Ads account under MCC: ${customerId} (${hit.customer_client.descriptive_name})`);
+        if (customerId) PASS(`Discovered OCH Ads account under MCC: ${customerId} (${hit?.customer_client?.descriptive_name ?? "?"})`);
         else { GAP(`Could NOT auto-find OCH's Ads account. Accounts under MCC: ${cc.map((c: any) => `${c.customer_client?.descriptive_name} (${c.customer_client?.id})`).join(", ")}. Set OCH_ADS_CUSTOMER_ID.`); return; }
       } else PASS(`OCH Ads account (from OCH_ADS_CUSTOMER_ID): ${customerId}`);
 
