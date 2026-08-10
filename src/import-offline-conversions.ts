@@ -121,8 +121,8 @@ async function main() {
 
   try {
     // Per-admission value (dollars) from the dashboard's editable Customer value.
-    const { rows: clientRows } = await pgc.query<{ name: string; customer_value_cents: number | null }>(
-      "SELECT name, customer_value_cents FROM clients",
+    const { rows: clientRows } = await pgc.query<{ id: string; name: string; customer_value_cents: number | null }>(
+      "SELECT id, name, customer_value_cents FROM clients",
     );
     const matchClient = clientRows.find((r) => slugify(r.name) === args.clientSlug);
     const valueCents = matchClient?.customer_value_cents ?? DEFAULT_VALUE_CENTS;
@@ -234,10 +234,19 @@ async function main() {
     };
     const api = new GoogleAdsApi({ client_id: cfg.clientId, client_secret: cfg.clientSecret, developer_token: cfg.developerToken });
 
-    // Resolve OCH's Ads customer id.
+    // Resolve OCH's Ads customer id — prefer the exact account the daily sync
+    // already uses (Admin → Connectors); accessing it through the MCC login
+    // header works, whereas querying the MCC itself for discovery does not.
     let customerId = args.customerId ?? (process.env.OCH_ADS_CUSTOMER_ID ? digits(process.env.OCH_ADS_CUSTOMER_ID) : null);
+    if (!customerId && matchClient?.id) {
+      const { rows: cm } = await pgc.query<{ external_id: string | null }>(
+        "SELECT external_id FROM connector_mappings WHERE client_id=$1 AND source='google_ads' AND enabled=true AND external_id IS NOT NULL LIMIT 1",
+        [matchClient.id],
+      );
+      if (cm[0]?.external_id) { customerId = digits(String(cm[0].external_id)); console.log(`OCH Ads account from Admin → Connectors: ${customerId}`); }
+    }
     if (!customerId) {
-      console.log("No customer id given — discovering under the MCC by name…");
+      console.log("No customer id given/mapped — discovering under the MCC by name…");
       const mcc = api.Customer({ customer_id: cfg.loginCustomerId, login_customer_id: cfg.loginCustomerId, refresh_token: cfg.refreshToken });
       const clients = await mcc.query(`SELECT customer_client.id, customer_client.descriptive_name, customer_client.manager FROM customer_client`);
       const hit = clients.find((c: any) => !c.customer_client?.manager && /ohio community|och/i.test(c.customer_client?.descriptive_name ?? ""));

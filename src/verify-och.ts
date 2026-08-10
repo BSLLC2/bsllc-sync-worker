@@ -81,6 +81,17 @@ async function main() {
       const cfg = { clientId: env("GOOGLE_ADS_CLIENT_ID"), clientSecret: env("GOOGLE_ADS_CLIENT_SECRET"), developerToken: env("GOOGLE_ADS_DEVELOPER_TOKEN"), refreshToken: env("GOOGLE_ADS_REFRESH_TOKEN"), loginCustomerId: digits(env("GOOGLE_ADS_LOGIN_CUSTOMER_ID")) };
       const api = new GoogleAdsApi({ client_id: cfg.clientId, client_secret: cfg.clientSecret, developer_token: cfg.developerToken });
       let customerId = process.env.OCH_ADS_CUSTOMER_ID ? digits(process.env.OCH_ADS_CUSTOMER_ID) : null;
+      // Preferred: the exact account id the daily sync uses (Admin → Connectors).
+      // Accessing it through the MCC login header works; querying the MCC itself
+      // for discovery does not (the token isn't a manager-level user).
+      if (!customerId) {
+        const { rows: cm } = await pgc.query<{ external_id: string | null }>(
+          "SELECT external_id FROM connector_mappings WHERE client_id=$1 AND source='google_ads' AND enabled=true AND external_id IS NOT NULL LIMIT 1",
+          [och.id],
+        );
+        if (cm[0]?.external_id) { customerId = digits(String(cm[0].external_id)); PASS(`OCH Ads account from Admin → Connectors: ${customerId}`); }
+        else GAP("OCH has NO enabled Google Ads connector in Admin → Connectors — map it there (or set OCH_ADS_CUSTOMER_ID) so the loop knows the account.");
+      }
       if (!customerId) {
         const mcc = api.Customer({ customer_id: cfg.loginCustomerId, login_customer_id: cfg.loginCustomerId, refresh_token: cfg.refreshToken });
         const cc = await mcc.query(`SELECT customer_client.id, customer_client.descriptive_name, customer_client.manager FROM customer_client`);
