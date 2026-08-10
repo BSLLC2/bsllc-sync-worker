@@ -6,8 +6,10 @@ name: Import web inquiries
 # absorbed by uq_web_inquiries_identity. Writes Postgres directly, so no
 # dashboard checkout / `npm run sync` is needed.
 on:
-  schedule:
-    - cron: "50 7 * * *" # 07:50 UTC daily, just after the OCH admissions import
+  # Sheet-based capture is a BACKUP path only — the live website form posts
+  # straight to the dashboard webhook (/api/webform), which is confirmed
+  # working, so we don't run this on a schedule. Kept dispatch-only in case a
+  # client ever logs inquiries to a sheet instead of wiring the webhook.
   workflow_dispatch:
     inputs:
       dry_run:
