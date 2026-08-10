@@ -94,8 +94,14 @@ async function main() {
       const actions = await customer.query(`SELECT conversion_action.name, conversion_action.status, conversion_action.type FROM conversion_action WHERE conversion_action.name = '${CONVERSION_ACTION_NAME}'`);
       if (actions.length > 0) PASS(`Conversion action "${CONVERSION_ACTION_NAME}" exists (status ${(actions[0] as any).conversion_action.status}). Ready to receive uploads.`);
       else GAP(`Conversion action "${CONVERSION_ACTION_NAME}" does not exist yet — the loop creates it automatically on its first real upload.`);
-    } catch (e) {
-      GAP(`Google Ads check failed: ${e instanceof Error ? e.message : e}`);
+    } catch (e: any) {
+      // google-ads-api throws structured error objects, not Error instances —
+      // serialize so the real reason is visible instead of "[object Object]".
+      const detail =
+        e?.errors?.map((x: any) => x.message || JSON.stringify(x)).join("; ") ||
+        e?.message ||
+        (() => { try { return JSON.stringify(e); } catch { return String(e); } })();
+      GAP(`Google Ads check failed: ${detail}`);
     }
 
     console.log("\nDone.");

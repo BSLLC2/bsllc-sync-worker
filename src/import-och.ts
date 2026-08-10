@@ -256,7 +256,10 @@ async function main() {
       if (ym) break;
     }
     if (!ym) continue;
-    if (ym > currentYm) { skippedFuture++; continue; } // future-dated typo — skip
+    // Skip the CURRENT (incomplete) month and anything future: the board reads
+    // the last complete month, so a partial August or a "2027" typo would only
+    // add a future-dated row that gets filtered out anyway.
+    if (ym >= currentYm) { skippedFuture++; continue; }
     const bucket = byMonth.get(ym) ?? { total: 0, attributable: 0 };
     bucket.total += 1;
     const ref = (row[refCol] ?? "").toString().trim() || "(blank)";
@@ -330,9 +333,12 @@ async function main() {
   process.exit(code);
 }
 
-/** Delete manual snapshot rows whose period starts in the future for this
- *  client — artifacts of source-sheet date typos. Matches the client by
- *  slugified name (the sheet importer speaks in slugs; the table keys on id). */
+/** Housekeeping for this client's manual snapshots: (1) delete any row whose
+ *  period has NOT completed yet (period_end in the future) — an incomplete
+ *  current month or a "2027" typo, both of which are excluded from the board
+ *  anyway and only add noise; (2) dedupe, keeping the newest write per
+ *  (metric_key, period) so repeated imports don't pile up copies. Matches the
+ *  client by slugified name (the sheet speaks slugs; the table keys on id). */
 async function purgeFutureManualRows(databaseUrl: string, slug: string): Promise<number> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
@@ -341,14 +347,21 @@ async function purgeFutureManualRows(databaseUrl: string, slug: string): Promise
     const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const match = rows.find((r) => slugify(r.name) === slug);
     if (!match) return 0;
-    const res = await client.query(
+    const future = await client.query(
       `DELETE FROM metric_snapshots
-        WHERE client_id = $1 AND source = 'manual'
-          AND metric_key LIKE 'manual.%'
-          AND period_start > now()`,
+        WHERE client_id = $1 AND source = 'manual' AND metric_key LIKE 'manual.%'
+          AND period_end > now()`,
       [match.id],
     );
-    return res.rowCount ?? 0;
+    const dupes = await client.query(
+      `DELETE FROM metric_snapshots a USING metric_snapshots b
+        WHERE a.client_id = $1 AND a.source = 'manual' AND a.metric_key LIKE 'manual.%'
+          AND b.client_id = a.client_id AND b.source = a.source AND b.metric_key = a.metric_key
+          AND coalesce(b.period_end, b.period_start) IS NOT DISTINCT FROM coalesce(a.period_end, a.period_start)
+          AND (b.synced_at > a.synced_at OR (b.synced_at = a.synced_at AND b.ctid > a.ctid))`,
+      [match.id],
+    );
+    return (future.rowCount ?? 0) + (dupes.rowCount ?? 0);
   } finally {
     await client.end();
   }
