@@ -1,7 +1,12 @@
 name: Verify roster (Ads reachability)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      login_customer_id:
+        description: "Manager (MCC) id to log in through, digits only. Default is the configured MCC."
+        required: false
+        default: "2141712409"
 
 jobs:
   verify:
@@ -19,5 +24,5 @@ jobs:
           GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
           GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
           GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
-          GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ inputs.login_customer_id }}
         run: npx tsx src/verify-all.ts
