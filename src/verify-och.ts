@@ -101,10 +101,28 @@ async function main() {
         else { GAP(`Could NOT auto-find OCH's Ads account. Accounts under MCC: ${cc.map((c: any) => `${c.customer_client?.descriptive_name} (${c.customer_client?.id})`).join(", ")}. Set OCH_ADS_CUSTOMER_ID.`); return; }
       } else PASS(`OCH Ads account (from OCH_ADS_CUSTOMER_ID): ${customerId}`);
 
-      const customer = api.Customer({ customer_id: customerId, login_customer_id: cfg.loginCustomerId, refresh_token: cfg.refreshToken });
-      const actions = await customer.query(`SELECT conversion_action.name, conversion_action.status, conversion_action.type FROM conversion_action WHERE conversion_action.name = '${CONVERSION_ACTION_NAME}'`);
-      if (actions.length > 0) PASS(`Conversion action "${CONVERSION_ACTION_NAME}" exists (status ${(actions[0] as any).conversion_action.status}). Ready to receive uploads.`);
-      else GAP(`Conversion action "${CONVERSION_ACTION_NAME}" does not exist yet — the loop creates it automatically on its first real upload.`);
+      const q = `SELECT conversion_action.name, conversion_action.status FROM conversion_action WHERE conversion_action.name = '${CONVERSION_ACTION_NAME}'`;
+      // Try through the MCC first; if the account isn't under that manager,
+      // retry accessing it DIRECTLY (works when the OAuth user has direct
+      // access). This tells "the loop is reachable" apart from "the account
+      // needs linking in Google Ads".
+      let actions: any[] | null = null;
+      let reachedVia = "";
+      try {
+        actions = await api.Customer({ customer_id: customerId, login_customer_id: cfg.loginCustomerId, refresh_token: cfg.refreshToken }).query(q);
+        reachedVia = `via MCC ${cfg.loginCustomerId}`;
+      } catch {
+        try {
+          actions = await api.Customer({ customer_id: customerId, refresh_token: cfg.refreshToken }).query(q);
+          reachedVia = "directly (no manager header)";
+        } catch (e2: any) {
+          const d = e2?.errors?.map((x: any) => x.message).join("; ") || e2?.message || "unknown";
+          GAP(`Cannot reach OCH's Ads account ${customerId} either via the MCC or directly: ${d}. Likely OCH's account is not linked under MCC ${cfg.loginCustomerId} and this OAuth user has no direct access — link it in Google Ads (or grant access), then the daily Ads sync AND this loop both work.`);
+        }
+      }
+      if (actions) {
+        PASS(`Reachable ${reachedVia}. ${actions.length > 0 ? `Conversion action "${CONVERSION_ACTION_NAME}" exists (status ${actions[0].conversion_action.status}).` : `Conversion action not created yet — the loop creates it on first upload.`}`);
+      }
     } catch (e: any) {
       // google-ads-api throws structured error objects, not Error instances —
       // serialize so the real reason is visible instead of "[object Object]".
