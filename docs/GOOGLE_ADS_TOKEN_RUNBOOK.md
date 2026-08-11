@@ -15,41 +15,43 @@ or account-linking problem. Earlier the verifier's bare `catch` mislabeled it
 **refresh token itself is dead**. The account links are fine. The one thing to
 fix is the token.
 
-**Why a token dies on its own:** When a Google Cloud OAuth "consent screen" is
-in **Testing** publishing status, Google **expires every refresh token after 7
-days**. That exactly matches the "it worked, then broke a week later, again and
-again" pattern. So this runbook has two jobs: (1) stop the 7-day expiry for
-good, then (2) mint a fresh token.
+**CONFIRMED 2026-08-11: the OAuth app's User type is "Internal."** That changes
+the diagnosis:
 
-Do the parts **in order**. Part 1 is what stops this from recurring.
+- Internal apps have **no "Publishing status" / no "production" toggle** — that
+  UI only exists for External apps. So there is nothing to publish, and nothing
+  is wrong with not finding it.
+- Internal-app refresh tokens do **not** expire on the 7-day Testing cycle.
+- Therefore the "expired or revoked" error is **not** from expiry. For an
+  Internal app it means one of:
+  1. **The token was minted under a DIFFERENT OAuth client than the worker
+     uses.** A refresh token is bound to the exact client that created it; use
+     it with a different client and Google returns `invalid_grant` every time.
+     This is the most common cause and the most likely one here — the token
+     that got pasted in probably came from a different client (a desktop/
+     "installed" client, another project, or the Playground's own default
+     client) than `GOOGLE_ADS_CLIENT_ID`.
+  2. The token was **revoked** (someone reset the account's app access, changed
+     the password, or removed the user), or
+  3. The token went **6 months unused** (not the case for a daily job).
+
+**So skip publishing entirely.** The one reliable fix is to mint a fresh token
+under the **exact** client the worker uses, as a user who has Ads access. Because
+the app is Internal, that token then does **not** expire — so if the past
+breakage was a client mismatch, this fixes it permanently.
 
 ---
 
-## Part 1 — Stop the 7-day expiry (publish the OAuth consent screen)
+## Part 1 — (Internal app: nothing to do here)
 
-1. Open the OAuth consent screen:
-   **https://console.cloud.google.com/apis/credentials/consent**
-2. At the very top of the page, confirm the **project selector** shows the
-   project that owns your Ads OAuth client. That is the same project as the sync
-   service account — **`bs-llc-internal-tools`**. If a different project is
-   shown, click the selector and switch to `bs-llc-internal-tools`.
-3. Look at **"User type."**
-   - If it says **Internal** → refresh tokens do **not** expire for internal
-     apps. In that case the token didn't die from expiry; skip to Part 2 and
-     just re-mint (the old one was probably revoked or minted under a different
-     client). Nothing to publish.
-   - If it says **External** → continue to step 4. This is the likely case.
-4. Find **"Publishing status."**
-   - If it says **Testing** → click **"PUBLISH APP,"** then **Confirm** in the
-     dialog. Status should change to **"In production."** This is the fix that
-     stops the 7-day expiry.
-   - If it already says **In production** → leave it; go to Part 2.
-5. You do **not** need Google's app-verification review for this. The "adwords"
-   scope is "sensitive," but an unverified in-production app still works for
-   your own users; it just shows an "unverified app" warning at sign-in, which
-   you click through. (If you'd rather avoid the warning entirely and every user
-   is an `@bsllc.biz` Workspace member, you can instead set User type =
-   **Internal** — that also removes the 7-day expiry. Either path fixes it.)
+Your app's **User type = Internal**, which is the ideal setting for this — no
+verification review, no "unverified app" warning, and no token expiry. There is
+**no Publishing status to change** for Internal apps. Skip straight to Part 2.
+
+(If someone ever switches the app to **External**, come back: External +
+"Testing" is what expires tokens every 7 days, and you'd then publish it to
+"In production" at
+**https://console.cloud.google.com/apis/credentials/consent**.)
 
 ---
 
