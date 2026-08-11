@@ -76,6 +76,29 @@ async function main() {
     const { rows: up } = await pgc.query(`SELECT count(*) AS n FROM offline_conversion_uploads WHERE client_slug=$1`, [SHEET_CLIENT_SLUG]);
     console.log(`  Offline conversions uploaded so far: ${Number(up[0].n)}`);
 
+    // Ground truth for "why is the gclid blank": print the raw payload the
+    // website form actually POSTed for the most recent inquiry, plus what we
+    // parsed out of it. If the gclid value is present somewhere in raw_json but
+    // gclid is blank, the webhook's key-matching missed it (fix on our side).
+    // If it's absent from raw_json entirely, the form isn't sending it (fix on
+    // the form: the Request-Parameter default or the webhook field mapping).
+    const { rows: latest } = await pgc.query(
+      `SELECT submitted_at, first_name, last_name, email, phone, gclid, utm_source, raw_json
+         FROM web_inquiries WHERE client_slug=$1 ORDER BY submitted_at DESC LIMIT 1`,
+      [SHEET_CLIENT_SLUG],
+    );
+    if (latest[0]) {
+      const r = latest[0];
+      const rawHasGclid = typeof r.raw_json === "string" && /gclid/i.test(r.raw_json);
+      console.log(`\n=== C) LATEST INQUIRY — payload debug ===`);
+      console.log(`  when=${r.submitted_at} name="${r.first_name ?? ""} ${r.last_name ?? ""}" email=${r.email ?? "-"} phone=${r.phone ?? "-"}`);
+      console.log(`  parsed gclid=${r.gclid ? r.gclid : "(BLANK)"} · utm_source=${r.utm_source ?? "-"}`);
+      console.log(`  raw payload contains the text "gclid": ${rawHasGclid ? "YES" : "NO"}`);
+      console.log(`  raw_json: ${r.raw_json ?? "(none stored)"}`);
+    } else {
+      GAP("No inquiries stored yet for OCH.");
+    }
+
     // Google Ads reachability (find-only).
     try {
       const cfg = { clientId: env("GOOGLE_ADS_CLIENT_ID"), clientSecret: env("GOOGLE_ADS_CLIENT_SECRET"), developerToken: env("GOOGLE_ADS_DEVELOPER_TOKEN"), refreshToken: env("GOOGLE_ADS_REFRESH_TOKEN"), loginCustomerId: digits(env("GOOGLE_ADS_LOGIN_CUSTOMER_ID")) };
