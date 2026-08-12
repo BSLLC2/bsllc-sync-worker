@@ -2,27 +2,37 @@
 import "dotenv/config";
 import pg from "pg";
 
-/** Diagnostic: confirm the columns the dashboard's /api/clients/:id path depends
- *  on actually exist in production, and run the exact selects Drizzle issues. */
+/** Verify the client-detail metric-trend query: the OLD form (ORDER BY on a
+ *  UNION) should error; the NEW form (union wrapped in a subquery) should work. */
 function env(n: string): string { const v = process.env[n]; if (!v?.trim()) throw new Error(`Missing ${n}`); return v.trim(); }
+const OCH = "1bc64fac-f1ef-45ed-9815-f11cbe65cdae";
 
 async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
+  const params = [OCH, "manual", "manual.admissions_marketing"];
+  const cols = `client_id, source, metric_key, value_numeric, value_text, period_start, period_end, data_state, error_message, synced_at`;
+  const broken = `
+    SELECT ${cols} FROM metric_snapshots
+    WHERE client_id=$1 AND source=$2 AND metric_key=$3 AND data_state='live' AND value_numeric IS NOT NULL AND (period_end IS NULL OR period_end<=now())
+    UNION ALL
+    SELECT ${cols} FROM manual_metrics
+    WHERE client_id=$1 AND source=$2 AND metric_key=$3 AND data_state='live' AND value_numeric IS NOT NULL AND (period_end IS NULL OR period_end<=now())
+    ORDER BY COALESCE(period_end, synced_at) DESC LIMIT 500`;
+  const fixed = `
+    SELECT ${cols} FROM (
+      SELECT ${cols} FROM metric_snapshots
+      WHERE client_id=$1 AND source=$2 AND metric_key=$3 AND data_state='live' AND value_numeric IS NOT NULL AND (period_end IS NULL OR period_end<=now())
+      UNION ALL
+      SELECT ${cols} FROM manual_metrics
+      WHERE client_id=$1 AND source=$2 AND metric_key=$3 AND data_state='live' AND value_numeric IS NOT NULL AND (period_end IS NULL OR period_end<=now())
+    ) t
+    ORDER BY COALESCE(period_end, synced_at) DESC LIMIT 500`;
   try {
-    for (const t of ["client_meetings", "client_feedback"]) {
-      const r = await c.query(`SELECT column_name FROM information_schema.columns WHERE table_name=$1 ORDER BY 1`, [t]);
-      console.log(`${t}: ${r.rows.map((x) => x.column_name).join(", ")}`);
-    }
-    const tries: Array<[string, string]> = [
-      ["SELECT * FROM client_meetings", "SELECT * FROM client_meetings LIMIT 1"],
-      ["client_feedback new cols", "SELECT id, commitment_id, author_side FROM client_feedback LIMIT 1"],
-      ["client_meetings shared_with_client", "SELECT shared_with_client FROM client_meetings LIMIT 1"],
-    ];
-    for (const [label, q] of tries) {
-      try { await c.query(q); console.log(`  ${label}: OK`); }
-      catch (e) { console.log(`  ${label}: ERROR — ${e instanceof Error ? e.message : e}`); }
-    }
+    try { const r = await c.query(broken, params); console.log(`OLD form: unexpectedly OK (${r.rowCount} rows)`); }
+    catch (e) { console.log(`OLD form: ERROR (expected) — ${e instanceof Error ? e.message : e}`); }
+    try { const r = await c.query(fixed, params); console.log(`NEW form: OK — ${r.rowCount} rows returned`); }
+    catch (e) { console.log(`NEW form: ERROR (bad!) — ${e instanceof Error ? e.message : e}`); }
   } finally { await c.end(); }
 }
 main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
