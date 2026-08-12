@@ -1,0 +1,28 @@
+name: Notify client comments (Slack)
+
+# Posts to Slack when a client leaves a comment on their report. Runs on a
+# schedule (every 10 min) and can be dispatched manually. Needs the repo secret
+# SLACK_WEBHOOK_URL (a Slack Incoming Webhook). No-op if that secret is unset.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: notify-comments
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Send notifications
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: npx tsx src/notify-comments.ts
