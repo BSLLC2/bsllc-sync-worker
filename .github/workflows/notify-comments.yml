@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+    inputs:
+      test_post:
+        description: "Send a one-off connectivity test message to Slack, then exit"
+        type: boolean
+        default: false
 
 concurrency:
   group: notify-comments
@@ -25,4 +30,5 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TEST_POST: ${{ github.event.inputs.test_post == 'true' && '1' || '' }}
         run: npx tsx src/notify-comments.ts

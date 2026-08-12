@@ -17,6 +17,17 @@ async function main() {
   const webhook = process.env.SLACK_WEBHOOK_URL?.trim();
   if (!webhook) { console.log("SLACK_WEBHOOK_URL not set — nothing to do."); return; }
 
+  // One-off connectivity check: posts a sample message so we can confirm the
+  // webhook works even before a real client comment exists.
+  if (process.env.TEST_POST === "1") {
+    const res = await fetch(webhook, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: ":white_check_mark: *BS LLC dashboard* — client-comment notifications are connected. You'll get a message here whenever a client comments on their report." }),
+    });
+    console.log(res.ok ? "Test post: sent OK — check Slack." : `Test post: FAILED (${res.status}).`);
+    return;
+  }
+
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
