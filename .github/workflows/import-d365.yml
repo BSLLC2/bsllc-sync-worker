@@ -1,0 +1,69 @@
+name: Import D365 Closed Won
+
+# Pulls DPG Closed Won opportunities from Dynamics 365 / Dataverse, attributes
+# each deal off the Contact's first-touch source, and plants monthly d365.*
+# revenue buckets (bsllc / other / unknown / manual) via `npm run sync`.
+# Idempotent — safe to re-run. See worker docs/D365_CLOSED_WON_BRIEF.md.
+#
+# Non-secret identifiers (tenant/client id, org URL) live here in the open, the
+# same way the Google Ads MCC id does; only DYNAMICS_CLIENT_SECRET is a secret.
+on:
+  schedule:
+    - cron: "50 7 * * *" # 07:50 UTC daily, after HubSpot + OCH + GA4
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse + print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: d365-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run D365 import
+        working-directory: worker
+        env:
+          # Non-secret identifiers (safe in the open).
+          DYNAMICS_TENANT_ID: "ac0f116c-73d5-4a33-92ab-c69f79f06055"
+          DYNAMICS_CLIENT_ID: "8f9c4bee-bcae-4347-80d4-7ee0449ce4de"
+          DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
+          # Secret.
+          DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-d365 -- --dry-run
+          else
+            npm run import-d365
+          fi

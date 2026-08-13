@@ -1,0 +1,24 @@
+name: Verify D365 (read-only)
+
+# Mints a token and pulls Closed Won opportunities to confirm credentials and
+# the service principal's read access. Writes nothing. Run this first, after
+# adding the DYNAMICS_CLIENT_SECRET repo secret, before enabling the importer.
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Verify D365 connectivity + attribution
+        env:
+          DYNAMICS_TENANT_ID: "ac0f116c-73d5-4a33-92ab-c69f79f06055"
+          DYNAMICS_CLIENT_ID: "8f9c4bee-bcae-4347-80d4-7ee0449ce4de"
+          DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
+          DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
+        run: npm run verify-d365

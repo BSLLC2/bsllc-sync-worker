@@ -15,6 +15,8 @@
     "import-web-inquiries": "tsx src/import-web-inquiries.ts",
     "import-offline-conversions": "tsx src/import-offline-conversions.ts",
     "import-ga4": "tsx src/import-ga4.ts",
+    "import-d365": "tsx src/import-d365.ts",
+    "verify-d365": "tsx src/verify-d365.ts",
     "import-email": "tsx src/import-email.ts",
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
