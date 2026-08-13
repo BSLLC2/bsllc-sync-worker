@@ -69,14 +69,17 @@ export async function pullWindow(
       return await api
         .Customer({ customer_id: customerId, login_customer_id: cfg.loginCustomerId, refresh_token: cfg.refreshToken })
         .query(query);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/authorization|permission|login-customer-id|USER_PERMISSION_DENIED/i.test(msg)) {
+    } catch (mccErr) {
+      // The google-ads-api error object doesn't surface the reason on `.message`,
+      // so don't try to classify it — just retry directly (no manager header).
+      // If the direct call also fails, throw THAT error (the more relevant one).
+      try {
         return await api
           .Customer({ customer_id: customerId, refresh_token: cfg.refreshToken })
           .query(query);
+      } catch {
+        throw mccErr;
       }
-      throw err;
     }
   };
   const rows = await runQuery();
