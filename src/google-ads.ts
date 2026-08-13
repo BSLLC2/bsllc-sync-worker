@@ -57,14 +57,29 @@ export async function pullWindow(
   queryStart: string,
   queryEnd: string,
 ): Promise<WindowResult> {
-  const customer = api.Customer({
-    customer_id: customerId,
-    login_customer_id: cfg.loginCustomerId,
-    refresh_token: cfg.refreshToken,
-  });
-
   const query = GAQL.replace("{{start}}", queryStart).replace("{{end}}", queryEnd);
-  const rows = await customer.query(query);
+  // Accounts reach us two ways: some are under the BS LLC manager (MCC), others
+  // are shared directly with the authenticated user. Try the MCC login-customer-id
+  // first, and on a permission/authorization error fall back to a direct call (no
+  // manager header) — the same dual path verify-all/verify-och use. Without this
+  // fallback, directly-shared accounts (e.g. OCH) fail with authorization_error=2
+  // "the manager's customer id must be set", even though they're reachable directly.
+  const runQuery = async () => {
+    try {
+      return await api
+        .Customer({ customer_id: customerId, login_customer_id: cfg.loginCustomerId, refresh_token: cfg.refreshToken })
+        .query(query);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/authorization|permission|login-customer-id|USER_PERMISSION_DENIED/i.test(msg)) {
+        return await api
+          .Customer({ customer_id: customerId, refresh_token: cfg.refreshToken })
+          .query(query);
+      }
+      throw err;
+    }
+  };
+  const rows = await runQuery();
 
   if (!rows.length) return { state: "no_data", metrics: {} };
   const m = (rows[0]?.metrics ?? {}) as Record<string, unknown>;
