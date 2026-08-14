@@ -1,8 +1,11 @@
 name: Nightly DB backup
 
-# Belt-and-suspenders on top of Neon's own point-in-time recovery: a nightly
-# pg_dump of the whole database, gzipped and kept as a GitHub artifact (30-day
-# retention) so we always have a portable, restorable snapshot off Neon.
+# Belt-and-suspenders on top of Neon's point-in-time recovery: a nightly
+# pg_dump of the whole database. When BACKUP_PASSPHRASE is set the dump is
+# GPG-encrypted (AES-256) before it leaves the runner, integrity-checked, kept
+# as a 90-day GitHub artifact, and (if BACKUP_DRIVE_FOLDER_ID is set) copied to
+# an offsite Google Drive folder. This is a lot of client PII — see
+# docs/BACKUP_RESTORE_RUNBOOK.md for setup + how to restore.
 on:
   schedule:
     - cron: "0 8 * * *" # 08:00 UTC, after the daily imports
@@ -16,6 +19,8 @@ jobs:
   backup:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Install pg_dump 16 (matches Neon's server major)
         run: |
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
@@ -23,19 +28,51 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client-16
 
-      - name: Dump database
+      - name: Dump + encrypt
+        id: dump
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
+          set -euo pipefail
           ts=$(date -u +%Y%m%dT%H%M%SZ)
-          pg_dump "$DATABASE_URL" --no-owner --no-privileges --format=plain \
-            | gzip -9 > "bsllc-db-$ts.sql.gz"
-          ls -lh bsllc-db-*.sql.gz
+          base="bsllc-db-$ts.sql.gz"
+          pg_dump "$DATABASE_URL" --no-owner --no-privileges --format=plain | gzip -9 > "$base"
+          if [ -n "${BACKUP_PASSPHRASE:-}" ]; then
+            enc="$base.gpg"
+            gpg --batch --yes --passphrase "$BACKUP_PASSPHRASE" --cipher-algo AES256 --symmetric -o "$enc" "$base"
+            # Integrity check: decrypt + verify the gzip stream, then shred the plaintext.
+            gpg --batch --yes --passphrase "$BACKUP_PASSPHRASE" -d "$enc" | gunzip -t
+            echo "Encrypted + integrity-verified: $enc"
+            shred -u "$base" 2>/dev/null || rm -f "$base"
+            echo "file=$enc" >> "$GITHUB_OUTPUT"
+            echo "encrypted=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::BACKUP_PASSPHRASE not set — backup is UNENCRYPTED. Add the secret to encrypt client PII at rest."
+            echo "file=$base" >> "$GITHUB_OUTPUT"
+            echo "encrypted=0" >> "$GITHUB_OUTPUT"
+          fi
+          ls -lh bsllc-db-*
 
-      - name: Upload backup artifact
+      - name: Upload backup artifact (90-day)
         uses: actions/upload-artifact@v4
         with:
           name: db-backup
-          path: "bsllc-db-*.sql.gz"
-          retention-days: 30
+          path: ${{ steps.dump.outputs.file }}
+          retention-days: 90
           if-no-files-found: error
+
+      - name: Copy to Google Drive (offsite)
+        if: ${{ steps.dump.outputs.encrypted == '1' }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          BACKUP_DRIVE_FOLDER_ID: ${{ secrets.BACKUP_DRIVE_FOLDER_ID }}
+          BACKUP_DRIVE_IMPERSONATE: ${{ secrets.BACKUP_DRIVE_IMPERSONATE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BACKUP_DRIVE_FOLDER_ID:-}" ]; then
+            echo "BACKUP_DRIVE_FOLDER_ID not set — skipping offsite copy (GitHub artifact still kept)."
+            exit 0
+          fi
+          npm ci
+          npm run upload-to-drive -- --file="${{ steps.dump.outputs.file }}"

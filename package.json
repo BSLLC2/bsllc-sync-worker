@@ -20,6 +20,7 @@
     "import-email": "tsx src/import-email.ts",
     "snapshot-mrr": "tsx src/snapshot-mrr.ts",
     "send-notifications": "tsx src/send-notifications.ts",
+    "upload-to-drive": "tsx src/upload-to-drive.ts",
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",
