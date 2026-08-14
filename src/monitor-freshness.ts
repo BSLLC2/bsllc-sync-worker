@@ -33,10 +33,17 @@ async function main() {
   try {
     await c.query(`CREATE TABLE IF NOT EXISTS job_heartbeats (job TEXT PRIMARY KEY, ran_at TIMESTAMPTZ NOT NULL DEFAULT now(), ok BOOLEAN NOT NULL DEFAULT true, note TEXT)`);
 
+    // Judge each source by the LATEST reading per (client, metric) so a source
+    // that errored earlier but has since synced clean isn't flagged as failing.
     const metric = await c.query<{ source: string; last_sync: Date | null; recent_errors: string }>(
-      `SELECT source, MAX(synced_at) AS last_sync,
-              COUNT(*) FILTER (WHERE data_state='error' AND synced_at > now() - interval '2 days') AS recent_errors
-         FROM metric_snapshots WHERE source <> 'manual' GROUP BY source`,
+      `WITH latest AS (
+         SELECT DISTINCT ON (client_id, metric_key) source, data_state, synced_at
+           FROM metric_snapshots WHERE source <> 'manual'
+          ORDER BY client_id, metric_key, synced_at DESC
+       )
+       SELECT source, MAX(synced_at) AS last_sync,
+              COUNT(*) FILTER (WHERE data_state='error') AS recent_errors
+         FROM latest GROUP BY source`,
     );
     const beats = await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats WHERE job <> 'freshness_monitor'`);
 
