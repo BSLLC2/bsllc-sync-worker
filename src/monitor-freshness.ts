@@ -34,41 +34,64 @@ async function main() {
     await c.query(`CREATE TABLE IF NOT EXISTS job_heartbeats (job TEXT PRIMARY KEY, ran_at TIMESTAMPTZ NOT NULL DEFAULT now(), ok BOOLEAN NOT NULL DEFAULT true, note TEXT)`);
 
     // Judge each source by the LATEST reading per (client, metric) so a source
-    // that errored earlier but has since synced clean isn't flagged as failing.
-    const metric = await c.query<{ source: string; last_sync: Date | null; recent_errors: string }>(
+    // that errored earlier but has since synced clean isn't flagged. Two distinct
+    // problems, kept separate so the alert is honest:
+    //   • DOWN   — the pipeline isn't flowing: nothing fresher than its SLA, or
+    //              its last job run failed. This is "an integration is broken".
+    //   • ERRORS — the pipeline IS flowing (fresh) but some client accounts have
+    //              an erroring latest reading, e.g. Google Ads fine for 6/8 but
+    //              2 accounts can't be pulled. Real, but not a dead integration.
+    const metric = await c.query<{ source: string; last_sync: Date | null; recent_errors: string; recent_total: string }>(
       `WITH latest AS (
          SELECT DISTINCT ON (client_id, metric_key) source, data_state, synced_at
            FROM metric_snapshots WHERE source <> 'manual'
           ORDER BY client_id, metric_key, synced_at DESC
        )
        SELECT source, MAX(synced_at) AS last_sync,
-              COUNT(*) FILTER (WHERE data_state='error') AS recent_errors
+              COUNT(*) FILTER (WHERE data_state='error') AS recent_errors,
+              COUNT(*) AS recent_total
          FROM latest GROUP BY source`,
+    );
+    // Which specific client/metric readings are erroring — printed for diagnosis.
+    const errDetail = await c.query<{ source: string; client_id: string | null; metric_key: string; error_message: string | null }>(
+      `SELECT source, client_id, metric_key, error_message FROM (
+         SELECT DISTINCT ON (client_id, metric_key) source, client_id, metric_key, data_state, error_message, synced_at
+           FROM metric_snapshots WHERE source <> 'manual'
+          ORDER BY client_id, metric_key, synced_at DESC
+       ) t WHERE data_state='error' ORDER BY source, client_id`,
     );
     const beats = await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats WHERE job <> 'freshness_monitor'`);
 
     const now = Date.now();
-    const failing: string[] = [], stale: string[] = [];
+    const down: string[] = [];
+    const erroring: { src: string; n: number; m: number }[] = [];
     for (const r of metric.rows) {
-      if (Number(r.recent_errors) > 0) { failing.push(r.source); continue; }
-      if (r.last_sync && (now - r.last_sync.getTime()) / 3_600_000 > (SLA[r.source] ?? 36)) stale.push(r.source);
+      const ageH = r.last_sync ? (now - r.last_sync.getTime()) / 3_600_000 : Infinity;
+      if (ageH > (SLA[r.source] ?? 36)) { down.push(r.source); continue; } // dark → down, regardless of errors
+      const n = Number(r.recent_errors);
+      if (n > 0) erroring.push({ src: r.source, n, m: Number(r.recent_total) });
     }
     for (const b of beats.rows) {
-      if (!b.ok) { failing.push(b.job); continue; }
-      if (b.ran_at && (now - b.ran_at.getTime()) / 3_600_000 > (SLA[b.job] ?? 36)) stale.push(b.job);
+      const ageH = b.ran_at ? (now - b.ran_at.getTime()) / 3_600_000 : Infinity;
+      if (!b.ok || ageH > (SLA[b.job] ?? 36)) down.push(b.job);
     }
 
-    const signature = [...failing.map((s) => `F:${s}`), ...stale.map((s) => `S:${s}`)].sort().join(",");
+    if (errDetail.rows.length) {
+      console.log("Erroring client readings (latest per client/metric):");
+      for (const e of errDetail.rows) console.log(`  ${e.source} · ${e.client_id ?? "—"} · ${e.metric_key}: ${(e.error_message ?? "").slice(0, 120)}`);
+    }
+
+    const signature = [...down.map((s) => `D:${s}`), ...erroring.map((e) => `E:${e.src}`)].sort().join(",");
     const prev = (await c.query<{ note: string | null }>(`SELECT note FROM job_heartbeats WHERE job = 'freshness_monitor'`)).rows[0]?.note ?? "";
-    console.log(`Freshness: ${failing.length} failing, ${stale.length} stale. signature="${signature}" prev="${prev}"`);
+    console.log(`Freshness: ${down.length} down, ${erroring.length} with errors. signature="${signature}" prev="${prev}"`);
 
     if (signature === prev) { console.log("No change — no alert."); return; }
 
     let text: string | null = null;
-    if (failing.length || stale.length) {
+    if (down.length || erroring.length) {
       const parts: string[] = [];
-      if (failing.length) parts.push(`:red_circle: *Failing:* ${failing.map(label).join(", ")}`);
-      if (stale.length) parts.push(`:large_yellow_circle: *Stale:* ${stale.map(label).join(", ")}`);
+      if (down.length) parts.push(`:red_circle: *Not flowing:* ${down.map(label).join(", ")}`);
+      if (erroring.length) parts.push(`:large_orange_circle: *Account errors:* ${erroring.map((e) => `${label(e.src)} (${e.n}/${e.m})`).join(", ")}`);
       text = `:satellite: *Data health changed*\n${parts.join("\n")}\n<${DASH}/#/admin/data-health|Open Data health →>`;
     } else if (prev) {
       text = `:white_check_mark: *Data pipelines recovered* — everything is flowing again.`;
@@ -85,7 +108,7 @@ async function main() {
     await c.query(
       `INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ('freshness_monitor', now(), $1, $2)
        ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = EXCLUDED.ok, note = EXCLUDED.note`,
-      [failing.length === 0, signature],
+      [down.length === 0, signature],
     );
   } finally {
     await c.end();
