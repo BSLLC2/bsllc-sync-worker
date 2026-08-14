@@ -1,0 +1,40 @@
+name: Send client notifications (email)
+
+# Sends the client-facing emails the dashboard enqueues in notifications_outbox
+# (v1: milestone review requests), from digital@ via the Gmail domain-wide
+# delegation. Requires the gmail.send scope on that delegation. Runs every
+# 10 min + on demand. No-op when the outbox is empty.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, send nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: send-notifications
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Send notifications
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          NOTIFY_FROM: "digital@bsllc.biz"
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run send-notifications -- --dry-run
+          else
+            npm run send-notifications
+          fi
