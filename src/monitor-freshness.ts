@@ -65,6 +65,19 @@ async function main() {
     );
     const beats = await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats WHERE job <> 'freshness_monitor'`);
 
+    // Subcontractor insurance (COI) expiring within 30 days or already lapsed —
+    // so a sub never works uninsured. Table may not exist yet on older DBs.
+    let coiRows: { name: string; expires_at: string; days: number }[] = [];
+    try {
+      coiRows = (await c.query<{ name: string; expires_at: string; days: number }>(
+        `SELECT s.name, d.expires_at, (d.expires_at::date - now()::date) AS days
+           FROM subcontractor_docs d JOIN subcontractors s ON s.id = d.subcontractor_id
+          WHERE d.kind='coi' AND d.expires_at IS NOT NULL AND d.expires_at <> ''
+            AND d.expires_at::date <= (now() + interval '30 days')::date
+          ORDER BY d.expires_at`,
+      )).rows;
+    } catch { /* table not present yet */ }
+
     const now = Date.now();
     const down: string[] = [];
     const erroring: { src: string; n: number; m: number }[] = [];
@@ -84,17 +97,32 @@ async function main() {
       for (const e of errDetail.rows) console.log(`  ${e.source} · ${e.client_id ?? "—"} · ${e.metric_key}: ${(e.error_message ?? "").slice(0, 120)}`);
     }
 
-    const signature = [...down.map((s) => `D:${s}`), ...erroring.map((e) => `E:${e.src}`)].sort().join(",");
+    const coiAlerts = coiRows.map((r) => ({ name: r.name, days: Number(r.days) }));
+    if (coiAlerts.length) {
+      console.log("COI expiring/expired:");
+      for (const r of coiAlerts) console.log(`  ${r.name}: ${r.days < 0 ? `EXPIRED ${-r.days}d ago` : `${r.days}d left`}`);
+    }
+
+    const signature = [
+      ...down.map((s) => `D:${s}`),
+      ...erroring.map((e) => `E:${e.src}`),
+      ...coiAlerts.map((r) => `C:${r.name}:${r.days < 0 ? "exp" : r.days <= 7 ? "7" : "30"}`),
+    ].sort().join(",");
     const prev = (await c.query<{ note: string | null }>(`SELECT note FROM job_heartbeats WHERE job = 'freshness_monitor'`)).rows[0]?.note ?? "";
     console.log(`Freshness: ${down.length} down, ${erroring.length} with errors. signature="${signature}" prev="${prev}"`);
 
     if (signature === prev) { console.log("No change — no alert."); return; }
 
+    const coiLine = coiAlerts.length
+      ? `:shield: *Insurance expiring:* ${coiAlerts.map((r) => `${r.name} (${r.days < 0 ? `expired ${-r.days}d ago` : `${r.days}d`})`).join(", ")}`
+      : "";
+
     let text: string | null = null;
-    if (down.length || erroring.length) {
+    if (down.length || erroring.length || coiAlerts.length) {
       const parts: string[] = [];
       if (down.length) parts.push(`:red_circle: *Not flowing:* ${down.map(label).join(", ")}`);
       if (erroring.length) parts.push(`:large_orange_circle: *Account errors:* ${erroring.map((e) => `${label(e.src)} (${e.n}/${e.m})`).join(", ")}`);
+      if (coiLine) parts.push(coiLine);
       text = `:satellite: *Data health changed*\n${parts.join("\n")}\n<${DASH}/#/admin/data-health|Open Data health →>`;
     } else if (prev) {
       text = `:white_check_mark: *Data pipelines recovered* — everything is flowing again.`;
