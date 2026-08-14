@@ -1,0 +1,37 @@
+name: Snapshot MRR history
+
+# Records each client's current monthly retainer into mrr_history so the
+# dashboard can show real year-to-date MRR growth. Runs monthly (and can be
+# dispatched). Pure Postgres copy of the app's own field — no third party.
+on:
+  schedule:
+    - cron: "10 6 1 * *" # 06:10 UTC on the 1st of each month
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: snapshot-mrr
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Snapshot MRR
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run snapshot-mrr -- --dry-run
+          else
+            npm run snapshot-mrr
+          fi

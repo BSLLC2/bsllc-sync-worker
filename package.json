@@ -18,6 +18,7 @@
     "import-d365": "tsx src/import-d365.ts",
     "verify-d365": "tsx src/verify-d365.ts",
     "import-email": "tsx src/import-email.ts",
+    "snapshot-mrr": "tsx src/snapshot-mrr.ts",
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",
