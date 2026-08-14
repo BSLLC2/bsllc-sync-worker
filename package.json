@@ -18,6 +18,8 @@
     "import-d365": "tsx src/import-d365.ts",
     "verify-d365": "tsx src/verify-d365.ts",
     "import-email": "tsx src/import-email.ts",
+    "import-seo": "tsx src/import-seo.ts",
+    "import-aeo": "tsx src/import-aeo.ts",
     "snapshot-mrr": "tsx src/snapshot-mrr.ts",
     "send-notifications": "tsx src/send-notifications.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",

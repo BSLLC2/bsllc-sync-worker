@@ -16,12 +16,12 @@ const DASH = (process.env.DASHBOARD_URL || "https://bsllc-account-health.vercel.
 
 // Expected freshness per pipeline (hours) — mirrors the dashboard cockpit.
 const SLA: Record<string, number> = {
-  google_ads: 36, ga4: 36, gsc: 36, hubspot: 36, d365: 36, semrush: 192,
-  email_import: 3, db_backup: 36, mrr_snapshot: 840, review_email: 2, comment_notify: 2, d365_import: 36, incremental_ads: 36,
+  google_ads: 36, ga4: 36, gsc: 36, hubspot: 36, d365: 36, semrush: 192, seo: 192, aeo: 192,
+  email_import: 3, db_backup: 36, mrr_snapshot: 840, review_email: 2, comment_notify: 2, d365_import: 36, incremental_ads: 36, seo_import: 192, aeo_import: 192,
 };
 const LABEL: Record<string, string> = {
-  google_ads: "Google Ads", ga4: "GA4", gsc: "Search Console", hubspot: "HubSpot", d365: "Dynamics 365", semrush: "Semrush",
-  email_import: "Email import", db_backup: "DB backup", mrr_snapshot: "MRR snapshot", review_email: "Review emails", comment_notify: "Comment alerts", d365_import: "D365 import", incremental_ads: "Ads sync",
+  google_ads: "Google Ads", ga4: "GA4", gsc: "Search Console", hubspot: "HubSpot", d365: "Dynamics 365", semrush: "Semrush", seo: "SEO ranks", aeo: "AI visibility",
+  email_import: "Email import", db_backup: "DB backup", mrr_snapshot: "MRR snapshot", review_email: "Review emails", comment_notify: "Comment alerts", d365_import: "D365 import", incremental_ads: "Ads sync", seo_import: "SEO import", aeo_import: "AEO import",
 };
 const label = (s: string) => LABEL[s] ?? s;
 

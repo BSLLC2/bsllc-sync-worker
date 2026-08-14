@@ -7,7 +7,7 @@ import type { Config } from "./config.js";
 /** One entry in the dashboard's sync contract (see SYNC_INTERFACE.md). */
 export interface SyncEntry {
   client_id: string;
-  source: "google_ads" | "gsc" | "ga4" | "d365" | "hubspot" | "manual";
+  source: "google_ads" | "gsc" | "ga4" | "d365" | "hubspot" | "seo" | "aeo" | "manual";
   external_id?: string;
   period_start: string;
   period_end: string;
