@@ -1,0 +1,49 @@
+name: QBO — estimate on quote signature
+
+# When a Quote Designer quote is signed, create a QuickBooks estimate (customer
+# + line items) in the sandbox/prod company and record the estimate id back on
+# the quote. Estimate first (non-binding); invoicing is a follow-up. Runs every
+# 15 min + on demand. No-op when nothing new is signed.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, write nothing to QBO (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: import-qbo-invoices
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Sync signed quotes to QBO
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+          QBO_DEFAULT_ITEM_ID: ${{ secrets.QBO_DEFAULT_ITEM_ID }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-qbo-invoices -- --dry-run
+          else
+            npm run import-qbo-invoices
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=qbo_estimate --status=${{ job.status }}
