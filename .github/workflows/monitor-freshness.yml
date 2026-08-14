@@ -1,0 +1,38 @@
+name: Monitor data freshness (Slack)
+
+# Alerts Slack when a data pipeline goes stale or starts failing (and when it
+# recovers). Edge-triggered — only posts when the set of stale/failing pipelines
+# changes, so it's a heads-up, not spam. Reuses SLACK_WEBHOOK_URL.
+on:
+  schedule:
+    - cron: "0 * * * *" # hourly
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute + print only, post nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: monitor-freshness
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Check freshness
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run monitor-freshness -- --dry-run
+          else
+            npm run monitor-freshness
+          fi

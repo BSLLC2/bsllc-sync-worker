@@ -65,3 +65,9 @@ jobs:
           else
             npm run import-email -- --days="$DAYS"
           fi
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=email_import --status=${{ job.status }}

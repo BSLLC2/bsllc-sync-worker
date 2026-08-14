@@ -35,3 +35,8 @@ jobs:
           else
             npm run snapshot-mrr
           fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=mrr_snapshot --status=${{ job.status }}
