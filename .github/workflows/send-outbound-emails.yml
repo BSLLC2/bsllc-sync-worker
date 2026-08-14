@@ -1,0 +1,45 @@
+name: Send outbound emails (queue)
+
+# Drains the dashboard's outbound_emails queue (v1: subcontractor onboarding
+# invites) from digital@ via the Gmail domain-wide delegation. Requires the
+# gmail.send scope on that delegation. Runs every 10 min + on demand. No-op
+# when the queue is empty.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, send nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: send-outbound-emails
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Send outbound emails
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          NOTIFY_FROM: "digital@bsllc.biz"
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run send-outbound-emails -- --dry-run
+          else
+            npm run send-outbound-emails
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=outbound_email --status=${{ job.status }}

@@ -24,6 +24,7 @@
     "import-webops": "tsx src/import-webops.ts",
     "snapshot-mrr": "tsx src/snapshot-mrr.ts",
     "send-notifications": "tsx src/send-notifications.ts",
+    "send-outbound-emails": "tsx src/send-outbound-emails.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",
     "heartbeat": "tsx src/heartbeat.ts",
     "monitor-freshness": "tsx src/monitor-freshness.ts",
