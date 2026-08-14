@@ -1,0 +1,56 @@
+name: Import Search Console (API)
+
+# Daily live pull from Google Search Console (replaces the CSV-only importer, so
+# organic search data auto-refreshes). Reads each client's property from Admin →
+# Connectors (source='gsc') and plants a trailing-30-day gsc.* snapshot via
+# `npm run sync`. Needs GOOGLE_SERVICE_ACCOUNT_JSON (added as a user on each GSC
+# property) + DATABASE_URL + DASHBOARD_REPO_TOKEN.
+on:
+  schedule:
+    - cron: "50 7 * * *" # 07:50 UTC daily, after GA4
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pull + print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: gsc-api-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+      - name: Run GSC import
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-gsc-api -- --dry-run
+          else
+            npm run import-gsc-api
+          fi
