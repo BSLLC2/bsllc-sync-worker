@@ -48,8 +48,11 @@ async function main() {
           ORDER BY client_id, metric_key, synced_at DESC
        )
        SELECT source, MAX(synced_at) AS last_sync,
-              COUNT(*) FILTER (WHERE data_state='error') AS recent_errors,
-              COUNT(*) AS recent_total
+              -- Only recent errors count. A weeks-old error is a retired metric
+              -- key no importer refreshes any more (e.g. ads.*_cents), not a live
+              -- failure — otherwise it inflates the error rate forever.
+              COUNT(*) FILTER (WHERE data_state='error' AND synced_at > now() - interval '8 days') AS recent_errors,
+              COUNT(*) FILTER (WHERE synced_at > now() - interval '8 days') AS recent_total
          FROM latest GROUP BY source`,
     );
     // Which specific client/metric readings are erroring — printed for diagnosis.
@@ -58,7 +61,7 @@ async function main() {
          SELECT DISTINCT ON (client_id, metric_key) source, client_id, metric_key, data_state, error_message, synced_at
            FROM metric_snapshots WHERE source <> 'manual'
           ORDER BY client_id, metric_key, synced_at DESC
-       ) t WHERE data_state='error' ORDER BY source, client_id`,
+       ) t WHERE data_state='error' AND synced_at > now() - interval '8 days' ORDER BY source, client_id`,
     );
     const beats = await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats WHERE job <> 'freshness_monitor'`);
 
