@@ -118,7 +118,10 @@ async function main() {
 
   const companies = hsCompanies.map((c) => ({
     hubspotId: c.id,
-    name: c.properties.name || "(unnamed company)",
+    // Fall back to the domain (then a short id) rather than a wall of identical
+    // "(unnamed company)" rows — HubSpot auto-creates nameless companies from
+    // email domains, and those flood every company picker otherwise.
+    name: c.properties.name?.trim() || c.properties.domain?.trim() || `Company ${String(c.id).slice(-6)}`,
     domain: c.properties.domain || null,
     industry: c.properties.industry || null,
     ownerName: c.properties.hubspot_owner_id ? owners.get(String(c.properties.hubspot_owner_id)) ?? null : null,
