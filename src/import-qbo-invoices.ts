@@ -4,10 +4,12 @@ import pg from "pg";
 import { QboClient } from "./qbo.js";
 
 /**
- * On quote signature → QuickBooks. Finds signed quotes that haven't been synced
- * to QBO yet and creates an ESTIMATE (customer + line items) in the sandbox/prod
- * company, then records the estimate id back on the quote. Estimate first (safe,
- * non-binding); true invoicing is a follow-up gated behind QBO_AUTO_INVOICE.
+ * On quote signature → QuickBooks. Finds signed quotes and, in the sandbox/prod
+ * company, creates:
+ *   • an ESTIMATE (always) — the accepted quote as a non-binding QBO record, and
+ *   • an INVOICE (when QBO_AUTO_INVOICE=true) — the billable document, emailed to
+ *     the signer if we have their address.
+ * The estimate/invoice ids are recorded back on the quote so it's idempotent.
  *
  * The deployed app writes zero to QBO — it just marks quotes signed; this worker
  * job is the only thing that touches QuickBooks.
@@ -21,18 +23,21 @@ interface Line { id: string; name: string; description?: string; qty: number; un
 
 async function main() {
   const dryRun = process.argv.slice(2).includes("--dry-run");
+  const autoInvoice = (process.env.QBO_AUTO_INVOICE || "").trim().toLowerCase() === "true";
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
-    const { rows } = await c.query<{ id: string; quote_number: string | null; client_name: string; line_items_json: string | null; signed_email: string | null }>(
-      `SELECT id, quote_number, client_name, line_items_json, signed_email
+    // Need an estimate whenever it's missing; also need an invoice when
+    // auto-invoicing is on and one hasn't been created yet.
+    const { rows } = await c.query<{ id: string; quote_number: string | null; client_name: string; line_items_json: string | null; signed_email: string | null; qbo_estimate_id: string | null; qbo_invoice_id: string | null }>(
+      `SELECT id, quote_number, client_name, line_items_json, signed_email, qbo_estimate_id, qbo_invoice_id
          FROM pricing_quotes
         WHERE status = 'signed' AND kind = 'designer'
-          AND qbo_estimate_id IS NULL
+          AND (qbo_estimate_id IS NULL ${autoInvoice ? "OR qbo_invoice_id IS NULL" : ""})
         ORDER BY signed_at ASC NULLS LAST
         LIMIT 50`,
     );
-    console.log(`import-qbo-invoices — ${rows.length} signed quote(s) to sync${dryRun ? " (dry-run)" : ""}`);
+    console.log(`import-qbo-invoices — ${rows.length} signed quote(s) to sync${autoInvoice ? " (auto-invoice ON)" : ""}${dryRun ? " (dry-run)" : ""}`);
     if (rows.length === 0) return;
 
     const qbo = new QboClient(c);
@@ -52,15 +57,25 @@ async function main() {
         console.log(`  skip ${r.quote_number}: no line items`);
         continue;
       }
+      const needEstimate = !r.qbo_estimate_id;
+      const needInvoice = autoInvoice && !r.qbo_invoice_id;
       if (dryRun) {
-        console.log(`  would create estimate for ${r.client_name} (${r.quote_number}) — ${lines.length} line(s), $${lines.reduce((s, l) => s + l.amount, 0).toFixed(2)}`);
+        const total = lines.reduce((s, l) => s + l.amount, 0).toFixed(2);
+        console.log(`  would ${[needEstimate && "estimate", needInvoice && "invoice"].filter(Boolean).join(" + ")} for ${r.client_name} (${r.quote_number}) — $${total}`);
         done++; continue;
       }
       try {
         const customerId = await qbo.findOrCreateCustomer(r.client_name || "Client", r.signed_email);
-        const estimateId = await qbo.createEstimate(customerId, lines);
-        await c.query(`UPDATE pricing_quotes SET qbo_estimate_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, estimateId]);
-        console.log(`  ✓ ${r.client_name} (${r.quote_number}) → QBO estimate ${estimateId}`);
+        if (needEstimate) {
+          const estimateId = await qbo.createEstimate(customerId, lines);
+          await c.query(`UPDATE pricing_quotes SET qbo_estimate_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, estimateId]);
+          console.log(`  ✓ ${r.client_name} (${r.quote_number}) → estimate ${estimateId}`);
+        }
+        if (needInvoice) {
+          const invoiceId = await qbo.createInvoice(customerId, lines, { email: r.signed_email });
+          await c.query(`UPDATE pricing_quotes SET qbo_invoice_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, invoiceId]);
+          console.log(`  ✓ ${r.client_name} (${r.quote_number}) → invoice ${invoiceId}`);
+        }
         done++;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);

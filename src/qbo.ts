@@ -88,19 +88,37 @@ export class QboClient {
     return created.Customer.Id;
   }
 
-  /** Create an estimate from line items. Amounts are dollars. */
-  async createEstimate(customerId: string, lines: { name: string; amount: number; itemId?: string | null; monthly?: boolean }[]): Promise<string> {
+  private buildLines(lines: QboLine[]) {
     const defaultItem = process.env.QBO_DEFAULT_ITEM_ID?.trim() || "1";
-    const Line = lines.filter((l) => l.amount > 0).map((l) => ({
+    return lines.filter((l) => l.amount > 0).map((l) => ({
       DetailType: "SalesItemLineDetail",
       Amount: Math.round(l.amount * 100) / 100,
       Description: l.monthly ? `${l.name} (monthly)` : l.name,
       SalesItemLineDetail: { ItemRef: { value: l.itemId || defaultItem } },
     }));
+  }
+
+  /** Create an estimate from line items. Amounts are dollars. */
+  async createEstimate(customerId: string, lines: QboLine[]): Promise<string> {
     const est = await this.call<{ Estimate: { Id: string } }>("POST", "estimate", {
       CustomerRef: { value: customerId },
-      Line,
+      Line: this.buildLines(lines),
     });
     return est.Estimate.Id;
   }
+
+  /** Create an invoice from line items. Amounts are dollars. Optionally link the
+   *  originating estimate and set an email + due date. */
+  async createInvoice(customerId: string, lines: QboLine[], opts?: { email?: string | null; dueDate?: string | null }): Promise<string> {
+    const body: Record<string, unknown> = {
+      CustomerRef: { value: customerId },
+      Line: this.buildLines(lines),
+    };
+    if (opts?.email) { body.BillEmail = { Address: opts.email }; body.EmailStatus = "NeedToSend"; }
+    if (opts?.dueDate) body.DueDate = opts.dueDate;
+    const inv = await this.call<{ Invoice: { Id: string } }>("POST", "invoice", body);
+    return inv.Invoice.Id;
+  }
 }
+
+export interface QboLine { name: string; amount: number; itemId?: string | null; monthly?: boolean }

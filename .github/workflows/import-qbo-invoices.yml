@@ -36,6 +36,7 @@ jobs:
           QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
           QBO_ENV: ${{ secrets.QBO_ENV }}
           QBO_DEFAULT_ITEM_ID: ${{ secrets.QBO_DEFAULT_ITEM_ID }}
+          QBO_AUTO_INVOICE: ${{ secrets.QBO_AUTO_INVOICE }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             npm run import-qbo-invoices -- --dry-run
