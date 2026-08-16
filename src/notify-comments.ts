@@ -9,7 +9,7 @@ import pg from "pg";
  * schema doesn't need to know about it). First run baselines existing comments
  * so we never spam a backlog — only comments from the last few days notify.
  */
-const DASH = "https://bsllc-account-health.vercel.app";
+const DASH = (process.env.DASHBOARD_URL || "https://bsllc-account-health.vercel.app").replace(/\/+$/, "");
 const RECENT_DAYS = 3;
 function env(n: string): string { const v = process.env[n]; if (!v?.trim()) throw new Error(`Missing ${n}`); return v.trim(); }
 
