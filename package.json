@@ -27,6 +27,7 @@
     "send-outbound-emails": "tsx src/send-outbound-emails.ts",
     "send-push": "tsx src/send-push.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
+    "run-research": "tsx src/run-research.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",
     "heartbeat": "tsx src/heartbeat.ts",
     "monitor-freshness": "tsx src/monitor-freshness.ts",

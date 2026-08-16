@@ -202,3 +202,36 @@ export async function aeoCheck(
     return { prompt, provider, mentioned: false, cited: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
+
+// ── Keyword research (DataForSEO Labs) ──────────────────────────────────────
+
+export interface KeywordIdea { keyword: string; volume: number | null; cpc: number | null; competition: number | null }
+
+/**
+ * Keyword ideas for a seed term — the SEMrush "keyword magic" replacement.
+ * Uses DataForSEO Labs keyword_ideas (Google). Returns related keywords with
+ * monthly search volume, CPC, and competition (0–1), sorted by volume desc.
+ */
+export async function keywordResearch(
+  creds: DfsCreds,
+  seed: string,
+  locationName = "United States",
+  languageName = "English",
+  limit = 100,
+): Promise<KeywordIdea[]> {
+  const payload = [{ keywords: [seed], location_name: locationName, language_name: languageName, limit, order_by: ["keyword_info.search_volume,desc"] }];
+  const resp = await post(creds, "/dataforseo_labs/google/keyword_ideas/live", payload);
+  const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  if (!rt || rt.status_code !== 20000) throw new Error(rt?.status_message || "DataForSEO returned no result");
+  const result = Array.isArray(rt.result) ? rt.result[0] : null;
+  const items: any[] = Array.isArray(result?.items) ? result.items : [];
+  return items.map((it) => {
+    const info = it?.keyword_info ?? it?.keyword_data?.keyword_info ?? {};
+    return {
+      keyword: it?.keyword ?? it?.keyword_data?.keyword ?? "",
+      volume: typeof info.search_volume === "number" ? info.search_volume : null,
+      cpc: typeof info.cpc === "number" ? info.cpc : null,
+      competition: typeof info.competition === "number" ? info.competition : null,
+    } as KeywordIdea;
+  }).filter((k) => k.keyword);
+}

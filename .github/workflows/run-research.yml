@@ -1,0 +1,44 @@
+name: Run research (DataForSEO)
+
+# Runs queued keyword-research requests against DataForSEO. The app enqueues in
+# research_requests; this writes results back. Runs every 2 min + on demand.
+# No-op when nothing is pending.
+on:
+  schedule:
+    - cron: "*/2 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: run-research
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run research
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run run-research -- --dry-run
+          else
+            npm run run-research
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=research --status=${{ job.status }}
