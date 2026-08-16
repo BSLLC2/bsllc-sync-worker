@@ -1,0 +1,45 @@
+name: Send push notifications
+
+# Browser push for new client comments. The app stores subscriptions + comments;
+# this worker holds the VAPID keys and sends. Runs every 5 min + on demand.
+# No-op when there are no new comments or no subscriptions.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, send nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: send-push
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Send push
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run send-push -- --dry-run
+          else
+            npm run send-push
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=push_notify --status=${{ job.status }}

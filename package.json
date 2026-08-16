@@ -25,6 +25,7 @@
     "snapshot-mrr": "tsx src/snapshot-mrr.ts",
     "send-notifications": "tsx src/send-notifications.ts",
     "send-outbound-emails": "tsx src/send-outbound-emails.ts",
+    "send-push": "tsx src/send-push.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",
     "heartbeat": "tsx src/heartbeat.ts",
@@ -35,10 +36,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@types/web-push": "^3.6.4",
     "dotenv": "^17.4.2",
     "google-ads-api": "^24.1.0",
     "google-auth-library": "^11.0.0",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
