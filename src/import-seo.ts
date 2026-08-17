@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { credsFromEnv, serpRanks, type SerpTask, type SerpResult } from "./dataforseo.js";
@@ -26,7 +27,7 @@ const chunk = <T>(arr: T[], n: number): T[][] => {
 };
 
 interface ClientRow { id: string; name: string; seo_domain: string | null; seo_location: string | null; }
-interface TargetRow { keyword: string; scope: string; location_name: string | null; device: string | null; }
+interface TargetRow { id: string; keyword: string; scope: string; location_name: string | null; device: string | null; }
 
 function req(name: string): string {
   const v = process.env[name];
@@ -55,7 +56,7 @@ async function main() {
       if (onlyClient && slug !== onlyClient) continue;
       const domain = (client.seo_domain || "").trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
       const targets = (await c.query<TargetRow>(
-        `SELECT keyword, scope, location_name, device FROM seo_targets WHERE client_id = $1 AND active = true`,
+        `SELECT id, keyword, scope, location_name, device FROM seo_targets WHERE client_id = $1 AND active = true`,
         [client.id],
       )).rows;
       if (!targets.length) { console.log(`· ${slug}: no active keywords, skipping`); continue; }
@@ -86,6 +87,25 @@ async function main() {
         period_start: periodStart.toISOString(),
         period_end: now.toISOString(),
       };
+
+      // Persist the raw per-keyword ranks (append-only) — additive to the
+      // aggregate metric_snapshot writes below, never a replacement. serpRanks
+      // returns one result per task in order, so results[i] aligns by index with
+      // the source target (tasks were built as targets.map, same order).
+      if (!dryRun && results.length) {
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (!r) continue;
+          const tgt = targets[i];
+          await c.query(
+            `INSERT INTO seo_rank_history
+               (id, seo_target_id, client_id, keyword, rank, ai_overview, device, scope, captured_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            [randomUUID(), tgt?.id ?? null, client.id, r.keyword, r.rank, r.aiOverview, tgt?.device ?? null, tgt?.scope ?? null, now],
+          );
+        }
+        console.log(`  persisted ${results.length} keyword ranks for ${slug}`);
+      }
 
       if (hardError && results.length === 0) {
         syncs.push({ ...base, data_state: "error", error_message: hardError.slice(0, 300), metrics: {} });
