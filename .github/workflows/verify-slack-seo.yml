@@ -31,3 +31,10 @@ jobs:
           DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
           DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
         run: npm run verify-dataforseo
+      - name: Verify WP Umbrella (read-only)
+        if: always()
+        env:
+          # Accept either secret name (WP_UMBRELLA_API_KEY or WPUMBRELLA_API_KEY).
+          WP_UMBRELLA_API_KEY: ${{ secrets.WP_UMBRELLA_API_KEY || secrets.WPUMBRELLA_API_KEY }}
+          WP_UMBRELLA_BASE: ${{ secrets.WP_UMBRELLA_BASE }}
+        run: npm run verify-webops

@@ -31,7 +31,8 @@ jobs:
       - run: npm ci
       - name: Run WebOps import
         env:
-          WP_UMBRELLA_API_KEY: ${{ secrets.WP_UMBRELLA_API_KEY }}
+          # Accept either secret name (WP_UMBRELLA_API_KEY or WPUMBRELLA_API_KEY).
+          WP_UMBRELLA_API_KEY: ${{ secrets.WP_UMBRELLA_API_KEY || secrets.WPUMBRELLA_API_KEY }}
           WP_UMBRELLA_BASE: ${{ secrets.WP_UMBRELLA_BASE }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
