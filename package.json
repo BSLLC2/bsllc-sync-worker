@@ -31,6 +31,7 @@
     "import-hubspot-deals": "tsx src/import-hubspot-deals.ts",
     "apply-tasks-csv": "tsx src/apply-tasks-csv.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
+    "verify-qbo": "tsx src/verify-qbo.ts",
     "run-research": "tsx src/run-research.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",
     "heartbeat": "tsx src/heartbeat.ts",

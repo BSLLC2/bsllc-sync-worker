@@ -1,0 +1,31 @@
+name: QBO — verify connection (read-only)
+
+# On-demand go-live check: authenticates with the QBO_* secrets and reads the
+# connected company's name. Writes NOTHING to QuickBooks. Run this once after
+# setting production secrets to confirm the worker is pointed at the right live
+# company before the real estimate/invoice sync is trusted.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-qbo
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Verify QBO auth (read-only)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: npm run verify-qbo

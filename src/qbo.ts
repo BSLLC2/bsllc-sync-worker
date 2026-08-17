@@ -80,6 +80,14 @@ export class QboClient {
     return JSON.parse(text) as T;
   }
 
+  /** Read-only connectivity check: forces an auth handshake (validates client
+   *  id/secret + refresh token + realm) and reads the connected company's name.
+   *  Creates nothing. Used by verify-qbo to confirm secrets before go-live. */
+  async ping(): Promise<{ realmId: string; companyName: string }> {
+    const info = await this.call<{ CompanyInfo?: { CompanyName?: string } }>("GET", `companyinfo/${this.realmId}`);
+    return { realmId: this.realmId, companyName: info.CompanyInfo?.CompanyName ?? "(name unavailable)" };
+  }
+
   /** Find a customer by display name, or create one. Returns the QBO Customer id. */
   async findOrCreateCustomer(name: string, email?: string | null): Promise<string> {
     const safe = name.replace(/'/g, "''");
