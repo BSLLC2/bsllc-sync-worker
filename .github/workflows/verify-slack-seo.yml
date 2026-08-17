@@ -1,0 +1,33 @@
+name: Verify Slack + DataForSEO (read-only)
+
+# On-demand connectivity checks for the Slack bot token and DataForSEO API
+# credentials. Both are read-only: Slack calls auth.test (no message posted),
+# DataForSEO calls the free user_data endpoint (no paid tasks). Each step runs
+# independently so one failing doesn't hide the other's result.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-slack-seo
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Verify Slack (read-only)
+        if: always()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: npm run verify-slack
+      - name: Verify DataForSEO (read-only)
+        if: always()
+        env:
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run verify-dataforseo

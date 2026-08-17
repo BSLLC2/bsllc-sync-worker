@@ -32,6 +32,8 @@
     "apply-tasks-csv": "tsx src/apply-tasks-csv.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
     "verify-qbo": "tsx src/verify-qbo.ts",
+    "verify-slack": "tsx src/verify-slack.ts",
+    "verify-dataforseo": "tsx src/verify-dataforseo.ts",
     "run-research": "tsx src/run-research.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",
     "heartbeat": "tsx src/heartbeat.ts",
