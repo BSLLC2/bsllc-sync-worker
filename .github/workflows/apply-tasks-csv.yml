@@ -1,0 +1,38 @@
+name: Apply tasks CSV
+
+# Upserts a committed tasks CSV into commitments (by client+title) — used to push
+# hour/date/priority updates that can't go through the UI. Manual only.
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: "CSV path in the repo."
+        required: true
+        default: "data/lbl-tasks.csv"
+      dry_run:
+        description: "Print counts only (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: apply-tasks-csv
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Apply CSV
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run apply-tasks-csv -- "${{ inputs.path }}" --dry-run
+          else
+            npm run apply-tasks-csv -- "${{ inputs.path }}"
+          fi
