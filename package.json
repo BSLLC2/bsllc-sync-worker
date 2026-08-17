@@ -27,6 +27,7 @@
     "send-outbound-emails": "tsx src/send-outbound-emails.ts",
     "send-push": "tsx src/send-push.ts",
     "send-team-notifications": "tsx src/send-team-notifications.ts",
+    "send-task-digest": "tsx src/send-task-digest.ts",
     "post-to-slack": "tsx src/post-to-slack.ts",
     "import-hubspot-deals": "tsx src/import-hubspot-deals.ts",
     "apply-tasks-csv": "tsx src/apply-tasks-csv.ts",

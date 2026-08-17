@@ -1,0 +1,42 @@
+name: Send task digest
+
+# Enqueues ONE morning digest per teammate (overdue / due today / due tomorrow /
+# awaiting-client-past-SLA) into team_notifications. send-team-notifications then
+# delivers it to each person's chosen channels. Runs daily ~8am ET / 7am CT.
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: send-task-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Enqueue task digests
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run send-task-digest -- --dry-run
+          else
+            npm run send-task-digest
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=task_digest --status=${{ job.status }}
