@@ -28,6 +28,7 @@
     "send-push": "tsx src/send-push.ts",
     "send-team-notifications": "tsx src/send-team-notifications.ts",
     "post-to-slack": "tsx src/post-to-slack.ts",
+    "import-hubspot-deals": "tsx src/import-hubspot-deals.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
     "run-research": "tsx src/run-research.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",

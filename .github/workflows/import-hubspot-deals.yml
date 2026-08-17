@@ -1,0 +1,43 @@
+name: Import HubSpot deals
+
+# Syncs all HubSpot deals (+ their companies) into the app pipeline so it mirrors
+# HubSpot during the transition. Manual run + twice daily. Idempotent (upsert by
+# hubspot_id). Set the HUBSPOT_TOKEN secret (private-app token) to enable.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print counts only, no DB writes (true/false)."
+        required: false
+        default: "false"
+  schedule:
+    - cron: "0 11,23 * * *" # 11:00 & 23:00 UTC
+
+concurrency:
+  group: import-hubspot-deals
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Import deals
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-hubspot-deals -- --dry-run
+          else
+            npm run import-hubspot-deals
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=hubspot_deals --status=${{ job.status }}
