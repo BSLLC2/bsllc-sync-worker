@@ -96,14 +96,17 @@ async function main() {
     for (const c of r.results) companyName.set(c.id, c.properties?.name ?? "");
   }
 
+  // The closed history is already loaded; this sync only reconciles OPEN deals —
+  // create ones missing from the app, and correct any open deal whose stage /
+  // amount / owner drifted from HubSpot. Closed won/lost are left untouched.
+  const isOpen = (d: HsDeal) => {
+    const si = stageMap.get(d.properties.dealstage ?? "");
+    return !si ? true : !si.isClosed;
+  };
+  const openDeals = deals.filter(isOpen);
+
   if (dryRun) {
-    const byStatus = { won: 0, lost: 0, open: 0 };
-    for (const d of deals) {
-      const si = stageMap.get(d.properties.dealstage ?? "");
-      const status = !si ? "open" : si.isClosed ? (si.probability >= 1 ? "won" : "lost") : "open";
-      byStatus[status as keyof typeof byStatus]++;
-    }
-    console.log(`  would upsert: ${byStatus.won} won, ${byStatus.lost} lost, ${byStatus.open} open; ${companyIds.length} companies`);
+    console.log(`  ${openDeals.length} OPEN deals to reconcile (of ${deals.length} total; closed left untouched); ${companyIds.length} companies referenced`);
     return;
   }
 
@@ -129,38 +132,38 @@ async function main() {
       appCompanyId.set(hsCoId, id);
     }
 
-    // 6) Upsert deals by hubspot_id.
+    // 6) Upsert OPEN deals by hubspot_id (closed history already loaded, untouched).
     let created = 0, updated = 0;
-    for (const d of deals) {
+    for (const d of openDeals) {
       const p = d.properties;
       const si = stageMap.get(p.dealstage ?? "");
-      const status = !si ? "open" : si.isClosed ? (si.probability >= 1 ? "won" : "lost") : "open";
-      const stage = status === "won" ? "Closed won" : status === "lost" ? "Closed lost" : mapOpenStage(si?.label ?? "");
+      const status = "open" as const;
+      const stage = mapOpenStage(si?.label ?? "");
       const amountCents = p.amount ? Math.round(Number(p.amount) * 100) : 0;
       const closeDate = p.closedate ? p.closedate.slice(0, 10) : null;
       const ownerName = p.hubspot_owner_id ? (ownerMap.get(p.hubspot_owner_id) || null) : null;
-      const lostReason = status === "lost" ? (p.closed_lost_reason_deal || null) : null;
       const hsCoId = d.associations?.companies?.results?.[0]?.id;
       const companyId = hsCoId ? (appCompanyId.get(hsCoId) ?? null) : null;
-      const closedAt = status === "open" ? null : (p.hs_lastmodifieddate ? new Date(p.hs_lastmodifieddate) : new Date());
       const lastContacted = p.notes_last_updated ? new Date(p.notes_last_updated) : null;
       const name = (p.dealname || "Untitled deal").trim();
 
-      const existing = await c.query<{ id: string }>(`SELECT id FROM deals WHERE hubspot_id = $1 LIMIT 1`, [d.id]);
+      // Only touch a deal if it's new, or the existing one is still OPEN — never
+      // reopen or overwrite a deal already marked won/lost in the app.
+      const existing = await c.query<{ id: string; status: string }>(`SELECT id, status FROM deals WHERE hubspot_id = $1 LIMIT 1`, [d.id]);
       if (existing.rows[0]) {
+        if (existing.rows[0].status !== "open") continue; // leave closed app deals alone
         await c.query(
-          `UPDATE deals SET name=$1, company_id=COALESCE($2, company_id), stage=$3, status=$4, amount_cents=$5,
-             close_date=$6, owner_name=$7, closed_lost_reason=$8, source=COALESCE(source,'hubspot'),
-             closed_at=$9, last_contacted_at=$10 WHERE id=$11`,
-          [name, companyId, stage, status, amountCents, closeDate, ownerName, lostReason, closedAt, lastContacted, existing.rows[0].id],
+          `UPDATE deals SET name=$1, company_id=COALESCE($2, company_id), stage=$3, status='open', amount_cents=$4,
+             close_date=$5, owner_name=$6, source=COALESCE(source,'hubspot'), closed_at=NULL, last_contacted_at=$7 WHERE id=$8`,
+          [name, companyId, stage, amountCents, closeDate, ownerName, lastContacted, existing.rows[0].id],
         );
         updated++;
       } else {
         await c.query(
           `INSERT INTO deals (id, name, company_id, stage, status, amount_cents, close_date, owner_name,
-             closed_lost_reason, source, hubspot_id, closed_at, last_contacted_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'hubspot',$10,$11,$12)`,
-          [randomUUID(), name, companyId, stage, status, amountCents, closeDate, ownerName, lostReason, d.id, closedAt, lastContacted],
+             source, hubspot_id, last_contacted_at)
+           VALUES ($1,$2,$3,$4,'open',$5,$6,$7,'hubspot',$8,$9)`,
+          [randomUUID(), name, companyId, stage, amountCents, closeDate, ownerName, d.id, lastContacted],
         );
         created++;
       }
