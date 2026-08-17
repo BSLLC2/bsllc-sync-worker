@@ -26,6 +26,7 @@
     "send-notifications": "tsx src/send-notifications.ts",
     "send-outbound-emails": "tsx src/send-outbound-emails.ts",
     "send-push": "tsx src/send-push.ts",
+    "send-team-notifications": "tsx src/send-team-notifications.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
     "run-research": "tsx src/run-research.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",
