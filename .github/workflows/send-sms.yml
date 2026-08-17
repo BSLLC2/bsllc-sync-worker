@@ -1,0 +1,44 @@
+name: Send client SMS (queue)
+
+# Drains the dashboard's sms_messages outbound queue via OpenPhone. Each teammate
+# texts from their own assigned OpenPhone number. Runs every minute (best-effort)
+# + on demand. Dormant-ready: a no-op when the queue is empty OR when
+# OPENPHONE_API_KEY isn't set yet (logs and exits 0, never fails).
+on:
+  schedule:
+    - cron: "* * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, send nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: send-sms
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Send client SMS
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENPHONE_API_KEY: ${{ secrets.OPENPHONE_API_KEY }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run send-sms -- --dry-run
+          else
+            npm run send-sms
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=send_sms --status=${{ job.status }}
