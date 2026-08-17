@@ -1,0 +1,42 @@
+name: Post CRM updates to Slack
+
+# Drains client_slack_posts (CRM→Slack updates the app enqueues) to each client's
+# Slack channel. Runs every 3 min + on demand. No-op when empty or no bot token.
+on:
+  schedule:
+    - cron: "*/3 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: post-to-slack
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Post to Slack
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run post-to-slack -- --dry-run
+          else
+            npm run post-to-slack
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=slack_post --status=${{ job.status }}
