@@ -55,7 +55,10 @@ export class QboClient {
       body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tok.refresh_token }),
     });
     const text = await res.text();
-    if (!res.ok) throw new Error(`QBO token refresh ${res.status}: ${text}`);
+    // intuit_tid is Intuit's request-trace id (response header). Capturing it in
+    // logs + error records lets Intuit support pinpoint a failed call fast.
+    const tid = res.headers.get("intuit_tid") ?? "";
+    if (!res.ok) throw new Error(`QBO token refresh ${res.status} [intuit_tid=${tid}]: ${text}`);
     const j = JSON.parse(text) as { access_token: string; refresh_token: string };
     this.accessToken = j.access_token;
     // Persist the (possibly rotated) refresh token so the next run stays valid.
@@ -70,7 +73,10 @@ export class QboClient {
       body: body ? JSON.stringify(body) : undefined,
     });
     const text = await res.text();
-    if (!res.ok) throw new Error(`QBO ${method} ${path} ${res.status}: ${text}`);
+    const tid = res.headers.get("intuit_tid") ?? "";
+    // Trace every call in the run log so a shared log ties back to Intuit's tid.
+    console.log(`  qbo ${method} ${path.split("?")[0]} ${res.status} intuit_tid=${tid || "-"}`);
+    if (!res.ok) throw new Error(`QBO ${method} ${path} ${res.status} [intuit_tid=${tid}]: ${text}`);
     return JSON.parse(text) as T;
   }
 
