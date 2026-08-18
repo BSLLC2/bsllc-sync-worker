@@ -337,6 +337,76 @@ export async function rankedKeywords(
   }).filter((k) => k.keyword);
 }
 
+/** A gap keyword: one a competitor ranks for that the client does not. */
+export interface GapKeyword extends KeywordIdea {
+  /** The competitor's absolute SERP position for this keyword. */
+  competitorRank: number | null;
+}
+
+/** Bare, lowercased keyword for set membership (so "Foo Bar" == "foo  bar"). */
+function normKw(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Competitor keyword gap: keywords the competitor domain ranks for (top of the
+ * SERP) that the CLIENT domain does not rank for at all. This is the "are we
+ * even targeting the right terms?" tool — it surfaces demand the client is
+ * missing rather than mirroring whatever they happen to rank for today.
+ *
+ * Two Labs ranked_keywords pulls (competitor + client), diffed in memory. The
+ * competitor rows come back as full KeywordIdea (volume/cpc/difficulty/intent)
+ * plus the competitor's position, sorted by search volume desc.
+ *
+ * Endpoint: POST /v3/dataforseo_labs/google/ranked_keywords/live (×2)
+ */
+export async function keywordGap(
+  creds: DfsCreds,
+  clientDomain: string,
+  competitorDomain: string,
+  locationName = "United States",
+  languageName = "English",
+  competitorTopN = 50,
+  limit = 150,
+): Promise<GapKeyword[]> {
+  const clean = (d: string) => d.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+  const client = clean(clientDomain);
+  const competitor = clean(competitorDomain);
+
+  async function ranked(target: string, take: number): Promise<any[]> {
+    const payload = [{ target, location_name: locationName, language_name: languageName, limit: take, order_by: ["keyword_data.keyword_info.search_volume,desc"] }];
+    const resp = await post(creds, "/dataforseo_labs/google/ranked_keywords/live", payload);
+    const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+    if (!rt || rt.status_code !== 20000) throw new Error(rt?.status_message || "DataForSEO returned no ranked keywords");
+    const result = Array.isArray(rt.result) ? rt.result[0] : null;
+    return Array.isArray(result?.items) ? result.items : [];
+  }
+
+  // Pull the client's footprint wide so the "does the client rank?" test is
+  // fair, and the competitor's top terms as the candidate pool.
+  const [competitorItems, clientItems] = await Promise.all([
+    ranked(competitor, 700),
+    ranked(client, 1000),
+  ]);
+
+  const clientKws = new Set(clientItems.map((it) => normKw(toKeywordIdea(it).keyword)).filter(Boolean));
+
+  const gaps: GapKeyword[] = [];
+  for (const it of competitorItems) {
+    const idea = toKeywordIdea(it);
+    if (!idea.keyword) continue;
+    if (clientKws.has(normKw(idea.keyword))) continue; // client already ranks — not a gap
+    const rse = it?.ranked_serp_element ?? {};
+    const serpItem = rse?.serp_item ?? {};
+    const rank = num(serpItem.rank_absolute) ?? num(rse.rank_absolute);
+    if (rank != null && rank > competitorTopN) continue; // only real competitor wins
+    gaps.push({ ...idea, competitorRank: rank });
+  }
+  // Sort by search volume desc (the app re-sorts by Opportunity by default).
+  gaps.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+  return gaps.slice(0, limit);
+}
+
 // ── Domain authority / backlinks (Backlinks + Labs) ─────────────────────────
 
 /** Aggregate authority signals for a domain — the SEMrush overview replacement. */

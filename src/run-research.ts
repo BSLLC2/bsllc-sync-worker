@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
-import { credsFromEnv, keywordResearch, rankedKeywords } from "./dataforseo.js";
+import { credsFromEnv, keywordResearch, rankedKeywords, keywordGap } from "./dataforseo.js";
 
 /**
  * Runs queued research requests against DataForSEO. The deployed app enqueues a
@@ -70,6 +70,13 @@ async function main() {
           const target = (r.target || "").trim();
           if (!target) throw new Error("no domain");
           result = await rankedKeywords(creds, target, r.location_name, r.language_name);
+        } else if (kind === "gap") {
+          // Competitor gap: target = client domain, query = competitor domain.
+          const client = (r.target || "").trim();
+          const competitor = (r.query || "").trim();
+          if (!client) throw new Error("no client domain");
+          if (!competitor) throw new Error("no competitor domain");
+          result = await keywordGap(creds, client, competitor, r.location_name, r.language_name);
         } else {
           // "ideas" (default / null) and legacy "keywords".
           result = await keywordResearch(creds, r.query, r.location_name, r.language_name);
