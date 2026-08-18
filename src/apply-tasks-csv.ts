@@ -46,6 +46,7 @@ function normStatus(v: string): string {
   return "not_started";
 }
 const roundHalf = (n: number) => Math.max(0, Math.round(n * 2) / 2);
+const truthy = (v: string) => ["true", "yes", "1", "y", "x"].includes((v || "").toLowerCase().trim());
 
 async function main() {
   const args = process.argv.slice(2);
@@ -55,7 +56,9 @@ async function main() {
   if (table.length < 2) throw new Error("CSV has no data rows");
   const header = (table[0] ?? []).map((h) => h.trim());
   const idx = (name: string) => header.indexOf(name);
-  const col = { clientName: idx("clientName"), priority: idx("priority"), title: idx("title"), description: idx("description"), ownerType: idx("ownerType"), ownerName: idx("ownerName"), assigneeName: idx("assigneeName"), status: idx("status"), dueDate: idx("dueDate"), estimatedHours: idx("estimatedHours") };
+  const col = { clientName: idx("clientName"), priority: idx("priority"), title: idx("title"), description: idx("description"), ownerType: idx("ownerType"), ownerName: idx("ownerName"), assigneeName: idx("assigneeName"), status: idx("status"), dueDate: idx("dueDate"), estimatedHours: idx("estimatedHours"), isMilestone: idx("isMilestone"), clientVisible: idx("clientVisible"), link: idx("link") };
+  // Optional client-facing flags — only touched when the CSV actually has the column.
+  const hasMilestone = col.isMilestone >= 0, hasVisible = col.clientVisible >= 0, hasLink = col.link >= 0;
   const dataRows = table.slice(1);
   console.log(`apply-tasks-csv — ${dataRows.length} rows from ${path}${dryRun ? " (dry-run)" : ""}`);
 
@@ -86,21 +89,29 @@ async function main() {
       const dueDate = (row[col.dueDate] ?? "").trim() || null;
       const hoursRaw = (row[col.estimatedHours] ?? "").trim();
       const estimatedHours = hoursRaw ? roundHalf(Number(hoursRaw) || 0) : 0;
+      const isMilestone = hasMilestone ? truthy(row[col.isMilestone] ?? "") : false;
+      const clientVisible = hasVisible ? truthy(row[col.clientVisible] ?? "") : false;
+      const link = hasLink ? ((row[col.link] ?? "").trim() || null) : null;
 
       if (dryRun) { updated++; continue; }
       const existing = await c.query<{ id: string }>(`SELECT id FROM commitments WHERE client_id = $1 AND lower(trim(title)) = lower(trim($2)) LIMIT 1`, [clientId, title]);
       if (existing.rows[0]) {
-        await c.query(
-          `UPDATE commitments SET priority=$1, description=COALESCE($2, description), owner_type=$3, owner_name=$4,
-             assignee_name=$5, status=$6, due_date=$7, estimated_hours=$8, last_updated_at=now() WHERE id=$9`,
-          [priority, description, ownerType, ownerName, assigneeName, status, dueDate, estimatedHours, existing.rows[0].id],
-        );
+        // Build the SET dynamically so the flag columns are only overwritten when
+        // the CSV carries them — other CSVs (no flag columns) leave them intact.
+        const sets = ["priority=$1", "description=COALESCE($2, description)", "owner_type=$3", "owner_name=$4", "assignee_name=$5", "status=$6", "due_date=$7", "estimated_hours=$8", "last_updated_at=now()"];
+        const params: (string | number | boolean | null)[] = [priority, description, ownerType, ownerName, assigneeName, status, dueDate, estimatedHours];
+        let p = 9;
+        if (hasMilestone) { sets.push(`is_milestone=$${p++}`); params.push(isMilestone); }
+        if (hasVisible) { sets.push(`client_visible=$${p++}`); params.push(clientVisible); }
+        if (hasLink) { sets.push(`link=COALESCE($${p++}, link)`); params.push(link); }
+        params.push(existing.rows[0].id);
+        await c.query(`UPDATE commitments SET ${sets.join(", ")} WHERE id=$${p}`, params);
         updated++;
       } else {
         await c.query(
-          `INSERT INTO commitments (id, client_id, priority, title, description, owner_type, owner_name, assignee_name, status, due_date, estimated_hours, category)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'setup')`,
-          [randomUUID(), clientId, priority, title, description, ownerType, ownerName, assigneeName, status, dueDate, estimatedHours],
+          `INSERT INTO commitments (id, client_id, priority, title, description, owner_type, owner_name, assignee_name, status, due_date, estimated_hours, category, is_milestone, client_visible, link)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'setup',$12,$13,$14)`,
+          [randomUUID(), clientId, priority, title, description, ownerType, ownerName, assigneeName, status, dueDate, estimatedHours, isMilestone, clientVisible, link],
         );
         created++;
       }
