@@ -53,7 +53,8 @@
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
     "set-task-category": "tsx src/set-task-category.ts",
-    "set-client-status": "tsx src/set-client-status.ts"
+    "set-client-status": "tsx src/set-client-status.ts",
+    "reconcile-lbl-tasks": "tsx src/reconcile-lbl-tasks.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
