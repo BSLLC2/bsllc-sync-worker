@@ -1,0 +1,34 @@
+name: Set client status (launch / active / paused / churned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact or short), e.g. CSCH"
+        required: true
+      status:
+        description: "launch | active | paused | churned"
+        required: true
+        default: "paused"
+      dry_run:
+        description: "Preview only"
+        type: boolean
+        default: false
+
+jobs:
+  set:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Set client status
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm run set-client-status -- \
+            --client="${{ inputs.client }}" \
+            --status="${{ inputs.status }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}

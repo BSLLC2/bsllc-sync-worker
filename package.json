@@ -51,7 +51,8 @@
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "set-task-category": "tsx src/set-task-category.ts"
+    "set-task-category": "tsx src/set-task-category.ts",
+    "set-client-status": "tsx src/set-client-status.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
