@@ -62,14 +62,15 @@ jobs:
           DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+          CLIENT_FILTER: ${{ inputs.client }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          ARGS=""
-          [ -n "${{ inputs.client }}" ] && ARGS="$ARGS --client=${{ inputs.client }}"
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run import-domain-authority -- --dry-run $ARGS
-          else
-            npm run import-domain-authority -- $ARGS
-          fi
+          # Pass the client filter via env + a quoted array so multi-word names
+          # (e.g. "LBL Law") survive the shell instead of being word-split.
+          args=()
+          [ -n "$CLIENT_FILTER" ] && args+=("--client=$CLIENT_FILTER")
+          [ "$DRY_RUN" = "true" ] && args+=("--dry-run")
+          npm run import-domain-authority -- "${args[@]}"
 
       - name: Heartbeat
         if: always()
