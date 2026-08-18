@@ -34,18 +34,30 @@ interface Refined {
 }
 interface Task { id: string; title: string; status: string; category: string; priority: string; }
 
-const STOP = new Set(["the","a","an","of","to","and","or","for","on","in","at","by","with","from","into","is","are","be","that","this","it","as","per","not","no","do","we","our","all","any","every","new","up","off","out","before","after","onto","than","then","if","yes"]);
-function tokens(s: string): Set<string> {
-  const words = (s || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
-  return new Set(words.filter((w) => w.length > 2 && !STOP.has(w)));
+const STOP = new Set(["the","a","an","of","to","and","or","for","on","in","at","by","with","from","into","is","are","be","that","this","it","as","per","not","no","do","we","our","all","any","every","new","up","off","out","before","after","onto","than","then","if","yes","its","their","them","across","onto"]);
+// Split common joined brand tokens so "DigitalLogic" matches "Digital Logic".
+function preNorm(s: string): string {
+  return (s || "").toLowerCase()
+    .replace(/digitallogic/g, "digital logic")
+    .replace(/callrail/g, "call rail")
+    .replace(/youtube/g, "you tube")
+    .replace(/[^a-z0-9\s]/g, " ");
 }
-/** Coverage of the refined action's tokens by an existing task's tokens. */
+const stem = (w: string) => w.replace(/(ies)$/, "y").replace(/(es|s)$/, "");
+function tokens(s: string): Set<string> {
+  const words = preNorm(s).split(/\s+/).filter(Boolean);
+  return new Set(words.filter((w) => w.length > 2 && !STOP.has(w)).map(stem));
+}
+/** How well an existing task matches the refined action (0..1). */
 function overlap(a: Set<string>, b: Set<string>): number {
   if (a.size === 0) return 0;
   let hit = 0; for (const t of a) if (b.has(t)) hit++;
   const cover = hit / a.size;                 // how much of the refined action is present
   const rev = b.size ? hit / b.size : 0;      // how much of the existing task is present
-  return Math.max(cover, rev * 0.9);
+  // Reward absolute shared-token count too, so long titles that share 3–4
+  // significant words match even when each has extra words.
+  const byCount = Math.min(1, hit / 3);
+  return Math.max(cover, rev * 0.9, byCount * 0.75);
 }
 
 async function main() {
@@ -72,7 +84,7 @@ async function main() {
     const tokById = new Map(tasks.map((t) => [t.id, tokens(t.title)]));
     const byExactTitle = new Map(tasks.map((t) => [t.title.toLowerCase().trim(), t]));
     const claimed = new Set<string>();
-    const THRESH = 0.6;
+    const THRESH = 0.5;
 
     const plan = { update: [] as string[], keepComplete: [] as string[], insert: [] as string[] };
     type Op = { kind: "update" | "insert" | "keep"; refined: Refined; taskId?: string };
@@ -105,15 +117,21 @@ async function main() {
 
     const unmatchedOpen = open.filter((t) => !claimed.has(t.id));
 
+    // Unmatched first (it's the long list), then the decision-relevant sections
+    // and a compact summary LAST so it's always visible at the end of the log.
     console.log(`━━━ PLAN ━━━`);
-    console.log(`\nUPDATE (replace same open task) — ${plan.update.length}`);
+    console.log(`\nUNMATCHED EXISTING OPEN (left as-is) — ${unmatchedOpen.length}`);
+    unmatchedOpen.forEach((t) => console.log(`  • "${t.title}" [${t.status}/${t.category}]`));
+    console.log(`\nUPDATE (replace same open task in place) — ${plan.update.length}`);
     plan.update.forEach((s) => console.log(`  • ${s}`));
     console.log(`\nKEEP COMPLETE (already done, untouched) — ${plan.keepComplete.length}`);
     plan.keepComplete.forEach((s) => console.log(`  • ${s}`));
-    console.log(`\nINSERT (new action) — ${plan.insert.length}`);
+    console.log(`\nINSERT (new action, no match found) — ${plan.insert.length}`);
     plan.insert.forEach((s) => console.log(`  • ${s}`));
-    console.log(`\nUNMATCHED EXISTING OPEN (left as-is) — ${unmatchedOpen.length}`);
-    unmatchedOpen.forEach((t) => console.log(`  • "${t.title}" [${t.status}/${t.category}]`));
+    console.log(`\n━━━ SUMMARY ━━━`);
+    console.log(`  existing tasks: ${tasks.length} (${open.length} open, ${done.length} complete)`);
+    console.log(`  refined actions: ${refined.length}`);
+    console.log(`  → UPDATE ${plan.update.length} · KEEP-COMPLETE ${plan.keepComplete.length} · INSERT ${plan.insert.length} · leave-as-is ${unmatchedOpen.length}`);
 
     if (dryRun) { console.log(`\n(dry-run — nothing written)`); return; }
 
