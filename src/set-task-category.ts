@@ -40,10 +40,11 @@ async function main() {
         `SELECT id, name FROM clients WHERE name ILIKE '%' || $1 || '%' ORDER BY name`, [clientName],
       ));
     }
-    if (cl.length === 0) { console.log(`No client matching "${clientName}".`); return; }
     if (cl.length > 1) { console.log(`Ambiguous "${clientName}" — matches ${cl.length}: ${cl.map((x) => x.name).join(", ")}. Be more specific.`); return; }
-    const clientId = cl[0].id;
-    console.log(`Matched client: ${cl[0].name}`);
+    const client = cl[0];
+    if (!client) { console.log(`No client matching "${clientName}".`); return; }
+    const clientId = client.id;
+    console.log(`Matched client: ${client.name}`);
 
     const params: (string)[] = [clientId];
     let where = `client_id = $1 AND status <> 'complete'`;
