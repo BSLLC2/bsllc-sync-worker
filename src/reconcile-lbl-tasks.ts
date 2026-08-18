@@ -146,15 +146,15 @@ async function main() {
         await c.query(
           `UPDATE commitments SET title=$1, priority=$2, category=$3,
              due_date=$4, description=COALESCE($5, description), owner_type='bs_llc',
-             owner_name=$6, last_updated_at=now() WHERE id=$7`,
-          [r.title, r.priority, r.category, r.dueDate, r.description, r.ownerName, op.taskId],
+             owner_name=$6, workstream=$7, last_updated_at=now() WHERE id=$8`,
+          [r.title, r.priority, r.category, r.dueDate, r.description, r.ownerName, r.workstream || null, op.taskId],
         );
         updated++;
       } else if (op.kind === "insert") {
         await c.query(
-          `INSERT INTO commitments (id, client_id, priority, title, description, owner_type, owner_name, status, due_date, estimated_hours, category, is_milestone, client_visible)
-           VALUES ($1,$2,$3,$4,$5,'bs_llc',$6,$7,$8,0,$9,false,false)`,
-          [randomUUID(), client.id, r.priority, r.title, r.description, r.ownerName, r.status, r.dueDate, r.category],
+          `INSERT INTO commitments (id, client_id, priority, title, description, owner_type, owner_name, status, due_date, estimated_hours, category, workstream, is_milestone, client_visible)
+           VALUES ($1,$2,$3,$4,$5,'bs_llc',$6,$7,$8,0,$9,$10,false,false)`,
+          [randomUUID(), client.id, r.priority, r.title, r.description, r.ownerName, r.status, r.dueDate, r.category, r.workstream || null],
         );
         inserted++;
       }
