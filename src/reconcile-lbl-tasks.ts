@@ -67,6 +67,8 @@ async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
+    // Defensive: don't depend on app-boot ensureSchema timing for the column.
+    await c.query(`ALTER TABLE commitments ADD COLUMN IF NOT EXISTS workstream text`).catch(() => {});
     const cl = (await c.query<{ id: string; name: string }>(
       `SELECT id, name FROM clients WHERE name ILIKE 'LBL%' OR lower(name) LIKE '%lawrence%' ORDER BY name`,
     )).rows;
