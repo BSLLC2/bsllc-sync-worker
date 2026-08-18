@@ -44,6 +44,7 @@
     "verify-dataforseo": "tsx src/verify-dataforseo.ts",
     "verify-webops": "tsx src/verify-webops.ts",
     "run-research": "tsx src/run-research.ts",
+    "enqueue-research": "tsx src/enqueue-research.ts",
     "upload-to-drive": "tsx src/upload-to-drive.ts",
     "heartbeat": "tsx src/heartbeat.ts",
     "monitor-freshness": "tsx src/monitor-freshness.ts",

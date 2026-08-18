@@ -1,0 +1,49 @@
+name: Enqueue research (smoke-test DataForSEO)
+
+# Enqueues one research_requests row (like the app's SEO research page) and then
+# runs run-research so it completes in a single dispatch — a quick end-to-end
+# check that DataForSEO keyword/ranking lookups work.
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: "ideas | rankings"
+        required: true
+        default: "ideas"
+      query:
+        description: "Seed keyword (ideas) or domain (rankings)"
+        required: true
+        default: "commercial roofing"
+      target:
+        description: "Domain for kind=rankings (bare host)"
+        required: false
+        default: ""
+      location:
+        description: "Location name"
+        required: false
+        default: "United States"
+
+jobs:
+  enqueue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Enqueue request
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm run enqueue-research -- \
+            --kind="${{ inputs.kind }}" \
+            --query="${{ inputs.query }}" \
+            --location="${{ inputs.location }}" \
+            ${{ inputs.target != '' && format('--target="{0}"', inputs.target) || '' }}
+      - name: Run research (drains pending)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run run-research
