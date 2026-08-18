@@ -1,0 +1,39 @@
+name: Share meeting notes on client dashboard
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact), e.g. LBL Law"
+        required: true
+        default: "LBL Law"
+      url:
+        description: "Google Doc / Drive URL of the meeting notes"
+        required: true
+      title:
+        description: "Meeting type (check_in, kickoff, strategy, review)"
+        required: false
+        default: "check_in"
+      date:
+        description: "Meeting date YYYY-MM-DD (blank = today)"
+        required: false
+        default: ""
+
+jobs:
+  share:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Share meeting notes
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm run share-meeting -- \
+            --client="${{ inputs.client }}" \
+            --url="${{ inputs.url }}" \
+            --type="${{ inputs.title }}" \
+            ${{ inputs.date != '' && format('--date={0}', inputs.date) || '' }}
