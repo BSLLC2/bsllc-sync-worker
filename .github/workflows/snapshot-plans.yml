@@ -1,0 +1,34 @@
+name: Snapshot plan docs (freeze a plan to an immutable PDF for sign-off)
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview what would be snapshotted without changing anything"
+        type: boolean
+        default: false
+      commitment:
+        description: "Optional commitment id — snapshot only that task's queued row(s)"
+        required: false
+        default: ""
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Snapshot plans
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SIGNED_PLANS_DRIVE_FOLDER_ID: ${{ secrets.SIGNED_PLANS_DRIVE_FOLDER_ID }}
+          SIGNED_PLANS_DRIVE_IMPERSONATE: ${{ secrets.SIGNED_PLANS_DRIVE_IMPERSONATE }}
+          BACKUP_DRIVE_IMPERSONATE: ${{ secrets.BACKUP_DRIVE_IMPERSONATE }}
+        run: |
+          npm run snapshot-plans -- ${{ inputs.dry_run && '--dry-run' || '' }} ${{ inputs.commitment != '' && format('--commitment={0}', inputs.commitment) || '' }}
