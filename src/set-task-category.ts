@@ -29,11 +29,21 @@ async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
-    const { rows: cl } = await c.query<{ id: string; name: string }>(
-      `SELECT id, name FROM clients WHERE lower(trim(name)) = lower(trim($1)) LIMIT 1`, [clientName],
+    // Match exact name first; else fall back to a case-insensitive substring so
+    // short names / partials work ("Herbalism"). Refuse if >1 client matches so
+    // we never reclassify the wrong account.
+    let { rows: cl } = await c.query<{ id: string; name: string }>(
+      `SELECT id, name FROM clients WHERE lower(trim(name)) = lower(trim($1))`, [clientName],
     );
-    if (!cl[0]) { console.log(`No client named "${clientName}".`); return; }
+    if (cl.length === 0) {
+      ({ rows: cl } = await c.query<{ id: string; name: string }>(
+        `SELECT id, name FROM clients WHERE name ILIKE '%' || $1 || '%' ORDER BY name`, [clientName],
+      ));
+    }
+    if (cl.length === 0) { console.log(`No client matching "${clientName}".`); return; }
+    if (cl.length > 1) { console.log(`Ambiguous "${clientName}" — matches ${cl.length}: ${cl.map((x) => x.name).join(", ")}. Be more specific.`); return; }
     const clientId = cl[0].id;
+    console.log(`Matched client: ${cl[0].name}`);
 
     const params: (string)[] = [clientId];
     let where = `client_id = $1 AND status <> 'complete'`;
