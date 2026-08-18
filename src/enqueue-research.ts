@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { randomUUID } from "node:crypto";
 
 /**
  * Enqueue a research_requests row (the same thing the app's SEO research page
@@ -30,11 +31,13 @@ async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
+    // id is generated app-side (no DB default), so provide one here.
+    const id = randomUUID();
     const { rows } = await c.query<{ id: string }>(
-      `INSERT INTO research_requests (kind, query, target, location_name, language_name, status, requested_by)
-       VALUES ($1, $2, $3, $4, $5, 'pending', 'worker')
+      `INSERT INTO research_requests (id, kind, query, target, location_name, language_name, status, requested_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', 'worker')
        RETURNING id`,
-      [kind, query, target, location, language],
+      [id, kind, query, target, location, language],
     );
     console.log(`✓ Enqueued ${kind} request "${query}"${target ? ` (target ${target})` : ""} → id ${rows[0]?.id}. run-research will pick it up.`);
   } finally {
