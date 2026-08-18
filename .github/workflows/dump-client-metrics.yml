@@ -1,0 +1,23 @@
+name: Dump client metrics (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact), e.g. LBL Law"
+        required: true
+        default: "LBL Law"
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Dump
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run dump-client-metrics -- --client="${{ inputs.client }}"

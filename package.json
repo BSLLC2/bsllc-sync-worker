@@ -33,6 +33,7 @@
     "import-hubspot-deals": "tsx src/import-hubspot-deals.ts",
     "apply-tasks-csv": "tsx src/apply-tasks-csv.ts",
     "seed-client-visibility": "tsx src/seed-client-visibility.ts",
+    "dump-client-metrics": "tsx src/dump-client-metrics.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
     "verify-qbo": "tsx src/verify-qbo.ts",
     "verify-slack": "tsx src/verify-slack.ts",
