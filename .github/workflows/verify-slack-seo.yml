@@ -6,6 +6,11 @@ name: Verify Slack + DataForSEO (read-only)
 # independently so one failing doesn't hide the other's result.
 on:
   workflow_dispatch:
+    inputs:
+      probe:
+        description: "Also fire one live DataForSEO task per endpoint (keyword_ideas, ranked_keywords, domain_rank_overview, backlinks). Costs a few cents. (true/false)"
+        required: false
+        default: "false"
 
 concurrency:
   group: verify-slack-seo
@@ -30,7 +35,13 @@ jobs:
         env:
           DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
           DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
-        run: npm run verify-dataforseo
+          PROBE: ${{ inputs.probe }}
+        run: |
+          if [ "$PROBE" = "true" ]; then
+            npm run verify-dataforseo -- --probe
+          else
+            npm run verify-dataforseo
+          fi
       - name: Verify WP Umbrella (read-only)
         if: always()
         env:
