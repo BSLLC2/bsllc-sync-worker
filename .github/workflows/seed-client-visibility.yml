@@ -1,0 +1,34 @@
+name: Seed client task visibility
+
+# On-demand: flip client-facing tasks (client-owned or milestones) to
+# client_visible for a client, so its opt-in report shows the right items.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact), e.g. LBL Law"
+        required: true
+        default: "LBL Law"
+      dry_run:
+        description: "Preview only (true/false)"
+        required: false
+        default: "true"
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Seed visibility
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run seed-client-visibility -- --client="${{ inputs.client }}" --dry-run
+          else
+            npm run seed-client-visibility -- --client="${{ inputs.client }}"
+          fi
