@@ -1,0 +1,39 @@
+name: Set task category (setup / ongoing)
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact), e.g. LBL Law"
+        required: true
+      category:
+        description: "setup or ongoing"
+        required: true
+        default: "ongoing"
+      match:
+        description: "Optional: only tasks whose title contains this"
+        required: false
+        default: ""
+      dry_run:
+        description: "Preview only"
+        type: boolean
+        default: false
+
+jobs:
+  set:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Set category
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm run set-task-category -- \
+            --client="${{ inputs.client }}" \
+            --category="${{ inputs.category }}" \
+            ${{ inputs.match != '' && format('--match="{0}"', inputs.match) || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}

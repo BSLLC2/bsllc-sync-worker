@@ -56,9 +56,9 @@ async function main() {
   if (table.length < 2) throw new Error("CSV has no data rows");
   const header = (table[0] ?? []).map((h) => h.trim());
   const idx = (name: string) => header.indexOf(name);
-  const col = { clientName: idx("clientName"), priority: idx("priority"), title: idx("title"), description: idx("description"), ownerType: idx("ownerType"), ownerName: idx("ownerName"), assigneeName: idx("assigneeName"), status: idx("status"), dueDate: idx("dueDate"), estimatedHours: idx("estimatedHours"), isMilestone: idx("isMilestone"), clientVisible: idx("clientVisible"), link: idx("link") };
+  const col = { clientName: idx("clientName"), priority: idx("priority"), title: idx("title"), description: idx("description"), ownerType: idx("ownerType"), ownerName: idx("ownerName"), assigneeName: idx("assigneeName"), status: idx("status"), dueDate: idx("dueDate"), estimatedHours: idx("estimatedHours"), isMilestone: idx("isMilestone"), clientVisible: idx("clientVisible"), link: idx("link"), category: idx("category") };
   // Optional client-facing flags — only touched when the CSV actually has the column.
-  const hasMilestone = col.isMilestone >= 0, hasVisible = col.clientVisible >= 0, hasLink = col.link >= 0;
+  const hasMilestone = col.isMilestone >= 0, hasVisible = col.clientVisible >= 0, hasLink = col.link >= 0, hasCategory = col.category >= 0;
   const dataRows = table.slice(1);
   console.log(`apply-tasks-csv — ${dataRows.length} rows from ${path}${dryRun ? " (dry-run)" : ""}`);
 
@@ -92,6 +92,10 @@ async function main() {
       const isMilestone = hasMilestone ? truthy(row[col.isMilestone] ?? "") : false;
       const clientVisible = hasVisible ? truthy(row[col.clientVisible] ?? "") : false;
       const link = hasLink ? ((row[col.link] ?? "").trim() || null) : null;
+      // Category: 'setup' gates the launch-readiness score, so it must be
+      // explicit. Retainer/ongoing plans are the common bulk import, so default
+      // to 'ongoing' unless the row says 'setup' — never silently inflate setup.
+      const category = ((row[col.category] ?? "").trim().toLowerCase() === "setup") ? "setup" : "ongoing";
 
       if (dryRun) { updated++; continue; }
       const existing = await c.query<{ id: string }>(`SELECT id FROM commitments WHERE client_id = $1 AND lower(trim(title)) = lower(trim($2)) LIMIT 1`, [clientId, title]);
@@ -104,14 +108,15 @@ async function main() {
         if (hasMilestone) { sets.push(`is_milestone=$${p++}`); params.push(isMilestone); }
         if (hasVisible) { sets.push(`client_visible=$${p++}`); params.push(clientVisible); }
         if (hasLink) { sets.push(`link=COALESCE($${p++}, link)`); params.push(link); }
+        if (hasCategory) { sets.push(`category=$${p++}`); params.push(category); }
         params.push(existing.rows[0].id);
         await c.query(`UPDATE commitments SET ${sets.join(", ")} WHERE id=$${p}`, params);
         updated++;
       } else {
         await c.query(
           `INSERT INTO commitments (id, client_id, priority, title, description, owner_type, owner_name, assignee_name, status, due_date, estimated_hours, category, is_milestone, client_visible, link)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'setup',$12,$13,$14)`,
-          [randomUUID(), clientId, priority, title, description, ownerType, ownerName, assigneeName, status, dueDate, estimatedHours, isMilestone, clientVisible, link],
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+          [randomUUID(), clientId, priority, title, description, ownerType, ownerName, assigneeName, status, dueDate, estimatedHours, category, isMilestone, clientVisible, link],
         );
         created++;
       }

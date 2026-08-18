@@ -49,7 +49,8 @@
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "set-task-category": "tsx src/set-task-category.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
