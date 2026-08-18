@@ -42,7 +42,16 @@ async function main() {
     }
     if (cl.length > 1) { console.log(`Ambiguous "${clientName}" — matches ${cl.length}: ${cl.map((x) => x.name).join(", ")}. Be more specific.`); return; }
     const client = cl[0];
-    if (!client) { console.log(`No client matching "${clientName}".`); return; }
+    if (!client) {
+      const { rows: all } = await c.query<{ name: string; n: number }>(
+        `SELECT c.name, COUNT(m.id)::int AS n FROM clients c
+           LEFT JOIN commitments m ON m.client_id = c.id AND m.status <> 'complete'
+          GROUP BY c.name ORDER BY c.name`,
+      );
+      console.log(`No client matching "${clientName}". Known clients (open tasks):`);
+      for (const r of all) console.log(`  • ${r.name} (${r.n})`);
+      return;
+    }
     const clientId = client.id;
     console.log(`Matched client: ${client.name}`);
 
