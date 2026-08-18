@@ -140,12 +140,14 @@ async function main() {
       const r = op.refined;
       if (op.kind === "keep") continue;
       if (op.kind === "update" && op.taskId) {
-        // Never set complete here; preserve is_milestone/client_visible/link.
+        // Refine the task in place but PRESERVE its live status (never regress an
+        // in_progress/blocked task, never reopen a complete one) and keep
+        // is_milestone/client_visible/link untouched.
         await c.query(
-          `UPDATE commitments SET title=$1, priority=$2, category=$3, status=$4,
-             due_date=$5, description=COALESCE($6, description), owner_type='bs_llc',
-             owner_name=$7, last_updated_at=now() WHERE id=$8`,
-          [r.title, r.priority, r.category, r.status, r.dueDate, r.description, r.ownerName, op.taskId],
+          `UPDATE commitments SET title=$1, priority=$2, category=$3,
+             due_date=$4, description=COALESCE($5, description), owner_type='bs_llc',
+             owner_name=$6, last_updated_at=now() WHERE id=$7`,
+          [r.title, r.priority, r.category, r.dueDate, r.description, r.ownerName, op.taskId],
         );
         updated++;
       } else if (op.kind === "insert") {
