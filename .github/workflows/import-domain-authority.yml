@@ -1,0 +1,79 @@
+name: Import domain authority (DataForSEO)
+
+# Weekly domain-authority snapshot. For each active client with a trackable
+# domain (clients.seo_domain), pulls authority/rank, backlinks and referring
+# domains from DataForSEO's Backlinks API plus an organic-traffic + keyword-count
+# estimate from Labs, and writes metrics via `npm run sync` (source 'authority').
+# Replaces the dead SEMrush overview card.
+#
+# Needs repo secrets: DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD, DATABASE_URL,
+# DASHBOARD_REPO_TOKEN.
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Mondays 08:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pull + print only, write nothing (true/false)."
+        required: false
+        default: "false"
+      client:
+        description: "Limit to one client slug (optional)."
+        required: false
+        default: ""
+
+concurrency:
+  group: domain-authority-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run domain-authority import
+        working-directory: worker
+        env:
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.client }}" ] && ARGS="$ARGS --client=${{ inputs.client }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-domain-authority -- --dry-run $ARGS
+          else
+            npm run import-domain-authority -- $ARGS
+          fi
+
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=domain_authority_import --status=${{ job.status }}

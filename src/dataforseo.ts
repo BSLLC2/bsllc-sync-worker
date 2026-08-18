@@ -205,12 +205,74 @@ export async function aeoCheck(
 
 // ── Keyword research (DataForSEO Labs) ──────────────────────────────────────
 
-export interface KeywordIdea { keyword: string; volume: number | null; cpc: number | null; competition: number | null }
+/** Main search intent, normalized to the four buckets the app understands. */
+export type SearchIntent = "informational" | "commercial" | "transactional" | "navigational";
+
+/**
+ * A single keyword idea, matching the exact shape the app expects inside a
+ * research_requests.result_json array. Every field is defensively nullable —
+ * DataForSEO may omit any of the underlying sub-objects.
+ */
+export interface KeywordIdea {
+  keyword: string;
+  volume: number | null;
+  cpc: number | null;
+  competition: number | null;
+  /** SEO keyword difficulty, 0–100 (KD). */
+  difficulty: number | null;
+  intent: SearchIntent | null;
+  /** SERP feature / item types present, e.g. ["local_pack","people_also_ask"]. */
+  serpFeatures: string[] | null;
+}
+
+/** Coerce a value to a finite number or null. */
+function num(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** Normalize DataForSEO's main_intent string to one of our four buckets, else null. */
+function normIntent(v: unknown): SearchIntent | null {
+  if (typeof v !== "string") return null;
+  const s = v.trim().toLowerCase();
+  if (s === "informational" || s === "commercial" || s === "transactional" || s === "navigational") return s;
+  return null;
+}
+
+/** Pull a clean string[] of SERP feature/item types, or null when absent. */
+function serpTypes(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  const out = v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+  return out.length ? out : null;
+}
+
+/**
+ * Map one Labs item (keyword_ideas / ranked_keywords share the same nested
+ * sub-objects, sometimes under `keyword_data`) to the full KeywordIdea contract.
+ */
+function toKeywordIdea(it: any): KeywordIdea {
+  const kd = it?.keyword_data ?? it ?? {};
+  const info = kd?.keyword_info ?? {};
+  const props = kd?.keyword_properties ?? {};
+  const intentInfo = kd?.search_intent_info ?? {};
+  const serpInfo = kd?.serp_info ?? {};
+  return {
+    keyword: kd?.keyword ?? it?.keyword ?? "",
+    volume: num(info.search_volume),
+    cpc: num(info.cpc),
+    competition: num(info.competition),
+    difficulty: num(props.keyword_difficulty),
+    intent: normIntent(intentInfo.main_intent),
+    serpFeatures: serpTypes(serpInfo.serp_item_types),
+  };
+}
 
 /**
  * Keyword ideas for a seed term — the SEMrush "keyword magic" replacement.
  * Uses DataForSEO Labs keyword_ideas (Google). Returns related keywords with
- * monthly search volume, CPC, and competition (0–1), sorted by volume desc.
+ * monthly search volume, CPC, competition (0–1), keyword difficulty, main
+ * search intent, and the SERP features present — sorted by volume desc.
+ *
+ * Endpoint: POST /v3/dataforseo_labs/google/keyword_ideas/live
  */
 export async function keywordResearch(
   creds: DfsCreds,
@@ -225,13 +287,125 @@ export async function keywordResearch(
   if (!rt || rt.status_code !== 20000) throw new Error(rt?.status_message || "DataForSEO returned no result");
   const result = Array.isArray(rt.result) ? rt.result[0] : null;
   const items: any[] = Array.isArray(result?.items) ? result.items : [];
+  return items.map(toKeywordIdea).filter((k) => k.keyword);
+}
+
+/** One keyword a domain already ranks for — powers the "current rankings" view. */
+export interface RankedKeyword {
+  keyword: string;
+  /** Absolute SERP rank (ranked_serp_element.rank_absolute), or null. */
+  rank: number | null;
+  volume: number | null;
+  difficulty: number | null;
+  intent: SearchIntent | null;
+  /** The ranking URL on the target domain, or null. */
+  url: string | null;
+}
+
+/**
+ * Keywords a domain already ranks for, with each keyword's live SERP position.
+ * Uses DataForSEO Labs ranked_keywords (Google). Sorted by search volume desc.
+ *
+ * Endpoint: POST /v3/dataforseo_labs/google/ranked_keywords/live
+ */
+export async function rankedKeywords(
+  creds: DfsCreds,
+  domain: string,
+  locationName = "United States",
+  languageName = "English",
+  limit = 100,
+): Promise<RankedKeyword[]> {
+  const target = domain.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+  const payload = [{ target, location_name: locationName, language_name: languageName, limit, order_by: ["keyword_data.keyword_info.search_volume,desc"] }];
+  const resp = await post(creds, "/dataforseo_labs/google/ranked_keywords/live", payload);
+  const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  if (!rt || rt.status_code !== 20000) throw new Error(rt?.status_message || "DataForSEO returned no result");
+  const result = Array.isArray(rt.result) ? rt.result[0] : null;
+  const items: any[] = Array.isArray(result?.items) ? result.items : [];
   return items.map((it) => {
-    const info = it?.keyword_info ?? it?.keyword_data?.keyword_info ?? {};
+    const base = toKeywordIdea(it);
+    const rse = it?.ranked_serp_element ?? {};
+    const serpItem = rse?.serp_item ?? {};
     return {
-      keyword: it?.keyword ?? it?.keyword_data?.keyword ?? "",
-      volume: typeof info.search_volume === "number" ? info.search_volume : null,
-      cpc: typeof info.cpc === "number" ? info.cpc : null,
-      competition: typeof info.competition === "number" ? info.competition : null,
-    } as KeywordIdea;
+      keyword: base.keyword,
+      rank: num(serpItem.rank_absolute) ?? num(rse.rank_absolute),
+      volume: base.volume,
+      difficulty: base.difficulty,
+      intent: base.intent,
+      url: typeof serpItem.url === "string" ? serpItem.url : null,
+    } as RankedKeyword;
   }).filter((k) => k.keyword);
+}
+
+// ── Domain authority / backlinks (Backlinks + Labs) ─────────────────────────
+
+/** Aggregate authority signals for a domain — the SEMrush overview replacement. */
+export interface DomainAuthority {
+  /** Domain rank / authority score, 0–1000 (DataForSEO's backlink `rank`). */
+  authorityScore: number | null;
+  backlinks: number | null;
+  referringDomains: number | null;
+  /** Estimated monthly organic traffic (Labs organic `etv`). */
+  organicTraffic: number | null;
+  /** Number of organic keywords the domain ranks for. */
+  keywordCount: number | null;
+}
+
+/**
+ * Backlink summary for a domain: authority `rank`, total backlinks, and
+ * referring domains. Endpoint: POST /v3/backlinks/summary/live
+ */
+export async function backlinksSummary(
+  creds: DfsCreds,
+  domain: string,
+): Promise<{ authorityScore: number | null; backlinks: number | null; referringDomains: number | null }> {
+  const target = domain.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+  const payload = [{ target, internal_list_limit: 10, backlinks_status_type: "live" }];
+  const resp = await post(creds, "/backlinks/summary/live", payload);
+  const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  if (!rt || rt.status_code !== 20000) throw new Error(rt?.status_message || "DataForSEO returned no backlink summary");
+  const r = Array.isArray(rt.result) ? rt.result[0] : null;
+  return {
+    authorityScore: num(r?.rank),
+    backlinks: num(r?.backlinks),
+    referringDomains: num(r?.referring_domains),
+  };
+}
+
+/**
+ * Organic traffic + keyword-count estimate for a domain.
+ * Endpoint: POST /v3/dataforseo_labs/google/domain_rank_overview/live
+ */
+export async function domainRankOverview(
+  creds: DfsCreds,
+  domain: string,
+  locationName = "United States",
+  languageName = "English",
+): Promise<{ organicTraffic: number | null; keywordCount: number | null }> {
+  const target = domain.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+  const payload = [{ target, location_name: locationName, language_name: languageName }];
+  const resp = await post(creds, "/dataforseo_labs/google/domain_rank_overview/live", payload);
+  const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  if (!rt || rt.status_code !== 20000) throw new Error(rt?.status_message || "DataForSEO returned no domain overview");
+  const result = Array.isArray(rt.result) ? rt.result[0] : null;
+  const item = Array.isArray(result?.items) ? result.items[0] : null;
+  const organic = item?.metrics?.organic ?? {};
+  return {
+    organicTraffic: num(organic.etv),
+    keywordCount: num(organic.count),
+  };
+}
+
+/** Convenience: pull the full DomainAuthority bundle in one call. */
+export async function domainAuthority(
+  creds: DfsCreds,
+  domain: string,
+  locationName = "United States",
+  languageName = "English",
+): Promise<DomainAuthority> {
+  const [bl, ov] = await Promise.all([
+    backlinksSummary(creds, domain),
+    domainRankOverview(creds, domain, locationName, languageName),
+  ]);
+  return { ...bl, organicTraffic: ov.organicTraffic, keywordCount: ov.keywordCount };
 }
