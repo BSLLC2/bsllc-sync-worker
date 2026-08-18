@@ -1,0 +1,39 @@
+name: Enable client sign-off (make a task e-signable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact), e.g. LBL Law"
+        required: true
+        default: "LBL Law"
+      match:
+        description: "Part of the task title to match, e.g. Digital Logic transition"
+        required: true
+      link:
+        description: "Optional deliverable/agenda link (leave blank for a pure authorization sign-off)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Preview matches without changing anything"
+        type: boolean
+        default: false
+
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Enable sign-off
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm run enable-signoff -- \
+            --client="${{ inputs.client }}" \
+            --match="${{ inputs.match }}" \
+            ${{ inputs.link != '' && format('--link="{0}"', inputs.link) || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
