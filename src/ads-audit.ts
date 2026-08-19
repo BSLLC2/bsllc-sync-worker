@@ -23,6 +23,13 @@ const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
 
 /** Cost floor (micros) before a zero-conversion item is worth flagging. */
 const WASTE_FLOOR = 25_000_000;   // $25 over 90 days
+
+/** GAQL's DURING literals stop at LAST_30_DAYS — there is no LAST_90_DAYS — so
+ *  the 90-day windows are expressed as an explicit BETWEEN range. */
+function last90(): { start: string; end: string } {
+  const d = (offsetDays: number) => new Date(Date.now() - offsetDays * 86_400_000).toISOString().slice(0, 10);
+  return { start: d(90), end: d(1) };
+}
 const KEYWORD_FLOOR = 50_000_000; // $50 over 90 days
 
 interface Finding {
@@ -55,6 +62,7 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
   }
 
   const findings: Finding[] = [];
+  const { start: d90, end: dEnd } = last90();
 
   // ── 1. Campaign shape + budget pressure (last 30 days) ──────────────────
   const campaigns = await safeQuery(customer, "campaign", `
@@ -120,7 +128,7 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
     SELECT search_term_view.search_term, campaign.name, ad_group.name,
            metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions
       FROM search_term_view
-     WHERE segments.date DURING LAST_90_DAYS AND metrics.cost_micros > 0
+     WHERE segments.date BETWEEN '${d90}' AND '${dEnd}' AND metrics.cost_micros > 0
      ORDER BY metrics.cost_micros DESC
      LIMIT 500`);
 
@@ -149,7 +157,7 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
            campaign.name, ad_group.name,
            metrics.cost_micros, metrics.clicks, metrics.conversions
       FROM keyword_view
-     WHERE segments.date DURING LAST_90_DAYS AND metrics.cost_micros > 0
+     WHERE segments.date BETWEEN '${d90}' AND '${dEnd}' AND metrics.cost_micros > 0
      ORDER BY metrics.cost_micros DESC
      LIMIT 300`);
 
