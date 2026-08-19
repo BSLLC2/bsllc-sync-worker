@@ -70,7 +70,23 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
   const findings: Finding[] = [];
   const { start: d90, end: dEnd } = last90();
 
-  // ── 1. Campaign shape + budget pressure (last 30 days) ──────────────────
+  // ── 1. Campaign shape + budget pressure ─────────────────────────────────
+  // Impression-share metrics are averaged over whatever window you ask for, so a
+  // trailing-30 figure and a trailing-7 figure can differ enormously right after
+  // a structural change (campaigns consolidated, budgets moved). Report both:
+  // the 7-day number is the account as it stands, the 30-day is its recent
+  // average, and quoting one without the other invites exactly the kind of
+  // "your number disagrees with mine" standoff that neither side can resolve.
+  const campaignGaql = (window: string) => `
+    SELECT campaign.id, campaign.name, campaign.status,
+           campaign_budget.amount_micros,
+           metrics.cost_micros, metrics.clicks, metrics.conversions,
+           metrics.search_impression_share, metrics.search_budget_lost_impression_share,
+           metrics.search_rank_lost_impression_share
+      FROM campaign
+     WHERE segments.date DURING ${window} AND campaign.status = 'ENABLED'`;
+  const recent = await safeQuery(customer, "campaign 7d", campaignGaql("LAST_7_DAYS"));
+  const recentBy = new Map<string, any>(recent.map((r: any) => [String(r.campaign?.id), r]));
   const campaigns = await safeQuery(customer, "campaign", `
     SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
            campaign_budget.amount_micros,
@@ -90,9 +106,13 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
     const budgetLost = Number(r.metrics?.search_budget_lost_impression_share ?? 0);
     const rankLost = Number(r.metrics?.search_rank_lost_impression_share ?? 0);
     const is = Number(r.metrics?.search_impression_share ?? 0);
+    const r7 = recentBy.get(String(r.campaign?.id));
+    const bl7 = r7 ? Number(r7.metrics?.search_budget_lost_impression_share ?? 0) : null;
+    const rl7 = r7 ? Number(r7.metrics?.search_rank_lost_impression_share ?? 0) : null;
     console.log(
       `  ${r.campaign?.name}: ${usd(cost)} · ${clicks} clicks · ${conv.toFixed(1)} conv` +
-      ` · IS ${pct(is)} · budget-lost ${pct(budgetLost)} · rank-lost ${pct(rankLost)}`);
+      ` · IS ${pct(is)} · budget-lost ${pct(budgetLost)} · rank-lost ${pct(rankLost)}` +
+      (bl7 != null ? `\n      last 7d: budget-lost ${pct(bl7)} · rank-lost ${pct(rl7 as number)}` : ""));
 
     if (budgetLost > 0.10) {
       findings.push({
@@ -132,14 +152,20 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
   // ── 3. Search terms — the biggest single source of waste ────────────────
   const terms = await safeQuery(customer, "search terms", `
     SELECT search_term_view.search_term, campaign.name, ad_group.name,
-           metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions
+           metrics.cost_micros, metrics.clicks, metrics.impressions,
+           metrics.conversions, metrics.all_conversions
       FROM search_term_view
      WHERE segments.date BETWEEN '${d90}' AND '${dEnd}' AND metrics.cost_micros > 0
      ORDER BY metrics.cost_micros DESC
      LIMIT 500`);
 
   const waste = terms
-    .filter((r: any) => Number(r.metrics?.conversions ?? 0) === 0 && Number(r.metrics?.cost_micros ?? 0) >= WASTE_FLOOR)
+    // all_conversions as well as conversions: a conversion action not marked
+    // primary counts in one and not the other, and calling a term dead on the
+    // narrower column alone is how you end up proposing a negative for a term
+    // that is actually producing admissions.
+    .filter((r: any) => Number(r.metrics?.conversions ?? 0) === 0 && Number(r.metrics?.all_conversions ?? 0) === 0
+                     && Number(r.metrics?.cost_micros ?? 0) >= WASTE_FLOOR)
     .filter((r: any) => !negatives.has((r.search_term_view?.search_term ?? "").toLowerCase()));
   const wasteTotal = waste.reduce((s: number, r: any) => s + Number(r.metrics?.cost_micros ?? 0), 0);
 
