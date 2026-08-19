@@ -62,6 +62,7 @@
     "reconcile-lbl-tasks": "tsx src/reconcile-lbl-tasks.ts",
     "fix-connector-external-id": "tsx src/fix-connector-external-id.ts",
     "fix-och-baseline-status": "tsx src/fix-och-baseline-status.ts",
+    "fix-och-local-location": "tsx src/fix-och-local-location.ts",
     "add-commitment": "tsx src/add-commitment.ts"
   },
   "dependencies": {
