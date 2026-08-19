@@ -54,7 +54,8 @@
     "typecheck": "tsc --noEmit",
     "set-task-category": "tsx src/set-task-category.ts",
     "set-client-status": "tsx src/set-client-status.ts",
-    "reconcile-lbl-tasks": "tsx src/reconcile-lbl-tasks.ts"
+    "reconcile-lbl-tasks": "tsx src/reconcile-lbl-tasks.ts",
+    "fix-connector-external-id": "tsx src/fix-connector-external-id.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

@@ -1,0 +1,37 @@
+name: Fix connector external ID (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact or short), e.g. Franklin Brazing"
+        required: true
+      source:
+        description: "gsc | ga4 | google_ads | semrush | ..."
+        required: true
+      external_id:
+        description: "Correct external_id value"
+        required: true
+      dry_run:
+        description: "Preview only"
+        type: boolean
+        default: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Fix connector external ID
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm run fix-connector-external-id -- \
+            --client="${{ inputs.client }}" \
+            --source="${{ inputs.source }}" \
+            --external-id="${{ inputs.external_id }}" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}

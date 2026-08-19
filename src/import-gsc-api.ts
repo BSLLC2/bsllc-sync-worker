@@ -122,6 +122,17 @@ async function main() {
   }
 
   const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun });
+
+  // A per-property fetch failure (e.g. GSC 403) still lets the sync itself
+  // succeed — it persists an 'error' row rather than crashing. That let this
+  // job report green in GitHub Actions for days while every property 403'd
+  // and gsc.* metrics silently went stale. Fail loud when nothing came back
+  // live so a broken credential/permission shows up as a red run, not silence.
+  const errored = syncs.filter((s) => s.data_state === "error");
+  if (syncs.length > 0 && errored.length === syncs.length) {
+    console.error(`\nAll ${syncs.length} GSC propert(ies) failed — likely missing Search Console permission for the service account.`);
+    process.exit(1);
+  }
   process.exit(code);
 }
 
