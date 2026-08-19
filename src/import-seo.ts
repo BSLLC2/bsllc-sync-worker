@@ -27,7 +27,7 @@ const chunk = <T>(arr: T[], n: number): T[][] => {
 };
 
 interface ClientRow { id: string; name: string; seo_domain: string | null; seo_location: string | null; }
-interface TargetRow { id: string; keyword: string; scope: string; location_name: string | null; device: string | null; }
+interface TargetRow { id: string; keyword: string; scope: string; location_name: string | null; device: string | null; report_status: string; }
 
 function req(name: string): string {
   const v = process.env[name];
@@ -55,8 +55,12 @@ async function main() {
       const slug = slugify(client.name);
       if (onlyClient && slug !== onlyClient && client.id !== onlyClient) continue;
       const domain = (client.seo_domain || "").trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+      // Pull EVERY active target (core + baseline) — baseline keywords (e.g.
+      // pre-launch service terms) still get tracked weekly to build history,
+      // they just don't count toward the aggregate metrics below until
+      // promoted to 'core'.
       const targets = (await c.query<TargetRow>(
-        `SELECT id, keyword, scope, location_name, device FROM seo_targets WHERE client_id = $1 AND active = true`,
+        `SELECT id, keyword, scope, location_name, device, report_status FROM seo_targets WHERE client_id = $1 AND active = true`,
         [client.id],
       )).rows;
       if (!targets.length) { console.log(`· ${slug}: no active keywords, skipping`); continue; }
@@ -113,17 +117,25 @@ async function main() {
         continue;
       }
 
-      const tracked = results.length;
-      const ranked = results.filter((r) => r.rank != null);
-      const okErrors = results.filter((r) => r.error).length;
+      // Aggregate metrics (health score / client report headline) only count
+      // 'core' targets. 'baseline' keywords (e.g. terms for a service that
+      // hasn't launched yet) still got a rank pulled and persisted above —
+      // they just don't move the reported numbers until promoted to 'core'.
+      // results[i] aligns with targets[i] (same order the tasks were built).
+      const coreResults = results.filter((_, i) => targets[i]?.report_status !== "baseline");
+      const skippedBaseline = results.length - coreResults.length;
+
+      const tracked = coreResults.length;
+      const ranked = coreResults.filter((r) => r.rank != null);
+      const okErrors = coreResults.filter((r) => r.error).length;
       if (tracked === 0) { syncs.push({ ...base, data_state: "no_data", error_message: null, metrics: {} }); continue; }
 
       const avgPos = ranked.length ? ranked.reduce((s, r) => s + (r.rank as number), 0) / ranked.length : null;
       const top3 = ranked.filter((r) => (r.rank as number) <= 3).length;
       const top10 = ranked.filter((r) => (r.rank as number) <= 10).length;
       // Visibility: mean over ALL tracked of max(0,(101-rank))/100 (unranked = 0). 0..1.
-      const visibility = results.reduce((s, r) => s + (r.rank != null ? Math.max(0, 101 - (r.rank as number)) / 100 : 0), 0) / tracked;
-      const aiOverview = results.filter((r) => r.aiOverview).length;
+      const visibility = coreResults.reduce((s, r) => s + (r.rank != null ? Math.max(0, 101 - (r.rank as number)) / 100 : 0), 0) / tracked;
+      const aiOverview = coreResults.filter((r) => r.aiOverview).length;
 
       syncs.push({
         ...base,
@@ -139,7 +151,10 @@ async function main() {
           "seo.ai_overview_share": aiOverview / tracked,
         },
       });
-      console.log(`✓ ${slug}: ${ranked.length}/${tracked} ranked · avg pos ${avgPos ? avgPos.toFixed(1) : "—"} · top10 ${top10}/${tracked}`);
+      console.log(
+        `✓ ${slug}: ${ranked.length}/${tracked} ranked · avg pos ${avgPos ? avgPos.toFixed(1) : "—"} · top10 ${top10}/${tracked}` +
+          (skippedBaseline ? ` (+${skippedBaseline} baseline, tracked but not reported)` : ""),
+      );
     }
   } finally {
     await c.end();
