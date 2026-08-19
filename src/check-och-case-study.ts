@@ -27,7 +27,7 @@ async function main() {
       "ga4.conversions",
     ];
     const { rows: metrics } = await c.query(
-      `SELECT source, metric_key, data_state, synced_at, value_numeric
+      `SELECT source, metric_key, data_state, synced_at, period_start, period_end, value_numeric
          FROM metric_snapshots
         WHERE client_id = $1 AND metric_key = ANY($2::text[])
         ORDER BY metric_key, synced_at ASC`,
@@ -44,6 +44,19 @@ async function main() {
     for (const [k, rows] of bySeries) {
       const first = rows[0], last = rows[rows.length - 1];
       console.log(`  ${k}: ${rows.length} rows, first=${first.value_numeric}@${first.synced_at.toISOString().slice(0,10)} latest=${last.value_numeric}@${last.synced_at.toISOString().slice(0,10)} state=${last.data_state}`);
+    }
+    // For the two manual series specifically, print EVERY row's synced_at vs
+    // period_start/period_end — this is the actual bug check: if period_start
+    // spans many distinct months but synced_at clusters on 1-2 days, the
+    // case-study query's date_trunc('month', synced_at) grouping is silently
+    // collapsing a real multi-month backfill into a single month.
+    for (const k of ["manual.admissions_marketing", "manual.revenue_cents"]) {
+      const rows = bySeries.get(k) ?? [];
+      if (!rows.length) continue;
+      console.log(`\n${k} — every row (synced_at vs period_start/period_end):`);
+      for (const r of rows) {
+        console.log(`  synced_at=${r.synced_at.toISOString()} period_start=${r.period_start ? new Date(r.period_start).toISOString().slice(0,10) : "null"} period_end=${r.period_end ? new Date(r.period_end).toISOString().slice(0,10) : "null"} value=${r.value_numeric}`);
+      }
     }
 
     // Also: what does the overall portfolio revenue total look like today,
