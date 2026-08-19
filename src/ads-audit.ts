@@ -239,7 +239,11 @@ async function main() {
         WHERE cm.external_id IS NOT NULL AND btrim(cm.external_id) <> ''
         ORDER BY c.name`);
 
-    const targets = rows.filter((r) => !onlyClient || slugify(r.name) === onlyClient || digitsOnly(r.external_id) === digitsOnly(onlyClient));
+    // Match on slug prefix as well as exact: client names carry suffixes ("Ohio
+    // Community Health (OCH)" slugifies to ohio-community-health-och), and having
+    // to guess the suffix to run an audit is friction for no benefit.
+    const want = slugify(onlyClient);
+    const targets = rows.filter((r) => !onlyClient || slugify(r.name).startsWith(want) || digitsOnly(r.external_id) === digitsOnly(onlyClient));
     if (!targets.length) {
       console.log(`No mapped Google Ads accounts matched${onlyClient ? ` --client=${onlyClient}` : ""}.`);
       console.log(`Available: ${rows.map((r) => slugify(r.name)).join(", ")}`);

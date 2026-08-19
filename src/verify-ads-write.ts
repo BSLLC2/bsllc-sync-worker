@@ -32,7 +32,8 @@ async function main() {
       `SELECT c.name, cm.external_id FROM clients c
          JOIN connector_mappings cm ON cm.client_id = c.id AND cm.source='google_ads' AND cm.enabled = true
         WHERE cm.external_id IS NOT NULL AND btrim(cm.external_id) <> '' ORDER BY c.name`);
-    const targets = rows.filter((r) => !onlyClient || slugify(r.name) === onlyClient);
+    const want = slugify(onlyClient);
+    const targets = rows.filter((r) => !onlyClient || slugify(r.name).startsWith(want) || digitsOnly(r.external_id) === digitsOnly(onlyClient));
 
     console.log(`\n=== Google Ads WRITE capability (validate_only — nothing is changed) ===\n`);
     for (const t of targets) {
