@@ -130,11 +130,15 @@ export async function pullWindow(
  * caller can fall back to not emitting a verified figure at all rather than a
  * false zero.
  */
+// `conversion_action` as a FROM resource only exposes the action's own
+// attributes (name, id, status…) — GAQL rejects performance metrics there
+// ("could not support requested resources: 'CONVERSION_ACTION'"). Per-action
+// performance has to come from `customer` segmented by conversion action
+// name instead; filter to the one we want client-side.
 const CONVERSION_ACTION_GAQL = `
-  SELECT metrics.conversions, metrics.conversions_value
-  FROM conversion_action
+  SELECT segments.conversion_action_name, metrics.conversions, metrics.conversions_value
+  FROM customer
   WHERE segments.date BETWEEN '{{start}}' AND '{{end}}'
-    AND conversion_action.name = '{{name}}'
 `;
 
 export async function pullVerifiedConversions(
@@ -147,8 +151,7 @@ export async function pullVerifiedConversions(
 ): Promise<{ conversions: number; value: number } | null> {
   const query = CONVERSION_ACTION_GAQL
     .replace("{{start}}", queryStart)
-    .replace("{{end}}", queryEnd)
-    .replace("{{name}}", conversionActionName.replace(/'/g, "\\'"));
+    .replace("{{end}}", queryEnd);
   const runQuery = async () => {
     try {
       return await api
@@ -166,11 +169,14 @@ export async function pullVerifiedConversions(
   };
   const rows = await runQuery();
   if (!rows.length) return null;
-  // One row per day the action fired, if segments.date is implicitly grouped —
-  // sum defensively rather than assume a single aggregate row.
+  // One row per conversion action active in the window — keep only the one
+  // we're after (name match is case-sensitive and exact, same as how the
+  // offline-conversion importer creates it).
   let conversions = 0;
   let value = 0;
   for (const r of rows) {
+    const seg = (r.segments ?? {}) as Record<string, unknown>;
+    if (seg.conversion_action_name !== conversionActionName) continue;
     const m = (r.metrics ?? {}) as Record<string, unknown>;
     conversions += num(m.conversions);
     value += num(m.conversions_value);
