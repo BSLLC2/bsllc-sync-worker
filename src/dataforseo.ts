@@ -131,6 +131,18 @@ export const AEO_PROVIDERS: Record<string, string> = {
   perplexity: "perplexity",
 };
 
+/**
+ * model_name is required by the llm_responses/live endpoint — DataForSEO
+ * resolves a family name (e.g. "gpt-4.1-mini") to its latest version, so
+ * these don't need updating every time a provider ships a new snapshot.
+ * Overridable per provider via env var in case DataForSEO retires one.
+ */
+const AEO_MODEL_NAME: Record<string, string> = {
+  chatgpt: process.env.AEO_MODEL_CHATGPT || "gpt-4.1-mini",
+  gemini: process.env.AEO_MODEL_GEMINI || "gemini-2.5-pro",
+  perplexity: process.env.AEO_MODEL_PERPLEXITY || "sonar",
+};
+
 export interface AeoResult {
   prompt: string;
   provider: string;
@@ -187,7 +199,7 @@ export async function aeoCheck(
 ): Promise<AeoResult> {
   const seg = AEO_PROVIDERS[provider] || provider;
   try {
-    const payload = [{ user_prompt: prompt, web_search: true }];
+    const payload = [{ user_prompt: prompt, model_name: AEO_MODEL_NAME[provider] || AEO_MODEL_NAME.chatgpt, web_search: true }];
     const resp = await post(creds, `/ai_optimization/${seg}/llm_responses/live`, payload);
     const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
     if (!rt || rt.status_code !== 20000) {
