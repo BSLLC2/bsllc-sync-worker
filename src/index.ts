@@ -1,8 +1,12 @@
 import { loadConfig } from "./config.js";
 import { resolveTargets, type Target } from "./targets.js";
-import { makeAdsApi, pullWindow } from "./google-ads.js";
+import { makeAdsApi, pullWindow, pullVerifiedConversions } from "./google-ads.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { weeklyAsOfDates, windowFor } from "./dates.js";
+
+// Must match CONVERSION_ACTION_NAME in import-offline-conversions.ts — that's
+// the only action fed exclusively by real, sheet-matched admissions.
+const VERIFIED_CONVERSION_ACTION_NAME = "Admission (offline)";
 
 interface Args {
   mode: "backfill" | "incremental";
@@ -104,6 +108,31 @@ async function main() {
 
     try {
       const res = await pullWindow(api, cfg, target.customerId, w.queryStart, w.queryEnd);
+      // "ads.conversions" is every conversion action in the account (form
+      // fills, calls, page views…) — not the real, sheet-verified admissions
+      // this client actually closed. Where a client runs the offline-
+      // conversion loop (import-offline-conversions.ts), also pull JUST that
+      // conversion action so revenue/CPL can be reported on real outcomes,
+      // not raw on-platform conversion volume. Only in incremental mode or a
+      // single-client run — this is an extra API call per account per pull,
+      // and backfill × 52 weeks × every account would multiply that badly.
+      if (res.state === "live" && (args.mode === "incremental" || args.onlyClient)) {
+        try {
+          const verified = await pullVerifiedConversions(
+            api, cfg, target.customerId, w.queryStart, w.queryEnd, VERIFIED_CONVERSION_ACTION_NAME,
+          );
+          if (verified) {
+            res.metrics["ads.verified_conversions"] = verified.conversions;
+            res.metrics["ads.verified_conversion_value"] = verified.value;
+            const cost = res.metrics["ads.cost_micros"];
+            res.metrics["ads.verified_cost_per_conversion"] =
+              cost != null && verified.conversions > 0 ? cost / verified.conversions : null;
+          }
+        } catch (verifiedErr) {
+          // Non-fatal — the account-wide metrics above still land either way.
+          console.log(`    (verified-conversion pull failed for ${label}: ${formatError(verifiedErr)})`);
+        }
+      }
       syncs.push({ ...base, data_state: res.state, error_message: null, metrics: res.metrics });
       ok++;
       process.stdout.write(`  [${i + 1}/${jobs.length}] ${res.state.padEnd(7)} ${label}\n`);

@@ -115,3 +115,66 @@ export async function pullWindow(
     },
   };
 }
+
+/**
+ * "ads.conversions" above is `metrics.conversions` at the CUSTOMER level —
+ * summed across every conversion action in the account (form fills, calls,
+ * page views, whatever's configured). For accounts running the offline-
+ * conversion loop (see import-offline-conversions.ts), that number is not the
+ * one to trust: it isn't the count of real, sheet-verified admissions, and
+ * mixing it into revenue/CPL overstates both. This pulls the SAME window but
+ * scoped to one specific conversion action by name (e.g. "Admission
+ * (offline)") — the action that only gets uploaded when a real admission from
+ * the client's sheet is matched to a click. Returns null when that action
+ * doesn't exist on the account or had no conversions in the window, so the
+ * caller can fall back to not emitting a verified figure at all rather than a
+ * false zero.
+ */
+const CONVERSION_ACTION_GAQL = `
+  SELECT metrics.conversions, metrics.conversions_value
+  FROM conversion_action
+  WHERE segments.date BETWEEN '{{start}}' AND '{{end}}'
+    AND conversion_action.name = '{{name}}'
+`;
+
+export async function pullVerifiedConversions(
+  api: GoogleAdsApi,
+  cfg: Config,
+  customerId: string,
+  queryStart: string,
+  queryEnd: string,
+  conversionActionName: string,
+): Promise<{ conversions: number; value: number } | null> {
+  const query = CONVERSION_ACTION_GAQL
+    .replace("{{start}}", queryStart)
+    .replace("{{end}}", queryEnd)
+    .replace("{{name}}", conversionActionName.replace(/'/g, "\\'"));
+  const runQuery = async () => {
+    try {
+      return await api
+        .Customer({ customer_id: customerId, login_customer_id: cfg.loginCustomerId, refresh_token: cfg.refreshToken })
+        .query(query);
+    } catch (mccErr) {
+      try {
+        return await api
+          .Customer({ customer_id: customerId, refresh_token: cfg.refreshToken })
+          .query(query);
+      } catch {
+        throw mccErr;
+      }
+    }
+  };
+  const rows = await runQuery();
+  if (!rows.length) return null;
+  // One row per day the action fired, if segments.date is implicitly grouped —
+  // sum defensively rather than assume a single aggregate row.
+  let conversions = 0;
+  let value = 0;
+  for (const r of rows) {
+    const m = (r.metrics ?? {}) as Record<string, unknown>;
+    conversions += num(m.conversions);
+    value += num(m.conversions_value);
+  }
+  if (conversions === 0) return null;
+  return { conversions, value };
+}
