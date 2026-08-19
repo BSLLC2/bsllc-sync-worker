@@ -1,0 +1,29 @@
+name: Sync Slack user names
+
+# Keeps slack_user_cache warm (id -> display name) so the client-detail Slack
+# tab can show real names instead of raw Slack user ids. Names change rarely,
+# so daily is plenty. No-op when no bot token is set.
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Sync Slack users
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: npm run sync-slack-users
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=slack_users_sync --status=${{ job.status }}
