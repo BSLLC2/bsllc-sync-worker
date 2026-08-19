@@ -183,6 +183,9 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
   }
 
   // ── 4. Keywords — spend without return, and quality problems ────────────
+  // Live criteria only. A keyword paused mid-window still carries its spend for
+  // the trailing 90 days, so an unfiltered pull reports keywords that were dealt
+  // with weeks ago as though they were open waste.
   const kws = await safeQuery(customer, "keywords", `
     SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
            ad_group_criterion.quality_info.quality_score,
@@ -190,6 +193,8 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
            metrics.cost_micros, metrics.clicks, metrics.conversions
       FROM keyword_view
      WHERE segments.date BETWEEN '${d90}' AND '${dEnd}' AND metrics.cost_micros > 0
+       AND ad_group_criterion.status = 'ENABLED'
+       AND campaign.status = 'ENABLED'
      ORDER BY metrics.cost_micros DESC
      LIMIT 300`);
 

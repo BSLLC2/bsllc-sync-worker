@@ -1,0 +1,44 @@
+name: Apply Ads changes (reviewed change set)
+
+# Applies a checked-in change set to one Google Ads account. Dry run by default:
+# every mutate is validated with validate_only, and nothing is written unless
+# `apply` is set to true. Supports campaign daily budgets and campaign-level
+# negative keywords only — ad copy is deliberately out of scope.
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "Path to the change set JSON."
+        required: true
+        default: "data/och-ads-changes.json"
+      apply:
+        description: "Set to true to actually apply. Anything else is a dry run."
+        required: false
+        default: "false"
+
+concurrency:
+  group: ads-mutations
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Apply change set
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+        run: |
+          ARGS="--file=${{ inputs.file }}"
+          [ "${{ inputs.apply }}" = "true" ] && ARGS="$ARGS --apply"
+          npx tsx src/apply-ads-changes.ts $ARGS

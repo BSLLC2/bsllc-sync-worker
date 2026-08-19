@@ -1,0 +1,30 @@
+{
+  "client": "ohio-community-health",
+  "note": "Derived from the 8/19 read-only audit reconciled against the in-house 8/13 cleanup review. Competitor-name negatives are deliberately absent: both reviews found conquesting is converting, and the 8/10 review recorded 'do not add negatives for competitor names'.",
+  "protectedPatterns": ["ccat", "cat house", "center for chemical addictions"],
+  "budgets": [
+    {
+      "campaign": "OHC - Branded Search",
+      "newDailyUsd": 40,
+      "reason": "Branded converts at $22-32 CPA, the cheapest in the account. Budget-lost impression share is 23.7% over the last 7 days -- not the 70.3% trailing-30 figure, which predates the 8/13 removal of the 'ohiorecoverycenters' phrase keyword. $40 buys the remaining budget-limited share; the larger constraint is now Ad Rank at 45.7%, which budget cannot buy."
+    }
+  ],
+  "campaignNegatives": [
+    {
+      "campaign": "Treatment Center Search",
+      "matchType": "PHRASE",
+      "reason": "Levels of care OCH does not deliver. These negatives already exist on Branded; TCS was never covered.",
+      "keywords": [
+        "methadone",
+        "methadone clinic",
+        "sober living",
+        "halfway house",
+        "oxford house",
+        "detox",
+        "detoxification",
+        "inpatient",
+        "residential treatment"
+      ]
+    }
+  ]
+}

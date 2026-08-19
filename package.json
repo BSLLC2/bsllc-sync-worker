@@ -68,7 +68,8 @@
     "check-och-case-study": "tsx src/check-och-case-study.ts",
     "add-commitment": "tsx src/add-commitment.ts",
     "ads-audit": "tsx src/ads-audit.ts",
-    "verify-ads-write": "tsx src/verify-ads-write.ts"
+    "verify-ads-write": "tsx src/verify-ads-write.ts",
+    "apply-ads-changes": "tsx src/apply-ads-changes.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
