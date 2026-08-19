@@ -1,9 +1,9 @@
 name: Send client SMS (queue)
 
-# Drains the dashboard's sms_messages outbound queue via OpenPhone. Each teammate
-# texts from their own assigned OpenPhone number. Runs every minute (best-effort)
+# Drains the dashboard's sms_messages outbound queue via Dialpad. Each teammate
+# texts from their own assigned Dialpad number. Runs every minute (best-effort)
 # + on demand. Dormant-ready: a no-op when the queue is empty OR when
-# OPENPHONE_API_KEY isn't set yet (logs and exits 0, never fails).
+# DIALPAD_API_KEY isn't set yet (logs and exits 0, never fails).
 on:
   schedule:
     - cron: "* * * * *"
@@ -30,7 +30,7 @@ jobs:
       - name: Send client SMS
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          OPENPHONE_API_KEY: ${{ secrets.OPENPHONE_API_KEY }}
+          DIALPAD_API_KEY: ${{ secrets.DIALPAD_API_KEY }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             npm run send-sms -- --dry-run

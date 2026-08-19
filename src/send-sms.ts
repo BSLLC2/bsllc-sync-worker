@@ -3,19 +3,25 @@ import "dotenv/config";
 import pg from "pg";
 
 /**
- * Drains the dashboard's `sms_messages` outbound queue via OpenPhone. The
+ * Drains the dashboard's `sms_messages` outbound queue via Dialpad. The
  * deployed app makes ZERO third-party calls — it enqueues rows status='queued';
- * this worker holds the OpenPhone API key and does the sending. Each teammate
- * texts clients from THEIR OWN assigned OpenPhone number (stored on the row's
- * from_number, seeded from users.openphone_number).
+ * this worker holds the Dialpad API key and does the sending. Each teammate
+ * texts clients from THEIR OWN assigned Dialpad user (users.dialpad_user_id,
+ * set alongside users.dialpad_number in Settings) — looked up here by joining
+ * on the row's user_email, so the queue row itself never needs to carry it.
  *
- * OpenPhone: POST https://api.openphone.com/v1/messages
- *   Header:  Authorization: <OPENPHONE_API_KEY>   (raw key, NOT "Bearer")
- *   Body:    { content, from, to: [toNumber] }
- * On 2xx → status='sent', openphone_id=<id>, sent_at=now().
+ * Dialpad: POST https://dialpad.com/api/v2/sms
+ *   Header:  Authorization: Bearer <DIALPAD_API_KEY>
+ *   Body:    { to_numbers: [toNumber], text, user_id }
+ * On 2xx → status='sent', provider_message_id=<id>, sent_at=now().
  * On error → status='failed', error_text=<msg>.
  *
- * Dormant-ready: if OPENPHONE_API_KEY is unset, logs and exits 0 (nothing sent,
+ * NOTE: field names above are the best-confidence read from Dialpad's public
+ * docs/search results (developers.dialpad.com was unreachable while writing
+ * this) — treat the exact response shape as unverified until the first real
+ * send confirms it, and adjust `sendViaDialpad` if the live response differs.
+ *
+ * Dormant-ready: if DIALPAD_API_KEY is unset, logs and exits 0 (nothing sent,
  * no failures) so the workflow is safe to schedule before secrets exist.
  *
  *   npm run send-sms
@@ -29,31 +35,32 @@ interface QueuedSms {
   from_number: string | null;
   to_number: string | null;
   user_email: string | null;
+  dialpad_user_id: string | null;
 }
 
-interface OpenPhoneResp {
-  data?: { id?: string };
+interface DialpadResp {
   id?: string;
+  message_id?: string;
 }
 
-async function sendViaOpenPhone(apiKey: string, from: string, to: string, content: string): Promise<string> {
-  const res = await fetch("https://api.openphone.com/v1/messages", {
+async function sendViaDialpad(apiKey: string, userId: string, to: string, text: string): Promise<string> {
+  const res = await fetch("https://dialpad.com/api/v2/sms", {
     method: "POST",
-    headers: { Authorization: apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify({ content, from, to: [to] }),
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ to_numbers: [to], text, user_id: userId }),
   });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`OpenPhone → ${res.status} ${text.slice(0, 300)}`);
-  let json: OpenPhoneResp = {};
-  try { json = text ? (JSON.parse(text) as OpenPhoneResp) : {}; } catch { /* non-JSON 2xx */ }
-  return json.data?.id ?? json.id ?? "";
+  const responseText = await res.text();
+  if (!res.ok) throw new Error(`Dialpad → ${res.status} ${responseText.slice(0, 300)}`);
+  let json: DialpadResp = {};
+  try { json = responseText ? (JSON.parse(responseText) as DialpadResp) : {}; } catch { /* non-JSON 2xx */ }
+  return json.id ?? json.message_id ?? "";
 }
 
 async function main() {
   const dryRun = process.argv.slice(2).includes("--dry-run");
-  const apiKey = process.env.OPENPHONE_API_KEY?.trim();
+  const apiKey = process.env.DIALPAD_API_KEY?.trim();
   if (!apiKey && !dryRun) {
-    console.log("OPENPHONE_API_KEY not set — nothing sent.");
+    console.log("DIALPAD_API_KEY not set — nothing sent.");
     return;
   }
 
@@ -61,10 +68,11 @@ async function main() {
   await c.connect();
   try {
     const { rows } = await c.query<QueuedSms>(
-      `SELECT id, body, from_number, to_number, user_email
-         FROM sms_messages
-        WHERE status = 'queued' AND direction = 'outbound'
-        ORDER BY created_at ASC
+      `SELECT m.id, m.body, m.from_number, m.to_number, m.user_email, u.dialpad_user_id
+         FROM sms_messages m
+         LEFT JOIN users u ON u.email = m.user_email
+        WHERE m.status = 'queued' AND m.direction = 'outbound'
+        ORDER BY m.created_at ASC
         LIMIT 50`,
     );
     if (rows.length === 0) { console.log(`send-sms — nothing queued${dryRun ? " (dry-run)" : ""}.`); return; }
@@ -72,20 +80,21 @@ async function main() {
 
     let sent = 0, failed = 0;
     for (const r of rows) {
-      const from = r.from_number?.trim();
       const to = r.to_number?.trim();
-      if (!from || !to) {
-        if (!dryRun) await c.query(`UPDATE sms_messages SET status='failed', error_text=$2 WHERE id=$1`, [r.id, "missing from/to number"]);
-        console.log(`  ✗ ${r.id}: missing from/to number`); failed++; continue;
+      const userId = r.dialpad_user_id?.trim();
+      if (!to || !userId) {
+        const reason = !to ? "missing to number" : "sender has no Dialpad user id set (Settings)";
+        if (!dryRun) await c.query(`UPDATE sms_messages SET status='failed', error_text=$2 WHERE id=$1`, [r.id, reason]);
+        console.log(`  ✗ ${r.id}: ${reason}`); failed++; continue;
       }
-      if (dryRun) { console.log(`  would send ${from} → ${to}: ${r.body.slice(0, 60)}…`); sent++; continue; }
+      if (dryRun) { console.log(`  would send ${r.from_number ?? userId} → ${to}: ${r.body.slice(0, 60)}…`); sent++; continue; }
       try {
-        const openphoneId = await sendViaOpenPhone(apiKey!, from, to, r.body);
+        const providerMessageId = await sendViaDialpad(apiKey!, userId, to, r.body);
         await c.query(
-          `UPDATE sms_messages SET status='sent', openphone_id=$2, sent_at=now(), error_text=NULL WHERE id=$1`,
-          [r.id, openphoneId || null],
+          `UPDATE sms_messages SET status='sent', provider_message_id=$2, sent_at=now(), error_text=NULL WHERE id=$1`,
+          [r.id, providerMessageId || null],
         );
-        console.log(`  ✓ ${from} → ${to} (${r.user_email ?? "?"})`); sent++;
+        console.log(`  ✓ ${r.from_number ?? userId} → ${to} (${r.user_email ?? "?"})`); sent++;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         await c.query(`UPDATE sms_messages SET status='failed', error_text=$2 WHERE id=$1`, [r.id, msg.slice(0, 500)]);
