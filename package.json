@@ -38,6 +38,7 @@
     "snapshot-plans": "tsx src/snapshot-plan.ts",
     "share-meeting": "tsx src/share-meeting.ts",
     "dump-client-metrics": "tsx src/dump-client-metrics.ts",
+    "dump-client-meetings": "tsx src/dump-client-meetings.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
     "verify-qbo": "tsx src/verify-qbo.ts",
     "verify-slack": "tsx src/verify-slack.ts",
