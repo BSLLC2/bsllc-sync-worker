@@ -64,6 +64,7 @@
     "fix-och-baseline-status": "tsx src/fix-och-baseline-status.ts",
     "fix-och-local-location": "tsx src/fix-och-local-location.ts",
     "purge-semrush-data": "tsx src/purge-semrush-data.ts",
+    "check-recent-meetings": "tsx src/check-recent-meetings.ts",
     "add-commitment": "tsx src/add-commitment.ts",
     "ads-audit": "tsx src/ads-audit.ts",
     "verify-ads-write": "tsx src/verify-ads-write.ts"
