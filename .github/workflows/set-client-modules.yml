@@ -1,0 +1,49 @@
+name: Set client module flags (ads / seo / aeo / revenue ROI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact or short), e.g. LBL Law"
+        required: true
+      ads:
+        description: "Ads campaigns included"
+        type: boolean
+        default: false
+      seo:
+        description: "SEO tracking included"
+        type: boolean
+        default: false
+      aeo:
+        description: "AI visibility (AEO) included"
+        type: boolean
+        default: false
+      revenue_roi:
+        description: "Revenue & ROI included"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Preview only"
+        type: boolean
+        default: false
+
+jobs:
+  set:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Set client module flags
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm run set-client-modules -- \
+            --client="${{ inputs.client }}" \
+            ${{ inputs.ads && '--ads' || '' }} \
+            ${{ inputs.seo && '--seo' || '' }} \
+            ${{ inputs.aeo && '--aeo' || '' }} \
+            ${{ inputs.revenue_roi && '--revenue-roi' || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
