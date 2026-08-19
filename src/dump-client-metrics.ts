@@ -55,6 +55,22 @@ async function main() {
     for (const r of latest) {
       console.log(`  ${r.source} · ${r.metric_key} = ${r.value_numeric ?? r.value_text} [${r.data_state}] period ${String(r.period_start).slice(0,10)}→${String(r.period_end).slice(0,10)} synced ${String(r.synced_at).slice(0,10)}`);
     }
+
+    const { rows: targets } = await c.query<{ report_status: string; n: string }>(
+      `SELECT report_status, count(*) AS n FROM seo_targets WHERE client_id = $1 AND active = true GROUP BY report_status`,
+      [id],
+    );
+    console.log(`\n--- seo_targets (active) ---`);
+    for (const t of targets) console.log(`  ${t.report_status}: ${t.n}`);
+
+    const { rows: rankHistory } = await c.query<{ n: string; keywords: string; earliest: string; latest: string }>(
+      `SELECT count(*) AS n, count(DISTINCT keyword) AS keywords, min(captured_at) AS earliest, max(captured_at) AS latest
+         FROM seo_rank_history WHERE client_id = $1`,
+      [id],
+    );
+    const rh = rankHistory[0];
+    console.log(`\n--- seo_rank_history ---`);
+    console.log(`  ${rh?.n ?? 0} rows across ${rh?.keywords ?? 0} keyword(s), ${rh?.earliest ? String(rh.earliest).slice(0,10) : "—"} → ${rh?.latest ? String(rh.latest).slice(0,10) : "—"}`);
     console.log("");
   } finally {
     await c.end();
