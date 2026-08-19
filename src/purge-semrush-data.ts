@@ -23,8 +23,8 @@ async function main() {
     const { rows: mappings } = await c.query<{ n: string }>(
       `SELECT count(*) AS n FROM connector_mappings WHERE source = 'semrush'`,
     );
-    console.log(`metric_snapshots: ${snapshots[0].n} semrush rows`);
-    console.log(`connector_mappings: ${mappings[0].n} semrush rows`);
+    console.log(`metric_snapshots: ${snapshots[0]?.n ?? 0} semrush rows`);
+    console.log(`connector_mappings: ${mappings[0]?.n ?? 0} semrush rows`);
 
     if (dryRun) { console.log("Dry run — nothing deleted."); return; }
 

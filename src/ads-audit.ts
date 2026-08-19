@@ -21,6 +21,12 @@ const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").repla
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
 
+/** The API returns enums as integers over REST, not their string names, so a
+ *  `=== "BROAD"` comparison silently never matches and the broad-match count
+ *  reads 0 however many broad keywords there are. Map both forms. */
+const MATCH_TYPE: Record<string, string> = { "2": "EXACT", "3": "PHRASE", "4": "BROAD", EXACT: "EXACT", PHRASE: "PHRASE", BROAD: "BROAD" };
+const matchType = (v: unknown): string => MATCH_TYPE[String(v ?? "")] ?? String(v ?? "?");
+
 /** Cost floor (micros) before a zero-conversion item is worth flagging. */
 const WASTE_FLOOR = 25_000_000;   // $25 over 90 days
 
@@ -167,11 +173,11 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
     const qs = Number(r.ad_group_criterion?.quality_info?.quality_score ?? 0);
     return qs > 0 && qs < 5;
   });
-  const broad = kws.filter((r: any) => r.ad_group_criterion?.keyword?.match_type === "BROAD");
+  const broad = kws.filter((r: any) => matchType(r.ad_group_criterion?.keyword?.match_type) === "BROAD");
 
   console.log(`\n── Keywords: ${kws.length} with spend · ${deadKws.length} zero-conversion ≥$50 · ${lowQs.length} quality score <5 · ${broad.length} broad match ──`);
   for (const r of deadKws.slice(0, 20)) {
-    console.log(`  ${usd(Number(r.metrics.cost_micros))} · ${r.metrics.clicks} clicks · "${r.ad_group_criterion?.keyword?.text}" [${r.ad_group_criterion?.keyword?.match_type}] (${r.campaign?.name})`);
+    console.log(`  ${usd(Number(r.metrics.cost_micros))} · ${r.metrics.clicks} clicks · "${r.ad_group_criterion?.keyword?.text}" [${matchType(r.ad_group_criterion?.keyword?.match_type)}] (${r.campaign?.name})`);
   }
   if (deadKws.length) {
     findings.push({
