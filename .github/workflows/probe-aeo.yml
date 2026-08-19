@@ -1,0 +1,24 @@
+name: Probe AEO call (one-off diagnostic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "chatgpt | gemini | perplexity"
+        required: false
+        default: "chatgpt"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Probe
+        env:
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run probe-aeo -- --provider="${{ inputs.provider }}"

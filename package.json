@@ -40,6 +40,7 @@
     "dump-client-metrics": "tsx src/dump-client-metrics.ts",
     "show-service-account-email": "tsx src/show-service-account-email.ts",
     "import-och-seo-set": "tsx src/import-och-seo-set.ts",
+    "probe-aeo": "tsx src/probe-aeo.ts",
     "dump-client-meetings": "tsx src/dump-client-meetings.ts",
     "dump-client-tasks": "tsx src/dump-client-tasks.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
