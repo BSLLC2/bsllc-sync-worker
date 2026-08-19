@@ -79,17 +79,25 @@ async function main() {
     } catch { /* table not present yet */ }
 
     const now = Date.now();
+    // Tolerance for ordinary clock skew between the runner and Postgres before a
+    // future timestamp counts as bad data rather than rounding.
+    const FUTURE_SKEW_H = 2;
     const down: string[] = [];
     const erroring: { src: string; n: number; m: number }[] = [];
     for (const r of metric.rows) {
       const ageH = r.last_sync ? (now - r.last_sync.getTime()) / 3_600_000 : Infinity;
+      // A future-dated synced_at makes ageH negative, which is never > SLA — so a
+      // single bad row would mark the source permanently healthy and silence every
+      // staleness alert for it (the query takes MAX(synced_at), so one row is all
+      // it takes). Treat it as down: the data cannot be trusted either way.
+      if (ageH < -FUTURE_SKEW_H) { down.push(r.source); continue; }
       if (ageH > (SLA[r.source] ?? 36)) { down.push(r.source); continue; } // dark → down, regardless of errors
       const n = Number(r.recent_errors);
       if (n > 0) erroring.push({ src: r.source, n, m: Number(r.recent_total) });
     }
     for (const b of beats.rows) {
       const ageH = b.ran_at ? (now - b.ran_at.getTime()) / 3_600_000 : Infinity;
-      if (!b.ok || ageH > (SLA[b.job] ?? 36)) down.push(b.job);
+      if (!b.ok || ageH < -FUTURE_SKEW_H || ageH > (SLA[b.job] ?? 36)) down.push(b.job);
     }
 
     if (errDetail.rows.length) {

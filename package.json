@@ -63,7 +63,9 @@
     "fix-connector-external-id": "tsx src/fix-connector-external-id.ts",
     "fix-och-baseline-status": "tsx src/fix-och-baseline-status.ts",
     "fix-och-local-location": "tsx src/fix-och-local-location.ts",
-    "add-commitment": "tsx src/add-commitment.ts"
+    "add-commitment": "tsx src/add-commitment.ts",
+    "ads-audit": "tsx src/ads-audit.ts",
+    "verify-ads-write": "tsx src/verify-ads-write.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

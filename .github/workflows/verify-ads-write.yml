@@ -1,0 +1,34 @@
+name: Verify Ads write capability (validate_only)
+
+# Pulls search terms, budgets, keywords and ad strength from Google Ads and
+# prints a findings report. Makes NO changes — every call is a GAQL SELECT.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug (e.g. ohio-community-health). Blank = all mapped accounts."
+        required: false
+        default: ""
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run audit
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.client }}" ] && ARGS="--client=${{ inputs.client }}"
+          npx tsx src/verify-ads-write.ts $ARGS
