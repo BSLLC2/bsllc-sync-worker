@@ -221,11 +221,17 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
   }
 
   // ── 5. Ad strength / RSA coverage ───────────────────────────────────────
+  // Scope to live ad groups in live campaigns. Filtering on ad_group_ad.status
+  // alone still counts enabled ads sitting inside paused ad groups or paused
+  // campaigns, which inflates the ad-group count and invents coverage gaps in
+  // parts of the account nobody is running.
   const ads = await safeQuery(customer, "ads", `
     SELECT campaign.name, ad_group.id, ad_group.name,
            ad_group_ad.ad.id, ad_group_ad.ad.type, ad_group_ad.ad_strength, ad_group_ad.status
       FROM ad_group_ad
-     WHERE ad_group_ad.status = 'ENABLED'`);
+     WHERE ad_group_ad.status = 'ENABLED'
+       AND ad_group.status = 'ENABLED'
+       AND campaign.status = 'ENABLED'`);
   const byGroup = new Map<string, any[]>();
   for (const r of ads) {
     const k = `${r.campaign?.name} › ${r.ad_group?.name}`;
