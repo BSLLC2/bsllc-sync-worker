@@ -1,0 +1,24 @@
+name: Purge stale Semrush data (one-off cleanup)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview only"
+        type: boolean
+        default: false
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Purge Semrush rows
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          npm run purge-semrush-data -- ${{ inputs.dry_run && '--dry-run' || '' }}
