@@ -1,0 +1,28 @@
+name: Import OCH SEO/AEO tracking set (one-off)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse + print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Import
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-och-seo-set -- --dry-run
+          else
+            npm run import-och-seo-set
+          fi
