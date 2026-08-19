@@ -103,9 +103,9 @@ async function main() {
           const tgt = targets[i];
           await c.query(
             `INSERT INTO seo_rank_history
-               (id, seo_target_id, client_id, keyword, rank, ai_overview, device, scope, captured_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-            [randomUUID(), tgt?.id ?? null, client.id, r.keyword, r.rank, r.aiOverview, tgt?.device ?? null, tgt?.scope ?? null, now],
+               (id, seo_target_id, client_id, keyword, rank, ai_overview, device, scope, error, captured_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [randomUUID(), tgt?.id ?? null, client.id, r.keyword, r.rank, r.aiOverview, tgt?.device ?? null, tgt?.scope ?? null, r.error, now],
           );
         }
         console.log(`  persisted ${results.length} keyword ranks for ${slug}`);

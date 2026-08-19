@@ -80,10 +80,30 @@ function domainMatches(target: string, itemDomain?: string, itemUrl?: string): b
   return false;
 }
 
+/** Run `fn` over `items` with at most `limit` in flight at once. */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i] as T);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 /**
- * Look up organic rank for a batch of keywords in one call (live/advanced accepts
- * up to 100 tasks). Returns one SerpResult per input task, aligned by keyword.
- * `domain` is the tracked domain (bare host). Depth 100 = first ten pages.
+ * Look up organic rank for one keyword at a time — the live/advanced endpoint
+ * only processes a SINGLE task per call despite accepting an array (multi-task
+ * batching is a standard-queue/task_post feature, not live). Sending N tasks in
+ * one call silently resolves only tasks[0]; every other keyword comes back with
+ * a non-20000 status and rank: null, which then renders in the client report as
+ * "Not ranked" for keywords we never actually checked. Run with bounded
+ * concurrency instead (DataForSEO allows 2,000 calls/min, so even 100 keywords
+ * is nothing). `domain` is the tracked domain (bare host). Depth 100 = first
+ * ten pages.
  */
 export async function serpRanks(
   creds: DfsCreds,
@@ -91,35 +111,34 @@ export async function serpRanks(
   tasks: SerpTask[],
 ): Promise<SerpResult[]> {
   if (!tasks.length) return [];
-  const payload = tasks.map((t) => ({
-    keyword: t.keyword,
-    location_name: t.locationName,
-    language_name: t.languageName || "English",
-    device: t.device || "desktop",
-    depth: 100,
-  }));
-  const resp = await post(creds, "/serp/google/organic/live/advanced", payload);
-  const out: SerpResult[] = [];
-  const respTasks: any[] = Array.isArray(resp?.tasks) ? resp.tasks : [];
-  tasks.forEach((t, i) => {
-    const rt = respTasks[i];
-    if (!rt || rt.status_code !== 20000) {
-      out.push({ keyword: t.keyword, rank: null, aiOverview: false, error: rt?.status_message || "no task result" });
-      return;
-    }
-    const result = Array.isArray(rt.result) ? rt.result[0] : null;
-    const items: any[] = Array.isArray(result?.items) ? result.items : [];
-    let rank: number | null = null;
-    let aiOverview = false;
-    for (const it of items) {
-      if (it?.type === "ai_overview") aiOverview = true;
-      if (it?.type === "organic" && rank == null && domainMatches(domain, it.domain, it.url)) {
-        rank = typeof it.rank_absolute === "number" ? it.rank_absolute : (typeof it.rank_group === "number" ? it.rank_group : null);
+  return mapWithConcurrency(tasks, 8, async (t): Promise<SerpResult> => {
+    try {
+      const resp = await post(creds, "/serp/google/organic/live/advanced", [{
+        keyword: t.keyword,
+        location_name: t.locationName,
+        language_name: t.languageName || "English",
+        device: t.device || "desktop",
+        depth: 100,
+      }]);
+      const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+      if (!rt || rt.status_code !== 20000) {
+        return { keyword: t.keyword, rank: null, aiOverview: false, error: rt?.status_message || "no task result" };
       }
+      const result = Array.isArray(rt.result) ? rt.result[0] : null;
+      const items: any[] = Array.isArray(result?.items) ? result.items : [];
+      let rank: number | null = null;
+      let aiOverview = false;
+      for (const it of items) {
+        if (it?.type === "ai_overview") aiOverview = true;
+        if (it?.type === "organic" && rank == null && domainMatches(domain, it.domain, it.url)) {
+          rank = typeof it.rank_absolute === "number" ? it.rank_absolute : (typeof it.rank_group === "number" ? it.rank_group : null);
+        }
+      }
+      return { keyword: t.keyword, rank, aiOverview, error: null };
+    } catch (e) {
+      return { keyword: t.keyword, rank: null, aiOverview: false, error: e instanceof Error ? e.message : String(e) };
     }
-    out.push({ keyword: t.keyword, rank, aiOverview, error: null });
   });
-  return out;
 }
 
 // ── AEO / AI-answer visibility ───────────────────────────────────────────
