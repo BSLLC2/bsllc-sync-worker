@@ -9,6 +9,7 @@ interface Args {
   weeks: number;
   dryRun: boolean;
   accountsFile?: string;
+  onlyClient: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -16,6 +17,7 @@ function parseArgs(argv: string[]): Args {
   let weeks = 52;
   let dryRun = false;
   let accountsFile: string | undefined;
+  let onlyClient = "";
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a.startsWith("--mode=")) mode = a.slice(7) as Args["mode"];
@@ -25,6 +27,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--dry-run") dryRun = true;
     else if (a.startsWith("--accounts=")) accountsFile = a.slice(11);
     else if (a === "--accounts") accountsFile = argv[++i];
+    else if (a.startsWith("--client=")) onlyClient = a.slice("--client=".length).trim();
   }
   if (mode !== "backfill" && mode !== "incremental") {
     throw new Error(`--mode must be "backfill" or "incremental" (got "${mode}")`);
@@ -32,7 +35,7 @@ function parseArgs(argv: string[]): Args {
   if (!Number.isFinite(weeks) || weeks < 1) {
     throw new Error(`--weeks must be a positive integer (got "${weeks}")`);
   }
-  return { mode, weeks, dryRun, accountsFile };
+  return { mode, weeks, dryRun, accountsFile, onlyClient };
 }
 
 /** A (target, as-of date) unit of work. */
@@ -60,7 +63,8 @@ async function main() {
   const cfg = loadConfig();
   const api = makeAdsApi(cfg);
 
-  const { targets, from } = await resolveTargets(cfg, args.accountsFile);
+  let { targets, from } = await resolveTargets(cfg, args.accountsFile);
+  if (args.onlyClient) targets = targets.filter((t) => t.clientRef === args.onlyClient);
   if (targets.length === 0) {
     console.error(
       "No Google Ads accounts to sync. Enable them in Admin → Connectors, or " +

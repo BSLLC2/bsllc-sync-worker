@@ -56,7 +56,7 @@ async function main() {
 
     for (const client of clients) {
       const slug = slugify(client.name);
-      if (onlyClient && slug !== onlyClient) continue;
+      if (onlyClient && slug !== onlyClient && client.id !== onlyClient) continue;
       const prompts = (await c.query<{ prompt: string }>(
         `SELECT prompt FROM aeo_prompts WHERE client_id = $1 AND active = true`,
         [client.id],

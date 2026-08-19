@@ -85,16 +85,19 @@ function toSnapshot(project: any, siteId: string): Snapshot {
 }
 
 async function main() {
-  const dryRun = process.argv.slice(2).includes("--dry-run");
+  const argv = process.argv.slice(2);
+  const dryRun = argv.includes("--dry-run");
+  const onlyClient = (argv.find((a) => a.startsWith("--client="))?.slice(9) || "").trim();
   const token = req("WP_UMBRELLA_API_KEY");
   const databaseUrl = req("DATABASE_URL");
   const c = new pg.Client({ connectionString: databaseUrl });
   await c.connect();
   try {
-    const clients = (await c.query<{ id: string; name: string; web_ops_site_id: string }>(
+    let clients = (await c.query<{ id: string; name: string; web_ops_site_id: string }>(
       `SELECT id, name, web_ops_site_id FROM clients
         WHERE web_ops_add_on = true AND web_ops_site_id IS NOT NULL AND btrim(web_ops_site_id) <> ''`,
     )).rows;
+    if (onlyClient) clients = clients.filter((c) => c.id === onlyClient);
     if (!clients.length) { console.log("No WebOps clients with a WP Umbrella site id — nothing to do."); return; }
 
     let ok = 0, failed = 0;

@@ -21,23 +21,26 @@ import { runDashboardSync, type SyncEntry } from "./emit.js";
  *      or the GA4_PROPERTY_MAP env as JSON: {"slug":"123","slug2":"456"}
  *
  * Usage:
- *   npm run import-ga4 -- --map=diesel-power-group:460370940 [--since=2023-01-01] [--dry-run]
+ *   npm run import-ga4 -- --map=diesel-power-group:460370940 [--since=2023-01-01] [--dry-run] [--client=<clientId>]
  */
 
 interface Args {
   map: Record<string, string>;
   since: string;
   dryRun: boolean;
+  onlyClient: string;
 }
 
 function parseArgs(argv: string[]): Args {
   let mapStr = "";
   let since = "2023-01-01";
   let dryRun = false;
+  let onlyClient = "";
   for (const a of argv) {
     if (a.startsWith("--map=")) mapStr = a.slice("--map=".length);
     else if (a.startsWith("--since=")) since = a.slice("--since=".length);
     else if (a === "--dry-run") dryRun = true;
+    else if (a.startsWith("--client=")) onlyClient = a.slice("--client=".length).trim();
   }
   const map: Record<string, string> = {};
   if (mapStr) {
@@ -46,7 +49,7 @@ function parseArgs(argv: string[]): Args {
       if (slug && prop) map[slug.trim()] = prop.trim();
     }
   }
-  return { map, since, dryRun };
+  return { map, since, dryRun, onlyClient };
 }
 
 /**
@@ -141,6 +144,9 @@ async function main() {
     try { Object.assign(map, JSON.parse(process.env.GA4_PROPERTY_MAP)); } catch { throw new Error("GA4_PROPERTY_MAP is not valid JSON."); }
   }
   Object.assign(map, args.map); // --map wins
+  if (args.onlyClient) {
+    for (const clientId of Object.keys(map)) if (clientId !== args.onlyClient) delete map[clientId];
+  }
   if (!Object.keys(map).length) {
     throw new Error("No GA4 property IDs found. Add them in the dashboard (Admin → Connectors → GA4) or set GA4_PROPERTY_MAP.");
   }

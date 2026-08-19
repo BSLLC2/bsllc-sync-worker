@@ -18,7 +18,7 @@ import { runDashboardSync, type SyncEntry } from "./emit.js";
  *      is the GSC property: "sc-domain:example.com" (domain) or
  *      "https://example.com/" (URL-prefix).
  *
- * Usage:  npm run import-gsc-api [-- --dry-run] [--days=30]
+ * Usage:  npm run import-gsc-api [-- --dry-run] [--days=30] [--client=<clientId>]
  */
 
 const SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
@@ -84,11 +84,13 @@ async function main() {
   const argv = process.argv.slice(2);
   const dryRun = argv.includes("--dry-run");
   const days = Number(argv.find((a) => a.startsWith("--days="))?.slice(7) || 30);
+  const onlyClient = (argv.find((a) => a.startsWith("--client="))?.slice(9) || "").trim();
   const databaseUrl = process.env.DATABASE_URL?.trim();
   const dashboardDir = process.env.DASHBOARD_DIR?.trim();
   if (!databaseUrl || !dashboardDir) throw new Error("Missing DATABASE_URL / DASHBOARD_DIR.");
 
-  const map = await mapFromDb(databaseUrl);
+  let map = await mapFromDb(databaseUrl);
+  if (onlyClient) map = Object.fromEntries(Object.entries(map).filter(([clientId]) => clientId === onlyClient));
   if (!Object.keys(map).length) { console.log("No GSC properties in Admin → Connectors — nothing to import."); return; }
 
   // GSC data lags ~2 days; end the window there and go back `days`.

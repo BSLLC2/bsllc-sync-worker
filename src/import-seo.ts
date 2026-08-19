@@ -53,7 +53,7 @@ async function main() {
 
     for (const client of clients) {
       const slug = slugify(client.name);
-      if (onlyClient && slug !== onlyClient) continue;
+      if (onlyClient && slug !== onlyClient && client.id !== onlyClient) continue;
       const domain = (client.seo_domain || "").trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
       const targets = (await c.query<TargetRow>(
         `SELECT id, keyword, scope, location_name, device FROM seo_targets WHERE client_id = $1 AND active = true`,

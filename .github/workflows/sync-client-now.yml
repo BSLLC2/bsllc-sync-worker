@@ -1,0 +1,120 @@
+name: Sync one client now (on-demand)
+
+# Fired by the dashboard's per-client "Refresh" button (via GitHub's API) to
+# pull fresh data for ONE client across every live source right now, instead
+# of waiting for each source's own cron. Every step is scoped with --client=
+# so a refresh never touches other clients' API quota (Google Ads has 429'd
+# on the full-portfolio pull before — see incremental.yml). continue-on-error
+# per step: a connector this client doesn't use (or that's misconfigured)
+# must not block the others from refreshing.
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id)"
+        required: true
+
+concurrency:
+  group: sync-client-now-${{ inputs.client_id }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Search Console
+        working-directory: worker
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: npm run import-gsc-api -- --client="${{ inputs.client_id }}"
+
+      - name: GA4
+        working-directory: worker
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GA4_PROPERTY_MAP: ${{ secrets.GA4_PROPERTY_MAP }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: npm run import-ga4 -- --client="${{ inputs.client_id }}"
+
+      - name: Google Ads
+        working-directory: worker
+        continue-on-error: true
+        env:
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          # MCC id (BS LLC · Manager) — not secret, so it lives here in the open.
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: npm run incremental -- --client="${{ inputs.client_id }}"
+
+      - name: SEO ranks (DataForSEO)
+        working-directory: worker
+        continue-on-error: true
+        env:
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: npm run import-seo -- --client="${{ inputs.client_id }}"
+
+      - name: AEO (DataForSEO)
+        working-directory: worker
+        continue-on-error: true
+        env:
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+          AEO_PROVIDERS: ${{ secrets.AEO_PROVIDERS }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: npm run import-aeo -- --client="${{ inputs.client_id }}"
+
+      - name: Domain authority (DataForSEO)
+        working-directory: worker
+        continue-on-error: true
+        env:
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: npm run import-domain-authority -- --client="${{ inputs.client_id }}"
+
+      - name: WebOps
+        working-directory: worker
+        continue-on-error: true
+        env:
+          WP_UMBRELLA_API_KEY: ${{ secrets.WP_UMBRELLA_API_KEY || secrets.WPUMBRELLA_API_KEY }}
+          WP_UMBRELLA_BASE: ${{ secrets.WP_UMBRELLA_BASE }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run import-webops -- --client="${{ inputs.client_id }}"
