@@ -1,0 +1,69 @@
+name: Add commitment (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name (exact or short)"
+        required: true
+      title:
+        description: "Task title"
+        required: true
+      description:
+        description: "Task description (optional)"
+        required: false
+        default: ""
+      priority:
+        description: "P0 | P1 | P2 | P3 | P4 | P5"
+        required: false
+        default: "P2"
+      status:
+        description: "not_started | in_progress | blocked | complete"
+        required: false
+        default: "not_started"
+      owner_type:
+        description: "bs_llc | client"
+        required: false
+        default: "bs_llc"
+      assignee:
+        description: "Internal assignee name (optional)"
+        required: false
+        default: ""
+      due:
+        description: "Due date YYYY-MM-DD (optional)"
+        required: false
+        default: ""
+      category:
+        description: "setup | ongoing"
+        required: false
+        default: "ongoing"
+      dry_run:
+        description: "Preview only"
+        type: boolean
+        default: false
+
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Add commitment
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          args=()
+          args+=("--client=${{ inputs.client }}")
+          args+=("--title=${{ inputs.title }}")
+          [ -n "${{ inputs.description }}" ] && args+=("--description=${{ inputs.description }}")
+          args+=("--priority=${{ inputs.priority }}")
+          args+=("--status=${{ inputs.status }}")
+          args+=("--owner-type=${{ inputs.owner_type }}")
+          [ -n "${{ inputs.assignee }}" ] && args+=("--assignee=${{ inputs.assignee }}")
+          [ -n "${{ inputs.due }}" ] && args+=("--due=${{ inputs.due }}")
+          args+=("--category=${{ inputs.category }}")
+          [ "${{ inputs.dry_run }}" = "true" ] && args+=("--dry-run")
+          npm run add-commitment -- "${args[@]}"
