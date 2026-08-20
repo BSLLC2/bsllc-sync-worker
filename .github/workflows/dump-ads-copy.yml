@@ -1,0 +1,38 @@
+name: Dump Ads copy, landing pages and keywords (read-only)
+
+# Prints live ad headlines/descriptions, distinct landing pages, enabled
+# keywords, and a probe of served search terms. Every call is a GAQL SELECT.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client slug (e.g. ohio-community-health)."
+        required: true
+        default: "ohio-community-health"
+      probe:
+        description: "Comma-separated words to scan served search terms for. Blank = default list."
+        required: false
+        default: ""
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Dump ads copy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+        run: |
+          ARGS="--client=${{ inputs.client }}"
+          [ -n "${{ inputs.probe }}" ] && ARGS="$ARGS --probe=${{ inputs.probe }}"
+          npx tsx src/dump-ads-copy.ts $ARGS
