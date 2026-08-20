@@ -1,0 +1,29 @@
+name: Repair OCH keyword set (one-off)
+
+# Adds the five keyword targets that never landed on import, and normalises
+# every local-scope location_name to the form DataForSEO's API accepts.
+# Idempotent — safe to re-run.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only, write nothing (true/false)."
+        required: false
+        default: "true"
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Repair keyword set
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS=""
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="--dry-run"
+          npx tsx src/repair-och-seo-set.ts $ARGS
