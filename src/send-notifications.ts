@@ -5,9 +5,20 @@ import { JWT } from "google-auth-library";
 
 /**
  * Sends the client-facing emails the dashboard enqueues in `notifications_outbox`
- * (the deployed app makes zero third-party calls). v1 handles milestone review
- * requests: when an AM asks a client to review a deliverable, this emails the
- * client's lead — from digital@ — with a button into their dashboard.
+ * (the deployed app makes zero third-party calls). Handles two kinds:
+ *   - milestone_review_request: a deliverable needs the client's e-signature —
+ *     gated on the client's notify_approvals onboarding preference.
+ *   - task_visible_update: a task was put on the client's dashboard without
+ *     requiring a signature — gated on notify_updates.
+ * Both preferences come from the client's latest onboarding submission
+ * (email / text / both / none) — the app already skips enqueueing when the
+ * relevant preference is "none", so nothing here needs to re-check that.
+ *
+ * SMS is not wired here yet (Dialpad go-live is still pending — see the
+ * platform-wide task ledger) — "text" and "both" preferences still get the
+ * email today; once Dialpad is live, add an SMS branch reusing send-sms.ts's
+ * per-teammate Dialpad send, sourced from the client's mobile_number and the
+ * account's AM.
  *
  * Auth reuses the Gmail domain-wide delegation (same service account as the
  * email importer), impersonating digital@ with the gmail.send scope. That scope
@@ -42,14 +53,18 @@ async function sendAsDigital(rfc822: string): Promise<void> {
 }
 function esc(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
-function buildEmail(to: string, clientName: string, title: string, shareUrl: string, deliverable: string | null): string {
-  const subject = `Ready for your review: ${title}`;
-  const btn = `<a href="${esc(shareUrl)}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">Review in your dashboard →</a>`;
+function buildEmail(kind: string, to: string, clientName: string, title: string, shareUrl: string, deliverable: string | null): string {
+  const isSignoff = kind === "milestone_review_request";
+  const subject = isSignoff ? `Ready for your review: ${title}` : `Update: ${title}`;
+  const btn = `<a href="${esc(shareUrl)}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">${isSignoff ? "Review in your dashboard →" : "See it in your dashboard →"}</a>`;
   const alt = deliverable ? `<p style="font-size:13px;color:#666">Or open it directly: <a href="${esc(deliverable)}">${esc(deliverable)}</a></p>` : "";
+  const body = isSignoff
+    ? `<p><strong>${esc(title)}</strong> is ready for your review. Take a look, then approve it or request changes — right from your dashboard.</p>`
+    : `<p>There's a new update on your account: <strong>${esc(title)}</strong>. No action needed — just letting you know it landed.</p>`;
   const html =
     `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:520px;margin:0 auto;color:#111">` +
     `<p>Hi ${esc(clientName)},</p>` +
-    `<p><strong>${esc(title)}</strong> is ready for your review. Take a look, then approve it or request changes — right from your dashboard.</p>` +
+    body +
     `<p style="margin:20px 0">${btn}</p>${alt}` +
     `<p style="font-size:12px;color:#999;margin-top:24px">— BS LLC</p></div>`;
   return [
@@ -78,7 +93,7 @@ async function main() {
                  ORDER BY t.created_at DESC NULLS LAST LIMIT 1) AS token
          FROM notifications_outbox n
          JOIN clients cl ON cl.id = n.client_id
-        WHERE n.sent_at IS NULL AND n.kind = 'milestone_review_request'
+        WHERE n.sent_at IS NULL AND n.kind IN ('milestone_review_request', 'task_visible_update')
         ORDER BY n.created_at ASC`,
     );
     console.log(`send-notifications — ${rows.length} pending${dryRun ? " (dry-run)" : ""}`);
@@ -86,14 +101,14 @@ async function main() {
     let sent = 0, skipped = 0;
     for (const r of rows) {
       const payload = r.payload_json ? (JSON.parse(r.payload_json) as { title?: string; link?: string }) : {};
-      const title = payload.title || "A deliverable";
+      const title = payload.title || (r.kind === "milestone_review_request" ? "A deliverable" : "An update");
       if (!r.email) { console.log(`  skip ${r.id}: ${r.client_name} has no lead email — add one on the client page.`); skipped++; continue; }
       if (!r.token) { console.log(`  skip ${r.id}: ${r.client_name} has no active share link — enable one first.`); skipped++; continue; }
       const shareUrl = `${DASH}/#/share/${r.token}`;
       const greetName = (r.contact && r.contact.trim()) || r.client_name;
-      if (dryRun) { console.log(`  would email ${r.email} (${r.client_name}) — "${title}" → ${shareUrl}`); sent++; continue; }
+      if (dryRun) { console.log(`  would email ${r.email} (${r.client_name}) — [${r.kind}] "${title}" → ${shareUrl}`); sent++; continue; }
       try {
-        await sendAsDigital(buildEmail(r.email, greetName, title, shareUrl, payload.link ?? null));
+        await sendAsDigital(buildEmail(r.kind, r.email, greetName, title, shareUrl, payload.link ?? null));
         await c.query(`UPDATE notifications_outbox SET sent_at = now() WHERE id = $1`, [r.id]);
         console.log(`  sent → ${r.email} (${r.client_name})`);
         sent++;
