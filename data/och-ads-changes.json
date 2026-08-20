@@ -1,19 +1,27 @@
 {
   "client": "ohio-community-health",
-  "note": "Derived from the 8/19 read-only audit reconciled against the in-house 8/13 cleanup review. Competitor-name negatives are deliberately absent: both reviews found conquesting is converting, and the 8/10 review recorded 'do not add negatives for competitor names'.",
+  "note": "Derived from the 8/19 read-only audit, reconciled against the in-house 8/13 cleanup review and a second review on 8/20. The test for a negative here is NOT cost-per-conversion -- it is whether the term can produce an admission. Several blocked terms have converted cheaply, and that is the point: a detox or inpatient seeker who fills in a form is a referred-out on the admission board, not revenue. Competitor and partner terms are the opposite case -- service-appropriate for what OCH actually delivers -- which is why they are protected rather than blocked.",
   "protectedPatterns": ["ccat", "cat house", "center for chemical addictions"],
+  "heldPendingClientAnswer": {
+    "note": "Proposed as negatives but deliberately NOT applied until JB answers. Each would be wrong to block if the answer comes back yes.",
+    "keywords": [
+      "virtual — does OCH run a telehealth IOP? Also decides whether Dayton and Columbus are servable without a building.",
+      "telehealth — same question.",
+      "medicare — the largest single referred-out disqualifier in the fit analysis, but blocking it presumes OCH does not accept Medicare. Needs confirming, not assuming."
+    ]
+  },
   "budgets": [
     {
       "campaign": "OHC - Branded Search",
       "newDailyUsd": 40,
-      "reason": "Branded converts at $22-32 CPA, the cheapest in the account. Budget-lost impression share is 23.7% over the last 7 days -- not the 70.3% trailing-30 figure, which predates the 8/13 removal of the 'ohiorecoverycenters' phrase keyword. $40 buys the remaining budget-limited share; the larger constraint is now Ad Rank at 45.7%, which budget cannot buy."
+      "reason": "EXCEPTION to the standing no-increases-until-results rule, taken deliberately and before 8/25. Branded converts at $22-32 CPA, the cheapest in the account, and the keyword that made it look expensive ('ohiorecoverycenters' phrase, $559 for 2 conversions) was removed on 8/13. Note the tension: the raise was decided on the 30-day budget-lost figure of 70.3%, and the 7-day figure is 23.7% -- most of that headroom had already closed by the time the change was made. Treat this as a test, not a settled case. If impression share does not move within a week, the remaining constraint is Ad Rank (45.7% on 7 days) and the fix is ad relevance and the landing page, not money."
     }
   ],
   "campaignNegatives": [
     {
       "campaign": "Treatment Center Search",
       "matchType": "PHRASE",
-      "reason": "Levels of care OCH does not deliver. These negatives already exist on Branded; TCS was never covered.",
+      "reason": "Levels of care OCH cannot admit for. Already present on Branded; TCS was never covered. Three of these have converted historically -- 'midwest detox' ($7.73, 1 conv), 'inpatient substance abuse treatment near me' ($8.77, 1 conv), 'ucpc methadone clinic' ($10.62, 1 conv) -- roughly a $9 CPA. They are blocked anyway because a form fill from someone OCH must refer out is a cost, not a conversion. This is the same admissibility test that protects the competitor and CCAT clusters, applied in the other direction.",
       "keywords": [
         "methadone",
         "methadone clinic",
@@ -23,8 +31,14 @@
         "detox",
         "detoxification",
         "inpatient",
+        "residential",
         "residential treatment"
       ]
     }
+  ],
+  "knownRedundancies": [
+    "'methadone clinic' is fully covered by phrase 'methadone'; kept only because it is already live and removing it is a separate mutate type this tool does not support.",
+    "'residential treatment' is fully covered by phrase 'residential', added 8/20 after the narrower form was found not to catch 'residential drug treatment programs near me', which served last month.",
+    "'detoxification' is NOT redundant with 'detox' -- phrase match works on word sequences, not substrings."
   ]
 }
