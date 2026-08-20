@@ -5,12 +5,14 @@ import { JWT } from "google-auth-library";
 
 /**
  * Sends the client-facing emails the dashboard enqueues in `notifications_outbox`
- * (the deployed app makes zero third-party calls). Handles two kinds:
+ * (the deployed app makes zero third-party calls). Handles three kinds:
  *   - milestone_review_request: a deliverable needs the client's e-signature —
  *     gated on the client's notify_approvals onboarding preference.
  *   - task_visible_update: a task was put on the client's dashboard without
  *     requiring a signature — gated on notify_updates.
- * Both preferences come from the client's latest onboarding submission
+ *   - task_response_requested: lighter than a signature — no document, just
+ *     a reply in the task's comment thread — gated on notify_updates.
+ * All three preferences come from the client's latest onboarding submission
  * (email / text / both / none) — the app already skips enqueueing when the
  * relevant preference is "none", so nothing here needs to re-check that.
  *
@@ -53,14 +55,32 @@ async function sendAsDigital(rfc822: string): Promise<void> {
 }
 function esc(s: string): string { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
+interface KindCopy { subject: string; cta: string; body: string }
+const DEFAULT_COPY: KindCopy = {
+  subject: "Update",
+  cta: "See it in your dashboard →",
+  body: "— there's a new update on your account. No action needed, just letting you know it landed.",
+};
+const KIND_COPY: Record<string, KindCopy> = {
+  milestone_review_request: {
+    subject: "Ready for your review",
+    cta: "Review in your dashboard →",
+    body: "is ready for your review. Take a look, then approve it or request changes — right from your dashboard.",
+  },
+  task_response_requested: {
+    subject: "We need a quick reply",
+    cta: "Reply in your dashboard →",
+    body: "needs a quick response from you — no document to sign, just a comment on your dashboard.",
+  },
+  task_visible_update: DEFAULT_COPY,
+};
+
 function buildEmail(kind: string, to: string, clientName: string, title: string, shareUrl: string, deliverable: string | null): string {
-  const isSignoff = kind === "milestone_review_request";
-  const subject = isSignoff ? `Ready for your review: ${title}` : `Update: ${title}`;
-  const btn = `<a href="${esc(shareUrl)}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">${isSignoff ? "Review in your dashboard →" : "See it in your dashboard →"}</a>`;
+  const copy = KIND_COPY[kind] ?? DEFAULT_COPY;
+  const subject = `${copy.subject}: ${title}`;
+  const btn = `<a href="${esc(shareUrl)}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600">${copy.cta}</a>`;
   const alt = deliverable ? `<p style="font-size:13px;color:#666">Or open it directly: <a href="${esc(deliverable)}">${esc(deliverable)}</a></p>` : "";
-  const body = isSignoff
-    ? `<p><strong>${esc(title)}</strong> is ready for your review. Take a look, then approve it or request changes — right from your dashboard.</p>`
-    : `<p>There's a new update on your account: <strong>${esc(title)}</strong>. No action needed — just letting you know it landed.</p>`;
+  const body = `<p><strong>${esc(title)}</strong> ${copy.body}</p>`;
   const html =
     `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:520px;margin:0 auto;color:#111">` +
     `<p>Hi ${esc(clientName)},</p>` +
@@ -93,7 +113,7 @@ async function main() {
                  ORDER BY t.created_at DESC NULLS LAST LIMIT 1) AS token
          FROM notifications_outbox n
          JOIN clients cl ON cl.id = n.client_id
-        WHERE n.sent_at IS NULL AND n.kind IN ('milestone_review_request', 'task_visible_update')
+        WHERE n.sent_at IS NULL AND n.kind IN ('milestone_review_request', 'task_visible_update', 'task_response_requested')
         ORDER BY n.created_at ASC`,
     );
     console.log(`send-notifications — ${rows.length} pending${dryRun ? " (dry-run)" : ""}`);
@@ -101,7 +121,7 @@ async function main() {
     let sent = 0, skipped = 0;
     for (const r of rows) {
       const payload = r.payload_json ? (JSON.parse(r.payload_json) as { title?: string; link?: string }) : {};
-      const title = payload.title || (r.kind === "milestone_review_request" ? "A deliverable" : "An update");
+      const title = payload.title || (r.kind === "milestone_review_request" ? "A deliverable" : r.kind === "task_response_requested" ? "A task" : "An update");
       if (!r.email) { console.log(`  skip ${r.id}: ${r.client_name} has no lead email — add one on the client page.`); skipped++; continue; }
       if (!r.token) { console.log(`  skip ${r.id}: ${r.client_name} has no active share link — enable one first.`); skipped++; continue; }
       const shareUrl = `${DASH}/#/share/${r.token}`;
