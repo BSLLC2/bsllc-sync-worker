@@ -37,8 +37,12 @@ interface ChangeSet {
   client: string;
   note?: string;
   protectedPatterns?: string[];
+  /** URLs known to be failing policy review. Refuse to point anything at them. */
+  brokenUrls?: string[];
   budgets?: { campaign: string; newDailyUsd: number; reason: string }[];
   campaignNegatives?: { campaign: string; matchType: string; reason: string; keywords: string[] }[];
+  keywordFinalUrls?: { reason: string; map: { keyword: string; url: string }[] }[];
+  removeAssets?: { assetId: string; label: string; reason: string }[];
 }
 
 async function main() {
@@ -151,6 +155,82 @@ async function main() {
       console.log(`     APPLIED — ${names.length} criteria created`);
       for (const rn of names) rollback.push(`negative keyword: remove ${rn}`);
     }
+  }
+
+  // ── Keyword-level final URLs ─────────────────────────────────────────────
+  // A keyword's own final URL overrides the ad's, so this lands the click on the
+  // page that answers the search without touching ad copy — which matters here:
+  // editing an ad resubmits it for policy review, and this account has an open
+  // certificate question we do not want to trip.
+  for (const group of cs.keywordFinalUrls ?? []) {
+    const rows = await customer.query(`
+      SELECT ad_group_criterion.resource_name, ad_group_criterion.keyword.text,
+             ad_group_criterion.final_urls, campaign.name, ad_group.name
+        FROM ad_group_criterion
+       WHERE ad_group_criterion.type = 'KEYWORD'
+         AND ad_group_criterion.negative = FALSE
+         AND ad_group_criterion.status = 'ENABLED'
+         AND ad_group.status = 'ENABLED'
+         AND campaign.status = 'ENABLED'`);
+    const byText = new Map<string, any>();
+    for (const r of rows) byText.set(String(r.ad_group_criterion?.keyword?.text ?? "").toLowerCase(), r);
+
+    const payload: any[] = [];
+    for (const m of group.map) {
+      if ((cs.brokenUrls ?? []).some((b) => m.url.startsWith(b))) {
+        throw new Error(`Guard: "${m.url}" is on the broken-URL list. Refusing the whole run.`);
+      }
+      const row = byText.get(m.keyword.toLowerCase());
+      if (!row) { console.log(`  ⚠ keyword url: no enabled keyword "${m.keyword}" — skipped`); continue; }
+      const cur: string[] = row.ad_group_criterion?.final_urls ?? [];
+      if (cur.length === 1 && cur[0] === m.url) { console.log(`  ·  keyword url: "${m.keyword}" already → ${m.url}`); continue; }
+      console.log(`  ✅ keyword url: "${m.keyword}" ${cur.length ? cur.join(", ") : "(inherits ad)"} → ${m.url}`);
+      payload.push({ resource_name: row.ad_group_criterion.resource_name, final_urls: [m.url], _kw: m.keyword, _cur: cur });
+    }
+    if (!payload.length) { console.log(`  ·  keyword urls: nothing to change`); continue; }
+    console.log(`     ${group.reason}`);
+    const clean = payload.map(({ _kw, _cur, ...rest }) => rest);
+    await customer.adGroupCriteria.update(clean, { validate_only: true });
+    console.log(`     validated (${clean.length})`);
+    if (apply) {
+      await customer.adGroupCriteria.update(clean);
+      console.log(`     APPLIED`);
+      for (const p of payload) {
+        rollback.push(p._cur.length
+          ? `keyword "${p._kw}": restore final_urls to ${p._cur.join(", ")}`
+          : `keyword "${p._kw}": clear final_urls so it inherits the ad again (${p.resource_name})`);
+      }
+    }
+  }
+
+  // ── Detach assets ────────────────────────────────────────────────────────
+  // Removes the asset's links (campaign / ad group / account level) rather than
+  // the asset itself — Google keeps assets around, and detaching is what stops
+  // it serving. Reversible by re-linking the same asset id.
+  for (const a of cs.removeAssets ?? []) {
+    const rn = `customers/${customerId}/assets/${a.assetId}`;
+    const links: { resource_name: string; level: string }[] = [];
+    for (const [table, field, level] of [
+      ["campaign_asset", "campaign_asset", "campaign"],
+      ["ad_group_asset", "ad_group_asset", "ad group"],
+      ["customer_asset", "customer_asset", "account"],
+    ] as const) {
+      const rows = await customer.query(
+        `SELECT ${field}.resource_name FROM ${table} WHERE ${field}.asset = '${rn}' AND ${field}.status != 'REMOVED'`);
+      for (const r of rows) links.push({ resource_name: (r as any)[field].resource_name, level });
+    }
+    if (!links.length) { console.log(`  ·  asset "${a.label}" (${a.assetId}): not linked anywhere — nothing to do`); continue; }
+    console.log(`  ✅ detach asset: "${a.label}" from ${links.length} place(s) — ${links.map((l) => l.level).join(", ")}`);
+    console.log(`     ${a.reason}`);
+    for (const l of links) {
+      const api = l.level === "campaign" ? customer.campaignAssets : l.level === "ad group" ? customer.adGroupAssets : customer.customerAssets;
+      await api.remove([l.resource_name], { validate_only: true });
+      if (apply) {
+        await api.remove([l.resource_name]);
+        rollback.push(`asset "${a.label}": re-link asset ${a.assetId} at ${l.level} level (was ${l.resource_name})`);
+      }
+    }
+    console.log(apply ? `     APPLIED` : `     validated`);
   }
 
   console.log(apply ? `\n── To reverse ──` : `\n── Dry run complete. Re-run with --apply to make these changes. ──`);
