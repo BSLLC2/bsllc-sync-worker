@@ -39,14 +39,14 @@ const pct = (n: number, d: number) => (d ? `${((n / d) * 100).toFixed(1)}%` : "�
 
 interface Row { keys: string[]; clicks: number; impressions: number; ctr: number; position: number }
 
-async function gscToken(): Promise<string> {
+async function gscToken(): Promise<{ token: string; email: string }> {
   const raw = env("GOOGLE_SERVICE_ACCOUNT_JSON");
   let sa: any;
   try { sa = JSON.parse(raw); } catch { throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON."); }
   const jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: [SCOPE] });
   const { token } = await jwt.getAccessToken();
   if (!token) throw new Error("Failed to mint a Search Console access token.");
-  return token;
+  return { token, email: String(sa.client_email ?? "?") };
 }
 
 async function query(token: string, siteUrl: string, body: unknown): Promise<Row[]> {
@@ -75,7 +75,16 @@ async function query(token: string, siteUrl: string, body: unknown): Promise<Row
  */
 async function listSites(token: string): Promise<string[]> {
   const res = await fetch(`${API}/sites`, { headers: { authorization: `Bearer ${token}` } });
-  if (!res.ok) return [];
+  if (!res.ok) {
+    // Do NOT swallow this. An empty list and a rejected request look identical
+    // downstream but have opposite fixes: one is "grant the account access to
+    // the property", the other is "enable the Search Console API on the GCP
+    // project" or "the credentials are wrong". Reporting the first when it is
+    // really the second sends someone to the wrong console.
+    const body = await res.text().catch(() => "");
+    throw new Error(`Search Console rejected the account listing itself (${res.status}). ` +
+      `This is a credentials or API-enablement problem, not a per-property permission one.\n${body.slice(0, 400)}`);
+  }
   const body = (await res.json()) as { siteEntry?: { siteUrl: string; permissionLevel: string }[] };
   return (body.siteEntry ?? [])
     .filter((e) => e.permissionLevel !== "siteUnverifiedUser")
@@ -110,7 +119,8 @@ async function main() {
     console.log(`\n${rows[0]!.name} — ${siteUrl} — last ${days} days (READ ONLY)\n${"═".repeat(74)}`);
   } finally { await pgc.end(); }
 
-  const token = await gscToken();
+  const { token, email } = await gscToken();
+  console.log(`  service account: ${email}`);
 
   // Reconcile the mapped property against what the service account can read,
   // so a permissions mismatch reports the fix instead of a bare 403.
@@ -128,8 +138,12 @@ async function main() {
       throw new Error(`Add the service account to ${siteUrl} in Search Console (Settings > Users and permissions), or map the client to one of the properties above.`);
     }
   } else if (!readable.length) {
-    console.error(`\nThis service account can read NO Search Console properties at all.`);
-    throw new Error(`The service account has not been added to any property yet.`);
+    console.error(`\nThe listing succeeded but is EMPTY: ${email} is not a user on any`);
+    console.error(`Search Console property. Add it at Search Console > the property >`);
+    console.error(`Settings > Users and permissions > Add user, with at least Restricted`);
+    console.error(`access, then re-run. Note that adding a user to a URL-prefix property`);
+    console.error(`does not grant the sc-domain: property, or the reverse.`);
+    throw new Error(`No readable properties for ${email}.`);
   }
 
   const end = new Date(Date.now() - 2 * 86_400_000); // GSC finalises ~2 days back

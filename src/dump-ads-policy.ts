@@ -5,12 +5,17 @@ import { GoogleAdsApi } from "google-ads-api";
 import { loadConfig, digitsOnly } from "./config.js";
 
 /**
- * Read-only policy state for an account: which assets and ads are disapproved
- * or limited, the exact policy topic behind each, and the destination URL when
- * there is one.
+ * Read-only policy state for an account: every asset and ad carrying a policy
+ * topic, the exact topic behind each, and the destination URL when there is one.
  *
  * Google's disapproval emails name a count and a policy label but not the asset
  * or the URL, which is the only part you can act on. This prints both.
+ *
+ * Selection is by "carries a policy topic", NOT by approval status. An ad can be
+ * APPROVED and still carry a restricting topic -- served, but only to a narrowed
+ * audience or geography. Filtering on DISAPPROVED/APPROVED_LIMITED alone hides
+ * exactly those, and they are the ones that quietly suppress delivery while the
+ * UI shows a green Approved label.
  *
  *   npm run dump-ads-policy -- --client=ohio-community-health
  */
@@ -25,6 +30,17 @@ const REVIEW: Record<string, string> = {
   "2": "REVIEW_IN_PROGRESS", "3": "REVIEWED", "4": "UNDER_APPEAL", "5": "ELIGIBLE_MAY_SERVE",
 };
 const name = (m: Record<string, string>, v: unknown) => m[String(v ?? "")] ?? String(v ?? "?");
+
+/**
+ * Worth printing? Anything not plainly approved, plus anything carrying a policy
+ * topic at all -- an APPROVED ad with a topic attached is still restricted, and
+ * that restriction is invisible from the approval label alone.
+ */
+function flagged(summary: any): boolean {
+  const status = name(APPROVAL, summary?.approval_status);
+  if (status !== "APPROVED") return true;
+  return (summary?.policy_topic_entries ?? []).length > 0;
+}
 
 function printTopics(entries: any[], indent = "     ") {
   for (const e of entries ?? []) {
@@ -80,12 +96,9 @@ async function main() {
            asset.policy_summary.policy_topic_entries
       FROM asset`);
 
-  const badAssets = assets.filter((a: any) => {
-    const s = name(APPROVAL, a.asset?.policy_summary?.approval_status);
-    return s === "DISAPPROVED" || s === "APPROVED_LIMITED";
-  });
+  const badAssets = assets.filter((a: any) => flagged(a.asset?.policy_summary));
 
-  console.log(`\n── Assets: ${assets.length} total · ${badAssets.length} disapproved or limited ──`);
+  console.log(`\n── Assets: ${assets.length} total · ${badAssets.length} carrying a policy topic ──`);
   for (const a of badAssets) {
     const s = a.asset ?? {};
     const label = s.sitelink_asset?.link_text || s.callout_asset?.callout_text || s.structured_snippet_asset?.header || s.name || `asset ${s.id}`;
@@ -105,11 +118,8 @@ async function main() {
       FROM ad_group_ad
      WHERE ad_group_ad.status != 'REMOVED'`);
 
-  const badAds = ads.filter((a: any) => {
-    const s = name(APPROVAL, a.ad_group_ad?.policy_summary?.approval_status);
-    return s === "DISAPPROVED" || s === "APPROVED_LIMITED";
-  });
-  console.log(`\n── Ads: ${ads.length} total · ${badAds.length} disapproved or limited ──`);
+  const badAds = ads.filter((a: any) => flagged(a.ad_group_ad?.policy_summary));
+  console.log(`\n── Ads: ${ads.length} total · ${badAds.length} carrying a policy topic ──`);
   for (const a of badAds) {
     const s = a.ad_group_ad ?? {};
     console.log(`\n  ${name(APPROVAL, s.policy_summary?.approval_status)} · ${name(REVIEW, s.policy_summary?.review_status)}`);
@@ -118,7 +128,7 @@ async function main() {
     printTopics(s.policy_summary?.policy_topic_entries);
   }
 
-  if (!badAssets.length && !badAds.length) console.log(`\n  Nothing disapproved or limited right now.`);
+  if (!badAssets.length && !badAds.length) console.log(`\n  No asset or ad carries a policy topic right now.`);
   console.log("");
 }
 
