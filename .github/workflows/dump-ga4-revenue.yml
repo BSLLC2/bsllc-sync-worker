@@ -1,0 +1,33 @@
+name: Dump GA4 revenue — by channel, landing page, event (read-only)
+
+# Pulls revenue GA4 holds but import-ga4 never requests: channel group, organic
+# landing page, and per-event value. Read-only; writes nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name prefix, e.g. Tablespoon"
+        required: true
+        default: "Tablespoon"
+      days:
+        description: "Look-back window in days."
+        required: false
+        default: "90"
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Dump GA4 revenue
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          npm run dump-ga4-revenue -- \
+            --client="${{ inputs.client }}" \
+            --days="${{ inputs.days }}"
