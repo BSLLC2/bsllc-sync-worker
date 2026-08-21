@@ -36,7 +36,16 @@ interface QueuedSms {
   to_number: string | null;
   user_email: string | null;
   dialpad_user_id: string | null;
+  created_at: string;
 }
+
+// A transient Dialpad/network error (5xx, timeout, rate limit) used to mark
+// the row 'failed' on the very first attempt — one blip and the text was
+// gone for good, since nothing re-selects a 'failed' row. Now it's left as
+// 'queued' (this cron runs every few minutes, see send-sms.yml) so the next
+// run retries automatically, and only gives up for real once a row has been
+// sitting in the queue this long — several runs' worth of chances.
+const GIVE_UP_AFTER_MS = 24 * 60 * 60 * 1000;
 
 interface DialpadResp {
   id?: string;
@@ -68,7 +77,7 @@ async function main() {
   await c.connect();
   try {
     const { rows } = await c.query<QueuedSms>(
-      `SELECT m.id, m.body, m.from_number, m.to_number, m.user_email, u.dialpad_user_id
+      `SELECT m.id, m.body, m.from_number, m.to_number, m.user_email, m.created_at, u.dialpad_user_id
          FROM sms_messages m
          LEFT JOIN users u ON u.email = m.user_email
         WHERE m.status = 'queued' AND m.direction = 'outbound'
@@ -78,7 +87,7 @@ async function main() {
     if (rows.length === 0) { console.log(`send-sms — nothing queued${dryRun ? " (dry-run)" : ""}.`); return; }
     console.log(`send-sms — ${rows.length} queued${dryRun ? " (dry-run)" : ""}`);
 
-    let sent = 0, failed = 0;
+    let sent = 0, failed = 0, retrying = 0;
     for (const r of rows) {
       const to = r.to_number?.trim();
       const userId = r.dialpad_user_id?.trim();
@@ -97,11 +106,18 @@ async function main() {
         console.log(`  ✓ ${r.from_number ?? userId} → ${to} (${r.user_email ?? "?"})`); sent++;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        await c.query(`UPDATE sms_messages SET status='failed', error_text=$2 WHERE id=$1`, [r.id, msg.slice(0, 500)]);
-        console.log(`  ✗ ${r.id} (${to}): ${msg}`); failed++;
+        const ageMs = Date.now() - new Date(r.created_at).getTime();
+        if (ageMs > GIVE_UP_AFTER_MS) {
+          await c.query(`UPDATE sms_messages SET status='failed', error_text=$2 WHERE id=$1`, [r.id, `Gave up after retrying for 24h: ${msg}`.slice(0, 500)]);
+          console.log(`  ✗ ${r.id} (${to}): giving up after 24h of retries — ${msg}`); failed++;
+        } else {
+          // Leave status='queued' — record the error for visibility, next run retries it.
+          await c.query(`UPDATE sms_messages SET error_text=$2 WHERE id=$1`, [r.id, msg.slice(0, 500)]);
+          console.log(`  ⟳ ${r.id} (${to}): will retry — ${msg}`); retrying++;
+        }
       }
     }
-    console.log(`Done: ${sent} ${dryRun ? "to send" : "sent"}, ${failed} failed.`);
+    console.log(`Done: ${sent} ${dryRun ? "to send" : "sent"}, ${failed} failed, ${retrying} will retry.`);
   } finally {
     await c.end();
   }
