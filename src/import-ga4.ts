@@ -216,23 +216,29 @@ async function main() {
     console.log(`  ${slug} (property ${propertyId}) — ${planted} months via ${convMetric} (+sessions)`);
   }
 
-  if (denied.length) {
-    console.error(`\n${denied.length} propert(ies) the service account cannot read:`);
+  // The denied list is deliberately printed AFTER the sync summary, below.
+  // The summary is one line per client-month -- hundreds of them -- so anything
+  // printed before it scrolls out of reach in CI. The actionable part has to be
+  // the last thing in the log or nobody sees it.
+  const reportDenied = () => {
+    if (!denied.length) return;
+    console.error(`\n${denied.length} GA4 propert(ies) the service account cannot read:`);
     for (const d of denied) console.error(`  ${d}`);
-    console.error(`Add ${serviceAccount().client_email} as a Viewer on each`);
-    console.error(`(GA4 → Admin → Property access management).`);
-  }
+    console.error(`\nFix: add ${serviceAccount().client_email} as a Viewer on each`);
+    console.error(`(GA4 → Admin → Property access management → +). Everything else imported fine.`);
+  };
 
   if (!syncs.length) {
     // No rows can mean "no data in range" (fine) or "every property was denied"
     // (not fine). Only the second is a failure, so distinguish them rather than
     // exiting 0 on a run where nothing worked.
-    if (denied.length) { console.error(`\nEvery GA4 property failed — nothing imported.`); process.exit(1); }
+    if (denied.length) { reportDenied(); console.error(`\nEvery GA4 property failed — nothing imported.`); process.exit(1); }
     console.log("GA4 returned no rows for any property — nothing to plant.");
     process.exit(0);
   }
   console.log(`\nPlanting ${syncs.length} monthly snapshots from ${Object.keys(map).length - denied.length} propert(ies).`);
   const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun: args.dryRun });
+  reportDenied();
   process.exit(code || (denied.length ? 1 : 0));
 }
 
