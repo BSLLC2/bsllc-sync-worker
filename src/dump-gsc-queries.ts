@@ -57,7 +57,10 @@ async function query(token: string, siteUrl: string, body: unknown): Promise<Row
   });
   if (!res.ok) {
     const t = await res.text().catch(() => "");
-    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl} — add the service account as a user in Search Console.`);
+    if (res.status === 403 && /has not been used in project|is disabled/i.test(t)) {
+      throw new Error(`GSC API is DISABLED on the Google Cloud project, not a property permission problem. ${t.slice(0, 300)}`);
+    }
+    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl}: ${t.slice(0, 300)}`);
     throw new Error(`GSC ${res.status}: ${t.slice(0, 300)}`);
   }
   return ((await res.json()) as any).rows ?? [];

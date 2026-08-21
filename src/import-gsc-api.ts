@@ -71,7 +71,15 @@ async function queryTotals(token: string, siteUrl: string, startDate: string, en
   });
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl} — add the service account as a user in Search Console.`);
+    // Never assert a cause on 403 without reading the body. Search Console
+    // returns 403 both for "this account is not a user on this property" and
+    // for "the Search Console API is disabled on this GCP project", and the
+    // fixes are in different consoles. Asserting the first cost days of
+    // looking at property permissions while the API sat switched off.
+    if (res.status === 403 && /has not been used in project|is disabled/i.test(body)) {
+      throw new Error(`GSC API is DISABLED on the Google Cloud project — this is not a property permission. ${body.slice(0, 300)}`);
+    }
+    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl}: ${body.slice(0, 300)}`);
     throw new Error(`GSC query ${siteUrl} → ${res.status} ${body.slice(0, 200)}`);
   }
   const json: any = await res.json();
@@ -132,7 +140,10 @@ async function main() {
   // live so a broken credential/permission shows up as a red run, not silence.
   const errored = syncs.filter((s) => s.data_state === "error");
   if (syncs.length > 0 && errored.length === syncs.length) {
-    console.error(`\nAll ${syncs.length} GSC propert(ies) failed — likely missing Search Console permission for the service account.`);
+    console.error(`\nAll ${syncs.length} GSC propert(ies) failed. When EVERY property fails at once the`);
+    console.error(`cause is almost never per-property permissions — look at the credential and`);
+    console.error(`at whether the Search Console API is enabled on the Cloud project. First error:`);
+    console.error(`  ${errored[0]?.error_message ?? "(none recorded)"}`);
     process.exit(1);
   }
   process.exit(code);
