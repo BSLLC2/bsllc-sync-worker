@@ -1,16 +1,16 @@
 {
   "client": "ohio-community-health",
   "note": "8/19-8/21. The test for a negative is whether the term can produce an ADMISSION, not its cost per conversion. Several blocked terms converted cheaply -- that is the point: a detox or inpatient seeker who fills in a form is a referred-out on the admission board, not revenue. Competitor and partner terms are the opposite case and are protected rather than blocked.",
-  "protectedPatterns": ["ccat", "cat house", "center for chemical addictions"],
-  "brokenUrls": [
-    "https://ohiorecoverycenters.com/addiction-treatment-cincinnati/",
-    "https://ohiorecoverycenters.com/services/sober-living/"
+  "protectedPatterns": [
+    "ccat",
+    "cat house",
+    "center for chemical addictions"
   ],
   "heldPendingClientAnswer": {
     "note": "Proposed but deliberately NOT applied until JB answers. Each would be wrong to block if the answer is yes.",
     "keywords": [
-      "virtual / telehealth — does OCH run a structured virtual IOP? Also decides whether Dayton and Columbus are servable.",
-      "medicare — site and ad copy both say Medicaid and commercial only, never Medicare. Note: Medicare terms cost $0.00 over 90 days, so this is targeting hygiene, not live waste."
+      "virtual / telehealth \u2014 does OCH run a structured virtual IOP? Also decides whether Dayton and Columbus are servable.",
+      "medicare \u2014 site and ad copy both say Medicaid and commercial only, never Medicare. Note: Medicare terms cost $0.00 over 90 days, so this is targeting hygiene, not live waste."
     ]
   },
   "budgets": [
@@ -24,10 +24,17 @@
     {
       "campaign": "Treatment Center Search",
       "matchType": "PHRASE",
-      "reason": "Levels of care OCH cannot admit for. Already on Branded; TCS was never covered. Confirmed 8/21 from OCH's own sober living page: they refer to partner homes rather than provide housing.",
+      "reason": "Levels of care OCH cannot admit for. Already on Branded; TCS was never covered. 'sober living' was removed from this list on 8/21 -- see removeCampaignNegatives.",
       "keywords": [
-        "methadone", "methadone clinic", "sober living", "halfway house", "oxford house",
-        "detox", "detoxification", "inpatient", "residential", "residential treatment"
+        "methadone",
+        "methadone clinic",
+        "halfway house",
+        "oxford house",
+        "detox",
+        "detoxification",
+        "inpatient",
+        "residential",
+        "residential treatment"
       ]
     }
   ],
@@ -35,15 +42,42 @@
     {
       "reason": "Each of these keywords names a specific service that has its own well-built page, and the ad they sit under points somewhere generic. A keyword-level final URL overrides the ad's without touching ad copy, so no ad is resubmitted for policy review -- which matters while the addiction-services certificate question is open. Expect this to move quality score directly: iop near me currently carries a QS of 4.",
       "map": [
-        { "keyword": "iop near me", "url": "https://ohiorecoverycenters.com/services/intensive-outpatient-program/" },
-        { "keyword": "iop cincinnati", "url": "https://ohiorecoverycenters.com/services/intensive-outpatient-program/" },
-        { "keyword": "intensive outpatient program cincinnati", "url": "https://ohiorecoverycenters.com/services/intensive-outpatient-program/" },
-        { "keyword": "php near me", "url": "https://ohiorecoverycenters.com/services/partial-hospitalization-program/" },
-        { "keyword": "php cincinnati", "url": "https://ohiorecoverycenters.com/services/partial-hospitalization-program/" },
-        { "keyword": "suboxone clinic near me", "url": "https://ohiorecoverycenters.com/services/medication-assisted-treatment/" },
-        { "keyword": "suboxone doctors near me", "url": "https://ohiorecoverycenters.com/services/medication-assisted-treatment/" },
-        { "keyword": "alcohol rehab", "url": "https://ohiorecoverycenters.com/what-we-treat/alcohol-addiction/" },
-        { "keyword": "alcohol abuse counseling", "url": "https://ohiorecoverycenters.com/what-we-treat/alcohol-addiction/" }
+        {
+          "keyword": "iop near me",
+          "url": "https://ohiorecoverycenters.com/services/intensive-outpatient-program/"
+        },
+        {
+          "keyword": "iop cincinnati",
+          "url": "https://ohiorecoverycenters.com/services/intensive-outpatient-program/"
+        },
+        {
+          "keyword": "intensive outpatient program cincinnati",
+          "url": "https://ohiorecoverycenters.com/services/intensive-outpatient-program/"
+        },
+        {
+          "keyword": "php near me",
+          "url": "https://ohiorecoverycenters.com/services/partial-hospitalization-program/"
+        },
+        {
+          "keyword": "php cincinnati",
+          "url": "https://ohiorecoverycenters.com/services/partial-hospitalization-program/"
+        },
+        {
+          "keyword": "suboxone clinic near me",
+          "url": "https://ohiorecoverycenters.com/services/medication-assisted-treatment/"
+        },
+        {
+          "keyword": "suboxone doctors near me",
+          "url": "https://ohiorecoverycenters.com/services/medication-assisted-treatment/"
+        },
+        {
+          "keyword": "alcohol rehab",
+          "url": "https://ohiorecoverycenters.com/what-we-treat/alcohol-addiction/"
+        },
+        {
+          "keyword": "alcohol abuse counseling",
+          "url": "https://ohiorecoverycenters.com/what-we-treat/alcohol-addiction/"
+        }
       ]
     }
   ],
@@ -52,6 +86,15 @@
       "assetId": "342848829406",
       "label": "Sober Living",
       "reason": "Advertises a service OCH does not provide. Their own page states they work with partner homes and refer clients out. On a LegitScript-certified account, advertising a service you do not deliver is a compliance exposure, not just a dead sitelink -- and the destination is flagged DESTINATION_NOT_WORKING on top of that. Detached rather than deleted, so it can be re-linked if OCH says they do provide it."
+    }
+  ],
+  "removeCampaignNegatives": [
+    {
+      "campaign": "Treatment Center Search",
+      "reason": "Removed at BS LLC's direction. It was added on the reading that OCH refers sober living out rather than providing it, so the traffic could not become an admission. That call is overridden: placement into partner homes is a relationship OCH wants search traffic for, and blocking the term cut it off. Note 'halfway house' and 'oxford house' remain blocked and are the same category -- flag if those should come out too.",
+      "keywords": [
+        "sober living"
+      ]
     }
   ]
 }

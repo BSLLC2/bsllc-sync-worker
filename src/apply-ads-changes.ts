@@ -9,9 +9,10 @@ import { loadConfig, digitsOnly } from "./config.js";
  * Applies a reviewed change set to one Google Ads account.
  *
  * This is deliberately NOT a general-purpose mutation tool. It reads a checked-in
- * JSON change set, supports exactly two operations (campaign daily budget, and
- * campaign-level negative keywords), validates every mutate with validate_only
- * before applying it, and prints the prior value of anything it changes so the
+ * JSON change set and supports a fixed, narrow set of operations -- campaign
+ * daily budget, campaign-level negative keywords (add and remove), keyword-level
+ * final URLs, and detaching assets. Every mutate is validated with validate_only
+ * before it is applied, and the prior value of anything changed is printed so the
  * change can be reversed by hand.
  *
  * Guards, all of which abort the run rather than proceed:
@@ -33,6 +34,9 @@ const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 const MAX_BUDGET_FACTOR = 2;
 const MAX_BUDGET_DELTA_USD = 100;
 
+/** Enums arrive as integers over REST, so record the readable name in rollback. */
+const MATCH_TYPE_NAME: Record<string, string> = { "2": "EXACT", "3": "PHRASE", "4": "BROAD" };
+
 interface ChangeSet {
   client: string;
   note?: string;
@@ -41,6 +45,7 @@ interface ChangeSet {
   brokenUrls?: string[];
   budgets?: { campaign: string; newDailyUsd: number; reason: string }[];
   campaignNegatives?: { campaign: string; matchType: string; reason: string; keywords: string[] }[];
+  removeCampaignNegatives?: { campaign: string; reason: string; keywords: string[] }[];
   keywordFinalUrls?: { reason: string; map: { keyword: string; url: string }[] }[];
   removeAssets?: { assetId: string; label: string; reason: string }[];
 }
@@ -154,6 +159,44 @@ async function main() {
       const names: string[] = (res?.results ?? []).map((r: any) => r.resource_name).filter(Boolean);
       console.log(`     APPLIED — ${names.length} criteria created`);
       for (const rn of names) rollback.push(`negative keyword: remove ${rn}`);
+    }
+  }
+
+  // ── Remove campaign-level negative keywords ──────────────────────────────
+  // The counterpart to adding them. A negative that turns out to block traffic the
+  // client actually wants is more expensive than the spend it saved, so removal
+  // needs to be as easy as addition -- and recorded the same way.
+  for (const n of cs.removeCampaignNegatives ?? []) {
+    const rows = await customer.query(`
+      SELECT campaign.id, campaign.name
+        FROM campaign
+       WHERE campaign.name = '${n.campaign.replace(/'/g, "\\'")}' AND campaign.status = 'ENABLED'`);
+    if (!rows.length) { console.log(`  ⚠ remove negatives: no enabled campaign named "${n.campaign}" — skipped`); continue; }
+
+    const want = new Set(n.keywords.map((k) => k.toLowerCase().trim()));
+    const existing = await customer.query(`
+      SELECT campaign_criterion.resource_name, campaign_criterion.keyword.text,
+             campaign_criterion.keyword.match_type
+        FROM campaign_criterion
+       WHERE campaign_criterion.negative = TRUE
+         AND campaign_criterion.type = 'KEYWORD'
+         AND campaign.id = ${rows[0].campaign.id}`);
+    const hits = existing.filter((r: any) => want.has(String(r.campaign_criterion?.keyword?.text ?? "").toLowerCase()));
+    const missing = Array.from(want).filter((k) => !hits.some((h: any) => String(h.campaign_criterion.keyword.text).toLowerCase() === k));
+    for (const m of missing) console.log(`  ·  remove negative: "${m}" not present on "${n.campaign}" — nothing to do`);
+    if (!hits.length) continue;
+
+    const names = hits.map((h: any) => h.campaign_criterion.resource_name);
+    await customer.campaignCriteria.remove(names, { validate_only: true });
+    console.log(`  ✅ remove negatives: ${hits.length} from "${n.campaign}" — validated`);
+    console.log(`     ${hits.map((h: any) => `"${h.campaign_criterion.keyword.text}"`).join(", ")}`);
+    console.log(`     ${n.reason}`);
+    if (apply) {
+      await customer.campaignCriteria.remove(names);
+      console.log(`     APPLIED`);
+      for (const h of hits as any[]) {
+        rollback.push(`negative "${h.campaign_criterion.keyword.text}": re-add to "${n.campaign}" as ${MATCH_TYPE_NAME[String(h.campaign_criterion.keyword.match_type)] ?? h.campaign_criterion.keyword.match_type}`);
+      }
     }
   }
 
