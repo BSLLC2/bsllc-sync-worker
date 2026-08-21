@@ -109,8 +109,11 @@ async function main() {
 
   // ── Probe the served search terms ───────────────────────────────────────
   const d = (off: number) => new Date(Date.now() - off * 86_400_000).toISOString().slice(0, 10);
+  // Segment by ad group: which ad group actually served a query is the only way
+  // to tell a starved ad group apart from one being cannibalised by a broad-match
+  // keyword in a sibling ad group under the same Smart Bidding campaign.
   const terms = await customer.query(`
-    SELECT search_term_view.search_term, campaign.name,
+    SELECT search_term_view.search_term, campaign.name, ad_group.name,
            metrics.cost_micros, metrics.clicks, metrics.impressions,
            metrics.conversions, metrics.all_conversions
       FROM search_term_view
@@ -126,7 +129,7 @@ async function main() {
     const conv = hits.reduce((s: number, t: any) => s + Number(t.metrics?.all_conversions ?? 0), 0);
     console.log(`\n  "${p}": ${hits.length} term(s) · ${usd(cost)} · ${conv.toFixed(1)} conv (all_conversions)`);
     for (const t of hits.slice(0, 12)) {
-      console.log(`     ${usd(t.metrics?.cost_micros)} · ${t.metrics?.clicks} clicks · ${Number(t.metrics?.all_conversions ?? 0).toFixed(1)} conv · "${t.search_term_view?.search_term}"`);
+      console.log(`     ${usd(t.metrics?.cost_micros)} · ${t.metrics?.clicks} clicks · ${Number(t.metrics?.all_conversions ?? 0).toFixed(1)} conv · "${t.search_term_view?.search_term}"  →  ${t.ad_group?.name}`);
     }
   }
   console.log("");
