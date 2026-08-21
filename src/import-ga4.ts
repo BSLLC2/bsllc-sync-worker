@@ -67,12 +67,21 @@ async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
       "SELECT client_id, external_id FROM connector_mappings WHERE source = 'ga4' AND enabled = true AND external_id IS NOT NULL AND external_id <> ''",
     );
     const m: Record<string, string> = {};
-    for (const r of rows) m[r.client_id] = r.external_id.trim();
+    for (const r of rows) m[r.client_id] = propertyId(r.external_id);
     return m;
   } finally {
     await client.end();
   }
 }
+
+/**
+ * Accept a GA4 property id in either form people actually paste into Admin →
+ * Connectors: the bare number the GA4 UI shows, or the "properties/123"
+ * resource name from the API docs. runReport's path adds the prefix itself, so
+ * the second form produced .../properties/properties/123 and a bare HTML 404 --
+ * which surfaced as a dead connector rather than as a fixable typo.
+ */
+const propertyId = (raw: string) => raw.trim().replace(/^properties\//i, "").trim();
 
 function serviceAccount(): { client_email: string; private_key: string } {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -144,6 +153,7 @@ async function main() {
     try { Object.assign(map, JSON.parse(process.env.GA4_PROPERTY_MAP)); } catch { throw new Error("GA4_PROPERTY_MAP is not valid JSON."); }
   }
   Object.assign(map, args.map); // --map wins
+  for (const k of Object.keys(map)) map[k] = propertyId(map[k]!);
   if (args.onlyClient) {
     for (const clientId of Object.keys(map)) if (clientId !== args.onlyClient) delete map[clientId];
   }

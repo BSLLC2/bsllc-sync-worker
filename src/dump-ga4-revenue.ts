@@ -27,6 +27,15 @@ const iso = (d: Date) => d.toISOString().slice(0, 10);
 const arg = (n: string) => process.argv.slice(2).find((a) => a.startsWith(`--${n}=`))?.split("=").slice(1).join("=").replace(/^"|"$/g, "");
 function env(n: string): string { const v = process.env[n]; if (!v?.trim()) throw new Error(`Missing ${n}`); return v.trim(); }
 const num = (v: unknown) => Number(v ?? 0);
+
+/**
+ * GA4 property ids get pasted in both forms -- the bare number GA4's admin UI
+ * shows, and the "properties/123" resource name the API docs use. The request
+ * path already supplies the "properties/" prefix, so the second form silently
+ * builds .../properties/properties/123 and Google answers with an HTML 404 that
+ * looks nothing like an API error. Normalise instead of trusting the input.
+ */
+const propertyId = (raw: string) => raw.trim().replace(/^properties\//i, "").trim();
 const usd = (n: number) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const pct = (n: number, d: number) => (d ? `${((n / d) * 100).toFixed(1)}%` : "—");
 
@@ -87,7 +96,7 @@ async function main() {
         WHERE lower(trim(c.name)) LIKE lower(trim($1)) || '%'
           AND cm.external_id IS NOT NULL AND btrim(cm.external_id) <> ''`, [clientName]);
     if (!rows.length) throw new Error(`No enabled GA4 connector for a client starting "${clientName}".`);
-    prop = rows[0]!.external_id.trim(); name = rows[0]!.name;
+    prop = propertyId(rows[0]!.external_id); name = rows[0]!.name;
   } finally { await pgc.end(); }
 
   const end = new Date(), start = new Date(Date.now() - days * 86_400_000);
