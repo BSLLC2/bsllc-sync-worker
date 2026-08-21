@@ -63,6 +63,29 @@ async function query(token: string, siteUrl: string, body: unknown): Promise<Row
   return ((await res.json()) as any).rows ?? [];
 }
 
+/**
+ * Which properties this service account can actually read.
+ *
+ * A 403 on one property is ambiguous on its own: the account may not have been
+ * added yet, or it may have been added to a different form of the same site --
+ * Search Console treats sc-domain:example.com and https://www.example.com/ as
+ * separate properties with separate permissions. Listing what IS readable turns
+ * that dead end into an answer, and lets a near-miss be used automatically
+ * rather than bounced back to a human.
+ */
+async function listSites(token: string): Promise<string[]> {
+  const res = await fetch(`${API}/sites`, { headers: { authorization: `Bearer ${token}` } });
+  if (!res.ok) return [];
+  const body = (await res.json()) as { siteEntry?: { siteUrl: string; permissionLevel: string }[] };
+  return (body.siteEntry ?? [])
+    .filter((e) => e.permissionLevel !== "siteUnverifiedUser")
+    .map((e) => e.siteUrl);
+}
+
+/** Bare hostname of either property form, for comparing across the two. */
+const host = (s: string) =>
+  s.replace(/^sc-domain:/, "").replace(/^https?:\/\//, "").replace(/\/$/, "").replace(/^www\./, "").toLowerCase();
+
 async function main() {
   const clientName = arg("client");
   if (!clientName) throw new Error(`Pass --client="<exact client name>".`);
@@ -88,6 +111,27 @@ async function main() {
   } finally { await pgc.end(); }
 
   const token = await gscToken();
+
+  // Reconcile the mapped property against what the service account can read,
+  // so a permissions mismatch reports the fix instead of a bare 403.
+  const readable = await listSites(token);
+  if (readable.length && !readable.includes(siteUrl)) {
+    const near = readable.find((s) => host(s) === host(siteUrl));
+    if (near) {
+      console.log(`  NOTE: mapped property is ${siteUrl}, but access was granted on`);
+      console.log(`  ${near}. Using that. A URL-prefix property covers only that exact`);
+      console.log(`  scheme+host, so its numbers can run below the domain property's.`);
+      siteUrl = near;
+    } else {
+      console.error(`\nNo access to ${siteUrl}. This service account can read:`);
+      for (const s of readable) console.error(`  ${s}`);
+      throw new Error(`Add the service account to ${siteUrl} in Search Console (Settings > Users and permissions), or map the client to one of the properties above.`);
+    }
+  } else if (!readable.length) {
+    console.error(`\nThis service account can read NO Search Console properties at all.`);
+    throw new Error(`The service account has not been added to any property yet.`);
+  }
+
   const end = new Date(Date.now() - 2 * 86_400_000); // GSC finalises ~2 days back
   const start = new Date(end.getTime() - days * 86_400_000);
   const window = { startDate: iso(start), endDate: iso(end), dataState: "final" as const };
