@@ -1,0 +1,43 @@
+name: Dump GSC queries — branded vs non-branded (read-only)
+
+# Pulls the query and page dimensions from Search Console for one client and
+# splits clicks into branded / ambiguous / non-branded. Read-only; writes nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name prefix, e.g. Tablespoon"
+        required: true
+        default: "Tablespoon"
+      brand:
+        description: "Comma-separated brand terms, e.g. tablespoon,tbsp"
+        required: true
+        default: "tablespoon,tbsp,table spoon"
+      exclude:
+        description: "Terms that make a brand-word query NOT a brand search."
+        required: false
+        default: "how many,how much,teaspoon,tsp,conversion,convert,equals,grams,ml,ounces,cups,in a"
+      days:
+        description: "Look-back window in days (max 480)."
+        required: false
+        default: "90"
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Dump GSC queries
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          npm run dump-gsc-queries -- \
+            --client="${{ inputs.client }}" \
+            --brand="${{ inputs.brand }}" \
+            --exclude="${{ inputs.exclude }}" \
+            --days="${{ inputs.days }}"

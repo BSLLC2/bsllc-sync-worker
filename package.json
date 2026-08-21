@@ -74,7 +74,8 @@
     "apply-ads-changes": "tsx src/apply-ads-changes.ts",
     "repair-och-seo-set": "tsx src/repair-och-seo-set.ts",
     "dump-ads-copy": "tsx src/dump-ads-copy.ts",
-    "dump-ads-policy": "tsx src/dump-ads-policy.ts"
+    "dump-ads-policy": "tsx src/dump-ads-policy.ts",
+    "dump-gsc-queries": "tsx src/dump-gsc-queries.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
