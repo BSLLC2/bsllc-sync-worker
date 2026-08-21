@@ -164,6 +164,7 @@ async function main() {
   const token = await ga4Token();
 
   const syncs: SyncEntry[] = [];
+  const denied: string[] = [];
   for (const [slug, propertyId] of Object.entries(map)) {
     // GA4 renamed "conversions" → "keyEvents". Ask for keyEvents first (current
     // properties), fall back to conversions (older ones) on a 400. Always pull
@@ -171,12 +172,24 @@ async function main() {
     let report: any;
     let convMetric = "keyEvents";
     try {
-      report = await runReport(token, propertyId, args.since, ["sessions", "keyEvents"]);
+      try {
+        report = await runReport(token, propertyId, args.since, ["sessions", "keyEvents"]);
+      } catch (e) {
+        if ((e as any).status === 400) {
+          convMetric = "conversions";
+          report = await runReport(token, propertyId, args.since, ["sessions", "conversions"]);
+        } else throw e;
+      }
     } catch (e) {
-      if ((e as any).status === 400) {
-        convMetric = "conversions";
-        report = await runReport(token, propertyId, args.since, ["sessions", "conversions"]);
-      } else throw e;
+      // One client's missing grant must not blank every other client. This used
+      // to throw straight out of the loop, so a single un-shared property cost
+      // the whole run — and the log named only that first property, hiding how
+      // many others were also broken. Record it, keep going, and report the
+      // full list at the end so every grant can be fixed in one pass.
+      const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+      console.error(`  ${slug} (property ${propertyId}) — FAILED: ${msg}`);
+      denied.push(`${slug} → property ${propertyId}`);
+      continue;
     }
     const rows: any[] = report.rows ?? [];
     let planted = 0;
@@ -203,14 +216,24 @@ async function main() {
     console.log(`  ${slug} (property ${propertyId}) — ${planted} months via ${convMetric} (+sessions)`);
   }
 
+  if (denied.length) {
+    console.error(`\n${denied.length} propert(ies) the service account cannot read:`);
+    for (const d of denied) console.error(`  ${d}`);
+    console.error(`Add ${serviceAccount().client_email} as a Viewer on each`);
+    console.error(`(GA4 → Admin → Property access management).`);
+  }
+
   if (!syncs.length) {
-    // Not an error — a property may simply have no data in range. Exit clean.
+    // No rows can mean "no data in range" (fine) or "every property was denied"
+    // (not fine). Only the second is a failure, so distinguish them rather than
+    // exiting 0 on a run where nothing worked.
+    if (denied.length) { console.error(`\nEvery GA4 property failed — nothing imported.`); process.exit(1); }
     console.log("GA4 returned no rows for any property — nothing to plant.");
     process.exit(0);
   }
-  console.log(`\nPlanting ${syncs.length} monthly snapshots.`);
+  console.log(`\nPlanting ${syncs.length} monthly snapshots from ${Object.keys(map).length - denied.length} propert(ies).`);
   const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun: args.dryRun });
-  process.exit(code);
+  process.exit(code || (denied.length ? 1 : 0));
 }
 
 main().catch((e) => {
