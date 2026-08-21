@@ -63,11 +63,16 @@ async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    const { rows } = await client.query<{ client_id: string; external_id: string }>(
-      "SELECT client_id, external_id FROM connector_mappings WHERE source = 'ga4' AND enabled = true AND external_id IS NOT NULL AND external_id <> ''",
+    const { rows } = await client.query<{ client_id: string; external_id: string; name: string | null }>(
+      `SELECT cm.client_id, cm.external_id, c.name
+         FROM connector_mappings cm LEFT JOIN clients c ON c.id = cm.client_id
+        WHERE cm.source = 'ga4' AND cm.enabled = true
+          AND cm.external_id IS NOT NULL AND cm.external_id <> ''`,
     );
     const m: Record<string, string> = {};
-    for (const r of rows) m[r.client_id] = propertyId(r.external_id);
+    // Keep a client_id → name side table purely so failures can name the client.
+    // A bare UUID in an error tells whoever reads the log nothing they can act on.
+    for (const r of rows) { m[r.client_id] = propertyId(r.external_id); if (r.name) CLIENT_NAMES[r.client_id] = r.name; }
     return m;
   } finally {
     await client.end();
@@ -82,6 +87,10 @@ async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
  * which surfaced as a dead connector rather than as a fixable typo.
  */
 const propertyId = (raw: string) => raw.trim().replace(/^properties\//i, "").trim();
+
+/** client_id → display name, populated from the connector query, for error output. */
+const CLIENT_NAMES: Record<string, string> = {};
+const label = (clientId: string) => CLIENT_NAMES[clientId] ?? clientId;
 
 function serviceAccount(): { client_email: string; private_key: string } {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -187,8 +196,8 @@ async function main() {
       // many others were also broken. Record it, keep going, and report the
       // full list at the end so every grant can be fixed in one pass.
       const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
-      console.error(`  ${slug} (property ${propertyId}) — FAILED: ${msg}`);
-      denied.push(`${slug} → property ${propertyId}`);
+      console.error(`  ${label(slug)} (property ${propertyId}) — FAILED: ${msg}`);
+      denied.push(`${label(slug)} → GA4 property ${propertyId}`);
       continue;
     }
     const rows: any[] = report.rows ?? [];
