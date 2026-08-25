@@ -341,8 +341,11 @@ async function main() {
   const stFor = async (p:{from:string;to:string}) => {
     const rows = await q(`SELECT search_term_view.search_term, campaign.name, ad_group.name,
       metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.all_conversions
-      FROM search_term_view WHERE segments.date BETWEEN '${p.from}' AND '${p.to}' LIMIT 5000`);
+      FROM search_term_view WHERE segments.date BETWEEN '${p.from}' AND '${p.to}' LIMIT 20000`);
     if (!rows) return null;
+    // Print the raw row count so a truncated result is visible rather than silently
+    // read as "these are all the terms".
+    console.log(`  (search_term_view returned ${rows.length} rows for ${p.from}..${p.to}; cap is 20000)`);
     const agg: Record<string,{imp:number;cl:number;cost:number;cv:number;ac:number;camp:string}> = {};
     for (const r of rows) {
       const k = String(r.search_term_view?.search_term ?? "");
@@ -362,16 +365,27 @@ async function main() {
     const all = Object.entries(stCur).sort((a,b)=>b[1].cost-a[1].cost);
     const paid = all.filter(([,t])=>t.cost > 0);
     const zero = all.length - paid.length;
-    for (const [k,t] of paid) {
+    const TOP = 60;
+    for (const [k,t] of paid.slice(0,TOP)) {
       const isNew = stPri && !(k in stPri) ? "NEW" : "";
       const prot = PROTECTED.some(p=>k.toLowerCase().includes(p)) ? "PROTECTED" : "";
       console.log(`  ${k.slice(0,51).padEnd(52)}${String(t.imp).padStart(7)}${String(t.cl).padStart(8)}${$(t.cost).padStart(10)}${n1(t.cv).padStart(7)}${n1(t.ac).padStart(7)}  ${[isNew,prot].filter(Boolean).join(" ")}`);
+    }
+    if (paid.length > TOP) {
+      const rest = paid.slice(TOP);
+      console.log(`  ... ${rest.length} further paying terms not listed, totalling ${$(rest.reduce((x,[,t])=>x+t.cost,0))} for all_conv ${n1(rest.reduce((x,[,t])=>x+t.ac,0))}.`);
     }
     const paidCost = paid.reduce((x,[,t])=>x+t.cost,0);
     const paidAc = paid.reduce((x,[,t])=>x+t.ac,0);
     console.log(`\n  ${paid.length} terms took spend (${$(paidCost)}, all_conv ${n1(paidAc)}). ${zero} further terms had impressions but $0.00 cost and are not listed.`);
     const newPaid = paid.filter(([k])=> stPri && !(k in stPri));
     console.log(`  Of the paid terms, ${newPaid.length} are NEW vs the prior period, costing ${$(newPaid.reduce((x,[,t])=>x+t.cost,0))} for all_conv ${n1(newPaid.reduce((x,[,t])=>x+t.ac,0))}.`);
+    const acct = await q(`SELECT metrics.cost_micros FROM customer WHERE segments.date BETWEEN '${CUR.from}' AND '${CUR.to}'`);
+    if (acct) {
+      const total = acct.reduce((x:number,r:any)=>x+usd(r.metrics?.cost_micros),0);
+      console.log(`  Account spend over the same range: ${$(total)}. Search terms account for ${$(paidCost)} of it (${((paidCost/total)*100).toFixed(1)}%).`);
+      console.log(`  The remainder is spend Google does not attribute to a reportable search term (low-volume/privacy withholding).`);
+    }
   }
 
   // ── 9. QUALITY SCORE ─────────────────────────────────────────────────────
