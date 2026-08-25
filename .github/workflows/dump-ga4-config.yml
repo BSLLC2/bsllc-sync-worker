@@ -1,0 +1,27 @@
+name: Dump GA4 configuration — key events, values, attribution (read-only)
+
+# What a key event IS on this property, not how many there were: which events
+# count, whether a flat default value rides along, how attribution is modelled,
+# and which other properties exist.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name prefix, e.g. Tablespoon"
+        required: true
+        default: "Tablespoon"
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Dump GA4 configuration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: npm run dump-ga4-config -- --client="${{ inputs.client }}"
