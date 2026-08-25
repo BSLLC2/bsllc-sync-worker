@@ -77,7 +77,8 @@
     "dump-ads-copy": "tsx src/dump-ads-copy.ts",
     "dump-ads-policy": "tsx src/dump-ads-policy.ts",
     "dump-gsc-queries": "tsx src/dump-gsc-queries.ts",
-    "dump-ga4-revenue": "tsx src/dump-ga4-revenue.ts"
+    "dump-ga4-revenue": "tsx src/dump-ga4-revenue.ts",
+    "dump-ads-conversions": "tsx src/dump-ads-conversions.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

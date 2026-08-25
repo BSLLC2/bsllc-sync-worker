@@ -1,0 +1,36 @@
+name: Dump Google Ads conversion configuration (read-only)
+
+# What a conversion IS in this account, not how many there were: which actions
+# exist, which are primary for bidding, and whether flat default values are being
+# stamped on actions that carry no real revenue.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client name prefix, e.g. Tablespoon"
+        required: true
+        default: "Tablespoon"
+      days:
+        description: "Performance look-back in days."
+        required: false
+        default: "90"
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Dump Ads conversion configuration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+        run: |
+          npm run dump-ads-conversions -- --client="${{ inputs.client }}" --days="${{ inputs.days }}"
