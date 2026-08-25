@@ -372,7 +372,10 @@ async function main() {
     const paid = all.filter(([,t])=>t.cost > 0);
     const zero = all.length - paid.length;
     const TOP = 60;
-    for (const [k,t] of paid.slice(0,TOP)) {
+    // Printed cheapest-first so the biggest spenders sit at the end of the output
+    // rather than scrolling off the top of a truncated log.
+    console.log(`  (listed in ASCENDING cost order — the largest spenders are at the BOTTOM)`);
+    for (const [k,t] of paid.slice(0,TOP).reverse()) {
       const isNew = stPri && !(k in stPri) ? "NEW" : "";
       const prot = PROTECTED.some(p=>k.toLowerCase().includes(p)) ? "PROTECTED" : "";
       console.log(`  ${k.slice(0,51).padEnd(52)}${String(t.imp).padStart(7)}${String(t.cl).padStart(8)}${$(t.cost).padStart(10)}${n1(t.cv).padStart(7)}${n1(t.ac).padStart(7)}  ${[isNew,prot].filter(Boolean).join(" ")}`);
