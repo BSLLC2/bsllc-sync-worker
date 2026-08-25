@@ -45,6 +45,7 @@
     "dump-client-meetings": "tsx src/dump-client-meetings.ts",
     "dump-client-tasks": "tsx src/dump-client-tasks.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
+    "import-qbo-financials": "tsx src/import-qbo-financials.ts",
     "verify-qbo": "tsx src/verify-qbo.ts",
     "verify-slack": "tsx src/verify-slack.ts",
     "verify-dataforseo": "tsx src/verify-dataforseo.ts",

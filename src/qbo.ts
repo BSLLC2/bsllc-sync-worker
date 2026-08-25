@@ -88,6 +88,26 @@ export class QboClient {
     return { realmId: this.realmId, companyName: info.CompanyInfo?.CompanyName ?? "(name unavailable)" };
   }
 
+  /** Read-only. Same Accounting API scope as everything above — no separate
+   *  Reports consent. Dates are YYYY-MM-DD. */
+  async getProfitAndLoss(startDate: string, endDate: string): Promise<QboReport> {
+    return this.call<QboReport>("GET", `reports/ProfitAndLoss?start_date=${startDate}&end_date=${endDate}&summarize_column_by=Total`);
+  }
+  /** Point-in-time report — QBO's BalanceSheet takes only end_date. */
+  async getBalanceSheet(asOfDate: string): Promise<QboReport> {
+    return this.call<QboReport>("GET", `reports/BalanceSheet?end_date=${asOfDate}&summarize_column_by=Total`);
+  }
+  async getCashFlow(startDate: string, endDate: string): Promise<QboReport> {
+    return this.call<QboReport>("GET", `reports/CashFlow?start_date=${startDate}&end_date=${endDate}&summarize_column_by=Total`);
+  }
+  /** Current balance of every bank/cash account — more direct and reliable
+   *  than parsing a cash line out of the BalanceSheet report's nested rows. */
+  async getCashAccounts(): Promise<{ id: string; name: string; balance: number }[]> {
+    const q = encodeURIComponent(`SELECT Id, Name, CurrentBalance FROM Account WHERE AccountType = 'Bank' AND Active = true`);
+    const res = await this.call<{ QueryResponse?: { Account?: { Id: string; Name: string; CurrentBalance?: number }[] } }>("GET", `query?query=${q}`);
+    return (res.QueryResponse?.Account ?? []).map((a) => ({ id: a.Id, name: a.Name, balance: a.CurrentBalance ?? 0 }));
+  }
+
   /** Find a customer by display name, or create one. Returns the QBO Customer id. */
   async findOrCreateCustomer(name: string, email?: string | null): Promise<string> {
     const safe = name.replace(/'/g, "''");
@@ -136,3 +156,49 @@ export class QboClient {
 }
 
 export interface QboLine { name: string; amount: number; itemId?: string | null; monthly?: boolean }
+
+// Shape of a QBO Reports API response (ProfitAndLoss/BalanceSheet/CashFlow) —
+// deliberately loose since the exact nesting varies by report and by which
+// rows/columns are present for a given date range. Callers should treat this
+// as "search it," never assume a fixed shape.
+export interface QboReportRow {
+  group?: string;
+  type?: string;
+  ColData?: { value?: string }[];
+  Rows?: { Row?: QboReportRow[] };
+  Summary?: { ColData?: { value?: string }[] };
+}
+export interface QboReport {
+  Header?: { StartPeriod?: string; EndPeriod?: string; Time?: string };
+  Rows?: { Row?: QboReportRow[] };
+}
+
+/** Recursively search a QBO report for a summary row matching any of the
+ *  given group names (QBO's own row-grouping key, e.g. "NetIncome",
+ *  "TotalIncome", "GrossProfit" on a P&L; "TotalAssets", "TotalLiabilities",
+ *  "TotalEquity" on a Balance Sheet) — case-insensitive since Intuit isn't
+ *  perfectly consistent about it. Returns the last (total) column parsed as
+ *  a number, or null if that row never shows up for this report/date range. */
+export function findReportTotal(report: QboReport, groupNames: string[]): number | null {
+  const wanted = new Set(groupNames.map((g) => g.toLowerCase()));
+  let found: number | null = null;
+  const parseAmount = (cols?: { value?: string }[]): number | null => {
+    const raw = cols?.at(-1)?.value;
+    if (raw == null || raw === "") return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+  const walk = (rows?: QboReportRow[]) => {
+    if (found != null || !rows) return;
+    for (const row of rows) {
+      if (found != null) return;
+      if (row.group && wanted.has(row.group.toLowerCase())) {
+        const n = parseAmount(row.Summary?.ColData ?? row.ColData);
+        if (n != null) { found = n; return; }
+      }
+      walk(row.Rows?.Row);
+    }
+  };
+  walk(report.Rows?.Row);
+  return found;
+}

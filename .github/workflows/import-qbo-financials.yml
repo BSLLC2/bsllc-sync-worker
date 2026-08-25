@@ -1,0 +1,48 @@
+name: QBO — financials snapshot (P&L, balance sheet, cash)
+
+# Daily snapshot of company-wide P&L (MTD/QTD/YTD), a point-in-time balance
+# sheet, trailing-90-day cash flow, and current cash account balances — feeds
+# the dashboard's exec-only Financials tab. Same QBO connection already used
+# by import-qbo-invoices; no new secrets, no new OAuth consent.
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, write nothing to Postgres (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: import-qbo-financials
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Snapshot QBO financials
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-qbo-financials -- --dry-run
+          else
+            npm run import-qbo-financials
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=qbo_financials --status=${{ job.status }}
