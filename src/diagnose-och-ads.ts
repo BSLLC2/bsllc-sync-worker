@@ -357,11 +357,21 @@ async function main() {
     const PROTECTED = ["ccat","cat house","center for chemical addictions"];
     console.log(`  Range: ${CUR.from}..${CUR.to}. NEW = absent from ${PRIOR.from}..${PRIOR.to}.`);
     console.log(`\n  ${"search term".padEnd(52)}${"imp".padStart(7)}${"clicks".padStart(8)}${"cost".padStart(10)}${"conv".padStart(7)}${"allcv".padStart(7)}  flags`);
-    for (const [k,t] of Object.entries(stCur).sort((a,b)=>b[1].cost-a[1].cost)) {
+    // Only terms that actually took money. The zero-cost tail is thousands of rows
+    // of competitor-name impressions and would bury every paid term.
+    const all = Object.entries(stCur).sort((a,b)=>b[1].cost-a[1].cost);
+    const paid = all.filter(([,t])=>t.cost > 0);
+    const zero = all.length - paid.length;
+    for (const [k,t] of paid) {
       const isNew = stPri && !(k in stPri) ? "NEW" : "";
       const prot = PROTECTED.some(p=>k.toLowerCase().includes(p)) ? "PROTECTED" : "";
       console.log(`  ${k.slice(0,51).padEnd(52)}${String(t.imp).padStart(7)}${String(t.cl).padStart(8)}${$(t.cost).padStart(10)}${n1(t.cv).padStart(7)}${n1(t.ac).padStart(7)}  ${[isNew,prot].filter(Boolean).join(" ")}`);
     }
+    const paidCost = paid.reduce((x,[,t])=>x+t.cost,0);
+    const paidAc = paid.reduce((x,[,t])=>x+t.ac,0);
+    console.log(`\n  ${paid.length} terms took spend (${$(paidCost)}, all_conv ${n1(paidAc)}). ${zero} further terms had impressions but $0.00 cost and are not listed.`);
+    const newPaid = paid.filter(([k])=> stPri && !(k in stPri));
+    console.log(`  Of the paid terms, ${newPaid.length} are NEW vs the prior period, costing ${$(newPaid.reduce((x,[,t])=>x+t.cost,0))} for all_conv ${n1(newPaid.reduce((x,[,t])=>x+t.ac,0))}.`);
   }
 
   // ── 9. QUALITY SCORE ─────────────────────────────────────────────────────
