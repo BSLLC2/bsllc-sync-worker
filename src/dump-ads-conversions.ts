@@ -84,12 +84,19 @@ async function main() {
   for (const a of actions) {
     const c = a.conversion_action ?? {};
     const v = c.value_settings ?? {};
-    const primary = c.primary_for_goal === true || c.primary_for_goal === undefined;
+    // Do NOT default an absent primary_for_goal to "yes". Google omits the field
+    // in some responses, and guessing it turns a missing value into a confident
+    // claim about what Smart Bidding chases. The authoritative signal is the
+    // metrics split below: metrics.conversions counts primary actions only, so
+    // an action with all_conversions but zero conversions is NOT primary.
+    const primary = c.primary_for_goal === true ? "YES"
+      : c.primary_for_goal === false ? "no (secondary, observation only)"
+      : "NOT REPORTED — read the conversions vs all_conversions split below";
     console.log(`\n  ${c.name}   [id ${c.id}]`);
     console.log(`     category ${nm(CATEGORY, c.category)} · type ${nm(TYPE, c.type)} · ${nm(COUNTING, c.counting_type)}`);
-    console.log(`     PRIMARY FOR BIDDING: ${primary ? "YES — Smart Bidding optimises toward this" : "no (secondary, observation only)"}`);
+    console.log(`     PRIMARY FOR BIDDING: ${primary}`);
     console.log(`     default value ${usd(Number(v.default_value ?? 0) * 1_000_000)}` +
-                `${v.always_use_default_value ? "  <-- ALWAYS overrides real revenue" : ""}`);
+                `${v.always_use_default_value ? "  <-- ALWAYS_USE_DEFAULT: a flat value replaces real revenue" : ""}`);
     console.log(`     lookback: ${c.click_through_lookback_window_days ?? "?"}d click / ${c.view_through_lookback_window_days ?? "?"}d view`);
   }
 
@@ -116,6 +123,32 @@ async function main() {
     t.c += Number(p.metrics?.conversions ?? 0); t.v += Number(p.metrics?.conversions_value ?? 0);
     t.ac += Number(p.metrics?.all_conversions ?? 0); t.av += Number(p.metrics?.all_conversions_value ?? 0);
   }
+  // Which campaign's conversions are which action -- the question behind
+  // "are the private-events conversions ticket sales or form fills?"
+  const byCampaign = await customer.query(`
+    SELECT campaign.name, segments.conversion_action_name,
+           metrics.conversions, metrics.conversions_value,
+           metrics.all_conversions, metrics.all_conversions_value
+      FROM campaign
+     WHERE segments.date BETWEEN '${d(days)}' AND '${d(1)}'`);
+  const cmap: Record<string, Record<string, { c: number; v: number; ac: number; av: number }>> = {};
+  for (const r of byCampaign) {
+    const cn = r.campaign?.name ?? "(none)";
+    const an = r.segments?.conversion_action_name ?? "(unnamed)";
+    const t = ((cmap[cn] ??= {})[an] ??= { c: 0, v: 0, ac: 0, av: 0 });
+    t.c += Number(r.metrics?.conversions ?? 0); t.v += Number(r.metrics?.conversions_value ?? 0);
+    t.ac += Number(r.metrics?.all_conversions ?? 0); t.av += Number(r.metrics?.all_conversions_value ?? 0);
+  }
+  console.log(`\n-- Which action each campaign's conversions actually are (last ${days} days) --`);
+  for (const [cn, acts] of Object.entries(cmap)) {
+    const rows = Object.entries(acts).filter(([, t]) => t.ac > 0 || t.c > 0);
+    if (!rows.length) continue;
+    console.log(`\n  ${cn}`);
+    for (const [an, t] of rows.sort((a, b) => b[1].ac - a[1].ac))
+      console.log(`     ${an.slice(0, 44).padEnd(44)} conv ${t.c.toFixed(1).padStart(7)} ($${t.v.toFixed(2)})` +
+                  `   all ${t.ac.toFixed(1).padStart(8)} ($${t.av.toFixed(2)})`);
+  }
+
   console.log(`\n-- Performance by action (last ${days} days) --`);
   console.log(`  ${"action".padEnd(42)}${"conv".padStart(9)}${"value".padStart(13)}${"all_conv".padStart(10)}${"all_value".padStart(13)}`);
   for (const [n, t] of Object.entries(byName).sort((a, b) => b[1].v - a[1].v)) {
