@@ -93,7 +93,7 @@ async function main() {
       SELECT change_event.change_date_time, change_event.user_email, change_event.change_resource_type,
              change_event.resource_change_operation, change_event.changed_fields,
              change_event.old_resource, change_event.new_resource, change_event.client_type,
-             change_event.campaign, change_event.ad_group, change_event.feed
+             change_event.campaign, change_event.ad_group
         FROM change_event
        WHERE change_event.change_date_time >= '${f}' AND change_event.change_date_time <= '${t} 23:59:59'
        ORDER BY change_event.change_date_time DESC
