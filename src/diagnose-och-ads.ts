@@ -102,16 +102,22 @@ async function main() {
     if (!rows.length) { note(`(no change events ${f}..${t})`); continue; }
     anyChange = true;
     console.log(`\n  --- ${f} .. ${t} : ${rows.length} events ---`);
+    // One line per event. The full 55-day history does not fit as verbose blocks,
+    // and truncation would silently hide the dates that matter most.
+    const cid = (rn: unknown) => String(rn ?? "").split("/").pop() ?? "";
+    // Changes that can move spend or measurement get their before/after printed;
+    // everything else is listed but not expanded.
+    const MATERIAL = new Set(["CAMPAIGN","CAMPAIGN_BUDGET","CUSTOMER","AD_GROUP"]);
     for (const r of rows) {
       const e = r.change_event ?? {};
-      console.log(`\n  ${e.change_date_time}  ${nm(CHANGE_OP, e.resource_change_operation)}  ${nm(CHANGE_RES, e.change_resource_type)}`);
-      console.log(`     user: ${e.user_email ?? "(none)"}   client: ${e.client_type ?? "?"}`);
-      if (e.campaign) console.log(`     campaign: ${e.campaign}`);
-      if (e.ad_group) console.log(`     ad_group: ${e.ad_group}`);
-      const cf = e.changed_fields?.paths ?? e.changed_fields ?? null;
-      if (cf) console.log(`     changed_fields: ${JSON.stringify(cf).slice(0, 400)}`);
-      if (e.old_resource) console.log(`     OLD: ${JSON.stringify(e.old_resource).slice(0, 500)}`);
-      if (e.new_resource) console.log(`     NEW: ${JSON.stringify(e.new_resource).slice(0, 500)}`);
+      const res = nm(CHANGE_RES, e.change_resource_type);
+      const cf = e.changed_fields?.paths ?? e.changed_fields ?? [];
+      const fields = Array.isArray(cf) ? cf.join(",") : String(cf);
+      console.log(`  ${String(e.change_date_time).slice(0,19)}  ${nm(CHANGE_OP, e.resource_change_operation).padEnd(6)} ${res.padEnd(20)} ${String(e.user_email ?? "(none)").padEnd(22)} camp:${cid(e.campaign).padEnd(12)} ${fields.slice(0,90)}`);
+      if (MATERIAL.has(res)) {
+        if (e.old_resource) console.log(`        OLD: ${JSON.stringify(e.old_resource).slice(0, 300)}`);
+        if (e.new_resource) console.log(`        NEW: ${JSON.stringify(e.new_resource).slice(0, 300)}`);
+      }
     }
   }
   if (!anyChange) note(`No change events returned for the whole range.`);
