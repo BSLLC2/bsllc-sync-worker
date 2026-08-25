@@ -27,6 +27,8 @@ jobs:
       - name: Dump Ads conversion configuration
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # loadConfig() requires this even for read-only scripts that never sync.
+          DASHBOARD_DIR: ${{ github.workspace }}
           GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
           GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
           GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
