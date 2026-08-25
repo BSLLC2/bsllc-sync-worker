@@ -32,7 +32,22 @@ function delta(cur: number, prior: number, money = false): string {
   const v = money ? `${diff >= 0 ? "+" : "-"}$${Math.abs(diff).toFixed(2)}` : `${diff >= 0 ? "+" : ""}${diff.toFixed(1)}`;
   return `${v} (${p})`;
 }
-const hr = (t: string) => console.log(`\n${"=".repeat(96)}\n${t}\n${"=".repeat(96)}`);
+/**
+ * Section gating. The full run is far longer than a retrievable log tail, so
+ * SECTION=a prints items 1-7 and SECTION=b prints items 8-13. Every query still
+ * runs (all read-only); only the printing is gated, which keeps the numbered
+ * blocks untouched. Preamble output is section 0 and always prints.
+ */
+const WANT: Set<number> = (() => {
+  const s = String(process.env.SECTION ?? "").trim().toLowerCase();
+  if (s === "a") return new Set([0,1,2,3,4,5,6,7]);
+  if (s === "b") return new Set([0,8,9,10,11,12,13]);
+  return new Set([0,1,2,3,4,5,6,7,8,9,10,11,12,13]);
+})();
+const realLog = console.log.bind(console);
+let SEC = 0;
+console.log = ((...a: unknown[]) => { if (WANT.has(SEC)) realLog(...a); }) as typeof console.log;
+const hr = (t: string) => { const m = /^\s*(\d+)\./.exec(t); if (m) SEC = Number(m[1]); console.log(`\n${"=".repeat(96)}\n${t}\n${"=".repeat(96)}`); };
 const note = (t: string) => console.log(`   ${t}`);
 
 /** Enum ints come back over REST; only decode the ones that change a reading. */
@@ -433,8 +448,17 @@ async function main() {
       asset.sitelink_asset.link_text, asset.policy_summary.approval_status,
       asset.policy_summary.review_status, asset.policy_summary.policy_topic_entries FROM asset`);
   if (assets) {
-    const flagged = assets.filter((a:any)=> (a.asset?.policy_summary?.policy_topic_entries ?? []).length > 0
-      || nm(APPROVAL, a.asset?.policy_summary?.approval_status) !== "APPROVED");
+    // An asset with no policy_summary at all is not evidence of a problem — it is
+    // evidence the API returned no policy data. Require positive evidence, or the
+    // clean assets bury the findings.
+    const flagged = assets.filter((a:any)=>{
+      const ps = a.asset?.policy_summary;
+      if (!ps) return false;
+      const st = nm(APPROVAL, ps.approval_status);
+      return (ps.policy_topic_entries ?? []).length > 0 || st === "DISAPPROVED" || st === "APPROVED_LIMITED";
+    });
+    const noPolicyData = assets.length - assets.filter((a:any)=>a.asset?.policy_summary).length;
+    if (noPolicyData) console.log(`\n  (${noPolicyData} of ${assets.length} assets returned no policy_summary from the API — not counted either way.)`);
     console.log(`\n  Assets carrying a policy topic or not plainly approved: ${flagged.length} of ${assets.length}`);
     for (const a of flagged) {
       const s = a.asset ?? {};
