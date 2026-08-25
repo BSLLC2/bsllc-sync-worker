@@ -18,6 +18,7 @@ const CUSTOMER_ID = "8350689003";
 const CUR = { from: "2026-07-26", to: "2026-08-24" };
 const PRIOR = { from: "2026-06-26", to: "2026-07-25" };
 const SERIES = { from: "2026-06-26", to: "2026-08-24" };
+const D90 = { from: "2026-05-27", to: "2026-08-24" };  // trailing 90 days; GAQL has no LAST_90_DAYS literal
 const TCS = "23249502120";   // Treatment Center Search
 const BRAND = "24018792925"; // OHC - Branded Search
 
@@ -40,6 +41,8 @@ function delta(cur: number, prior: number, money = false): string {
  */
 const WANT: Set<number> = (() => {
   const s = String(process.env.SECTION ?? "").trim().toLowerCase();
+  const nums = s.match(/\d+/g);
+  if (nums) return new Set([0, ...nums.map(Number)]);
   if (s === "a") return new Set([0,1,2,3,4,5,6,7]);
   if (s === "b") return new Set([0,8,9,10,11,12,13]);
   return new Set([0,1,2,3,4,5,6,7,8,9,10,11,12,13]);
@@ -163,7 +166,7 @@ async function main() {
   note(`Distribution from the account's own lag buckets, last 90 days of click dates.`);
   const lag = await q(`
     SELECT customer.id, segments.conversion_lag_bucket, metrics.conversions, metrics.all_conversions
-      FROM customer WHERE segments.date DURING LAST_90_DAYS`);
+      FROM customer WHERE segments.date BETWEEN '${D90.from}' AND '${D90.to}'`);
   if (lag) {
     const agg: Record<string,{c:number;a:number}> = {};
     for (const r of lag) {
@@ -318,7 +321,7 @@ async function main() {
   console.log(`\n  Do the 9 negatives block terms that CONVERTED in the prior 90 days? (all_conversions)`);
   const NEGS = ["methadone","methadone clinic","sober living","halfway house","oxford house","detox","detoxification","inpatient","residential treatment"];
   const st90 = await q(`SELECT search_term_view.search_term, campaign.name, metrics.cost_micros, metrics.clicks,
-      metrics.conversions, metrics.all_conversions FROM search_term_view WHERE segments.date DURING LAST_90_DAYS LIMIT 5000`);
+      metrics.conversions, metrics.all_conversions FROM search_term_view WHERE segments.date BETWEEN '${D90.from}' AND '${D90.to}' LIMIT 5000`);
   if (st90) {
     for (const neg of NEGS) {
       const hits = st90.filter((r:any)=> String(r.search_term_view?.search_term??"").toLowerCase().includes(neg));
