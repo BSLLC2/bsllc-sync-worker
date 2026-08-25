@@ -167,6 +167,42 @@ async function main() {
       console.log(`    ${k.slice(0,50).padEnd(52)} conv ${n1(t.c).padStart(8)}   all_conv ${n1(t.a).padStart(8)}`);
   }
 
+  // Which goals the Conversions column is actually built from. This is the field
+  // that decides conversions vs all_conversions, and change_event does not record it.
+  console.log(`\n  ACCOUNT-DEFAULT conversion goals (customer_conversion_goal)`);
+  const cg = await q(`SELECT customer_conversion_goal.category, customer_conversion_goal.origin,
+      customer_conversion_goal.biddable FROM customer_conversion_goal`);
+  if (cg) {
+    const on = cg.filter((r:any)=>r.customer_conversion_goal?.biddable === true);
+    console.log(`    ${cg.length} goals defined; ${on.length} biddable (biddable = counted in the Conversions column).`);
+    for (const r of cg) {
+      const g = r.customer_conversion_goal ?? {};
+      console.log(`    category ${String(g.category).padEnd(4)} origin ${String(g.origin).padEnd(4)} biddable ${g.biddable === true ? "YES" : g.biddable === false ? "no" : "—"}`);
+    }
+  }
+  console.log(`\n  PER-CAMPAIGN goal overrides (campaign_conversion_goal) for the two live campaigns`);
+  const cpg = await q(`SELECT campaign.id, campaign.name, campaign_conversion_goal.category,
+      campaign_conversion_goal.origin, campaign_conversion_goal.biddable
+      FROM campaign_conversion_goal WHERE campaign.id IN (${TCS}, ${BRAND})`);
+  if (cpg) {
+    const on = cpg.filter((r:any)=>r.campaign_conversion_goal?.biddable === true);
+    console.log(`    ${cpg.length} rows; ${on.length} biddable.`);
+    for (const r of on) {
+      const g = r.campaign_conversion_goal ?? {};
+      console.log(`    ${String(r.campaign?.name).slice(0,28).padEnd(30)} category ${String(g.category).padEnd(4)} origin ${String(g.origin).padEnd(4)} biddable YES`);
+    }
+    if (!on.length) console.log(`    No biddable per-campaign goal override is set on either live campaign.`);
+  }
+  console.log(`\n  Campaign-level selective optimization (overrides which actions the campaign bids to)`);
+  const so = await q(`SELECT campaign.id, campaign.name, campaign.selective_optimization.conversion_actions,
+      campaign.bidding_strategy, campaign.bidding_strategy_type FROM campaign WHERE campaign.id IN (${TCS}, ${BRAND})`);
+  if (so) for (const r of so) {
+    const c = r.campaign ?? {};
+    const acts = c.selective_optimization?.conversion_actions ?? [];
+    console.log(`    ${String(c.name).slice(0,28).padEnd(30)} bidding_strategy_type ${c.bidding_strategy_type}  portfolio: ${c.bidding_strategy ?? "(none — standard strategy)"}`);
+    console.log(`      selective_optimization actions: ${acts.length ? acts.join(", ") : "(none set)"}`);
+  }
+
   // ── 3. CONVERSION LAG ────────────────────────────────────────────────────
   hr("3. CONVERSION LAG");
   note(`Distribution from the account's own lag buckets, last 90 days of click dates.`);
