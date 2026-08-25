@@ -85,7 +85,7 @@ async function main() {
   // ── 1. CHANGE HISTORY ────────────────────────────────────────────────────
   hr("1. CHANGE HISTORY  (change_event, 2026-07-01 .. 2026-08-24)");
   note(`Range: 2026-07-01 to 2026-08-24. change_event is capped at 30 days by the API,`);
-  note(`so this is queried in windows and merged.`);
+  note(`so this is queried in windows and merged. Ordered oldest first.`);
   const windows = [["2026-07-01","2026-07-28"],["2026-07-29","2026-08-24"]];
   let anyChange = false;
   for (const [f,t] of windows) {
@@ -96,7 +96,7 @@ async function main() {
              change_event.campaign, change_event.ad_group
         FROM change_event
        WHERE change_event.change_date_time >= '${f}' AND change_event.change_date_time <= '${t} 23:59:59'
-       ORDER BY change_event.change_date_time DESC
+       ORDER BY change_event.change_date_time ASC
        LIMIT 10000`);
     if (!rows) continue;
     if (!rows.length) { note(`(no change events ${f}..${t})`); continue; }
