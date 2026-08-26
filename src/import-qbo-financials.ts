@@ -128,7 +128,8 @@ async function main() {
         const bs = await qbo.getBalanceSheet(todayIso);
         const summary = balanceSheetSummary(bs);
         await upsertFinancialSnapshot(c, { reportType: "balance_sheet", periodType: "as_of", periodStart: todayIso, periodEnd: todayIso, data: bs, summary });
-        console.log(`  ✓ Balance Sheet as of ${todayIso}`);
+        const fmt = (n: number | null) => (n != null ? `$${(n / 100).toLocaleString("en-US")}` : "(not found in report)");
+        console.log(`  ✓ Balance Sheet as of ${todayIso} — assets ${fmt(summary.totalAssetsCents)}, liabilities ${fmt(summary.totalLiabilitiesCents)}, equity ${fmt(summary.totalEquityCents)}`);
       } catch (e) {
         console.log(`  ✗ Balance Sheet: ${e instanceof Error ? e.message : e}`);
       }
