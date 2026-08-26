@@ -30,11 +30,18 @@ function pnlSummary(report: QboReport) {
     netIncomeCents: toCents(findReportTotal(report, ["NetIncome", "NetOperatingIncome"])),
   };
 }
+// QBO's own row-grouping is inconsistent between sections: the Assets
+// section's subtotal is grouped "TotalAssets", but Liabilities/Equity
+// subtotals are grouped by the bare section name ("Liabilities", "Equity")
+// with no "Total" prefix — only the combined grand total row below them is
+// "TotalLiabilitiesAndEquity". Confirmed against a live report via
+// collectGroupNames() below; "TotalLiabilities"/"TotalEquity" are kept as
+// fallbacks in case some other QBO company file does label it that way.
 function balanceSheetSummary(report: QboReport) {
   return {
     totalAssetsCents: toCents(findReportTotal(report, ["TotalAssets"])),
-    totalLiabilitiesCents: toCents(findReportTotal(report, ["TotalLiabilities"])),
-    totalEquityCents: toCents(findReportTotal(report, ["TotalEquity"])),
+    totalLiabilitiesCents: toCents(findReportTotal(report, ["Liabilities", "TotalLiabilities"])),
+    totalEquityCents: toCents(findReportTotal(report, ["Equity", "TotalEquity"])),
   };
 }
 /** Every `group` value present anywhere in a QBO report — a debug aid for
