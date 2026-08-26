@@ -67,3 +67,10 @@ jobs:
           else
             npm run import-d365
           fi
+
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=import_d365 --status=${{ job.status }}

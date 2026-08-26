@@ -61,3 +61,10 @@ jobs:
           else
             npm run import-ga4
           fi
+
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=import_ga4 --status=${{ job.status }}

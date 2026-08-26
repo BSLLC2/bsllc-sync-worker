@@ -21,12 +21,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install pg_dump 16 (matches Neon's server major)
+      # Falls back to Ubuntu's default postgresql-client if the PGDG repo/key
+      # dance fails (a third-party apt repo on a version-pinned package is
+      # exactly the kind of thing a runner-image bump silently breaks) — a
+      # plain-format dump is broadly compatible across nearby major versions,
+      # and a dump that runs beats no dump because of a strict version pin.
+      - name: Install pg_dump (matches Neon's server major, falls back to distro default)
         run: |
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client-16
+          set -uo pipefail
+          if sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list' \
+            && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
+            && sudo apt-get update \
+            && sudo apt-get install -y postgresql-client-16; then
+            echo "Installed postgresql-client-16 from PGDG."
+          else
+            echo "::warning::PGDG install of postgresql-client-16 failed — falling back to Ubuntu's default postgresql-client."
+            sudo rm -f /etc/apt/sources.list.d/pgdg.list
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+          pg_dump --version
 
       - name: Dump + encrypt
         id: dump
@@ -77,9 +91,20 @@ jobs:
           npm ci
           npm run upload-to-drive -- --file="${{ steps.dump.outputs.file }}"
 
+      # Independent of the pg_dump/PGDG toolchain above on purpose — that step
+      # (a third-party apt repo + a version-pinned package) is exactly the kind
+      # of thing that silently breaks on a runner-image bump. If it takes psql
+      # down with it, the OLD version of this step (a raw psql -c one-liner)
+      # went down too, so a broken backup wrote nothing to job_heartbeats and
+      # looked identical to "still fine" for days. `npm run heartbeat` only
+      # needs Node + the `pg` package, so it writes a heartbeat regardless of
+      # whether the dump itself succeeded.
+      - name: Install deps for heartbeat
+        if: always()
+        run: npm ci
+
       - name: Heartbeat
         if: always()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS job_heartbeats (job TEXT PRIMARY KEY, ran_at TIMESTAMPTZ NOT NULL DEFAULT now(), ok BOOLEAN NOT NULL DEFAULT true, note TEXT); INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ('db_backup', now(), '${{ job.status }}' = 'success', NULL) ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = EXCLUDED.ok, note = EXCLUDED.note;"
+        run: npm run heartbeat -- --job=db_backup --status=${{ job.status }} --note="dump=${{ steps.dump.outcome }}"

@@ -32,3 +32,9 @@ jobs:
           BACKUP_DRIVE_IMPERSONATE: ${{ secrets.BACKUP_DRIVE_IMPERSONATE }}
         run: |
           npm run snapshot-plans -- ${{ inputs.dry_run && '--dry-run' || '' }} ${{ inputs.commitment != '' && format('--commitment={0}', inputs.commitment) || '' }}
+
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=snapshot_plans --status=${{ job.status }}

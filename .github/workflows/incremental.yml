@@ -56,6 +56,13 @@ jobs:
           DASHBOARD_DIR: ${{ github.workspace }}/dashboard
         run: npm run incremental
 
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=incremental_sync --status=${{ job.status }}
+
       # Slack error alert (Definition of Done). No-ops safely until you add the
       # SLACK_WEBHOOK_URL secret, so the workflow runs green before Slack is wired.
       - name: Alert Slack on failure

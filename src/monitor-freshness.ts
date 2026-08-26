@@ -116,10 +116,21 @@ async function main() {
       ...erroring.map((e) => `E:${e.src}`),
       ...coiAlerts.map((r) => `C:${r.name}:${r.days < 0 ? "exp" : r.days <= 7 ? "7" : "30"}`),
     ].sort().join(",");
-    const prev = (await c.query<{ note: string | null }>(`SELECT note FROM job_heartbeats WHERE job = 'freshness_monitor'`)).rows[0]?.note ?? "";
+    const prevRow = (await c.query<{ note: string | null; ran_at: Date }>(`SELECT note, ran_at FROM job_heartbeats WHERE job = 'freshness_monitor'`)).rows[0];
+    const prev = prevRow?.note ?? "";
     console.log(`Freshness: ${down.length} down, ${erroring.length} with errors. signature="${signature}" prev="${prev}"`);
 
-    if (signature === prev) { console.log("No change — no alert."); return; }
+    // Edge-triggered avoids per-run spam, but a genuinely unresolved outage
+    // (the exact db_backup case: alerted once, then six silent days while it
+    // stayed broken) needs a periodic nudge, not permanent silence just
+    // because nothing about the failure changed. Re-alert on an unchanged bad
+    // signature once it's been sitting for a day.
+    const REMIND_AFTER_H = 24;
+    const prevAgeH = prevRow?.ran_at ? (now - new Date(prevRow.ran_at).getTime()) / 3_600_000 : Infinity;
+    const unchanged = signature === prev;
+    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0;
+    const dueForReminder = unchanged && stillDown && prevAgeH >= REMIND_AFTER_H;
+    if (unchanged && !dueForReminder) { console.log("No change — no alert."); return; }
 
     const coiLine = coiAlerts.length
       ? `:shield: *Insurance expiring:* ${coiAlerts.map((r) => `${r.name} (${r.days < 0 ? `expired ${-r.days}d ago` : `${r.days}d`})`).join(", ")}`
@@ -131,7 +142,8 @@ async function main() {
       if (down.length) parts.push(`:red_circle: *Not flowing:* ${down.map(label).join(", ")}`);
       if (erroring.length) parts.push(`:large_orange_circle: *Account errors:* ${erroring.map((e) => `${label(e.src)} (${e.n}/${e.m})`).join(", ")}`);
       if (coiLine) parts.push(coiLine);
-      text = `:satellite: *Data health changed*\n${parts.join("\n")}\n<${DASH}/#/admin/data-health|Open Data health →>`;
+      const headline = dueForReminder ? ":satellite: *Data health — still unresolved*" : ":satellite: *Data health changed*";
+      text = `${headline}\n${parts.join("\n")}\n<${DASH}/#/admin/data-health|Open Data health →>`;
     } else if (prev) {
       text = `:white_check_mark: *Data pipelines recovered* — everything is flowing again.`;
     }

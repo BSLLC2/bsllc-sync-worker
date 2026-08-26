@@ -58,3 +58,10 @@ jobs:
           else
             npm run import-hubspot
           fi
+
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=import_hubspot --status=${{ job.status }}

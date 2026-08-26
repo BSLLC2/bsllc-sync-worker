@@ -54,3 +54,9 @@ jobs:
           else
             npm run import-gsc-api
           fi
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=import_gsc --status=${{ job.status }}
