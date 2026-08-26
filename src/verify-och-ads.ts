@@ -29,7 +29,23 @@ const RECENT  = { from: "2026-08-05", to: "2026-08-26" }; // spans the break + t
 const usd = (m: unknown) => Number(m ?? 0) / 1_000_000;
 const $ = (n: number) => `$${n.toFixed(2)}`;
 const n1 = (v: unknown) => Number(v ?? 0).toFixed(1);
-const hr = (t: string) => console.log(`\n${"=".repeat(92)}\n${t}\n${"=".repeat(92)}`);
+/**
+ * Section gating. The full run is longer than a retrievable log tail, so
+ * ONLY=A,B,C,D prints just those sections. Queries still run; only printing is
+ * gated, which keeps the lettered blocks untouched.
+ */
+const WANT = (() => {
+  const raw = String(process.env.ONLY ?? "").toUpperCase().replace(/[^A-G]/g, "");
+  return raw ? new Set(raw.split("")) : null;
+})();
+const realLog = console.log.bind(console);
+let SEC = "";
+console.log = ((...a: unknown[]) => { if (!WANT || SEC === "" || WANT.has(SEC)) realLog(...a); }) as typeof console.log;
+const hr = (t: string) => {
+  const m = /^\s*([A-G])\./.exec(t);
+  if (m) SEC = m[1]!;
+  console.log(`\n${"=".repeat(92)}\n${t}\n${"=".repeat(92)}`);
+};
 
 const CATEGORY: Record<string,string> = {"2":"DEFAULT","3":"PAGE_VIEW","4":"PURCHASE","5":"SIGNUP","6":"LEAD","7":"DOWNLOAD","8":"ADD_TO_CART","9":"BEGIN_CHECKOUT","11":"PHONE_CALL_LEAD","12":"IMPORTED_LEAD","13":"SUBMIT_LEAD_FORM","14":"BOOK_APPOINTMENT","15":"REQUEST_QUOTE","16":"GET_DIRECTIONS","17":"OUTBOUND_CLICK","18":"CONTACT","19":"ENGAGEMENT","20":"STORE_VISIT","22":"QUALIFIED_LEAD","23":"CONVERTED_LEAD"};
 const CSTATUS: Record<string,string> = {"2":"ENABLED","3":"REMOVED","4":"HIDDEN"};
