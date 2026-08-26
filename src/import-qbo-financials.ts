@@ -2,7 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
-import { QboClient, findReportTotal, type QboReport } from "./qbo.js";
+import { QboClient, findReportTotal, type QboReport, type QboReportRow } from "./qbo.js";
 
 /**
  * Financials tab (Phase 1 actuals): pulls P&L (month-to-date, quarter-to-date,
@@ -36,6 +36,20 @@ function balanceSheetSummary(report: QboReport) {
     totalLiabilitiesCents: toCents(findReportTotal(report, ["TotalLiabilities"])),
     totalEquityCents: toCents(findReportTotal(report, ["TotalEquity"])),
   };
+}
+/** Every `group` value present anywhere in a QBO report — a debug aid for
+ *  when findReportTotal comes back null for a group name we assumed QBO
+ *  uses (Intuit's own naming isn't consistent report-to-report). */
+function collectGroupNames(report: QboReport): string[] {
+  const names = new Set<string>();
+  const walk = (rows?: QboReportRow[]) => {
+    for (const row of rows ?? []) {
+      if (row.group) names.add(row.group);
+      walk(row.Rows?.Row);
+    }
+  };
+  walk(report.Rows?.Row);
+  return Array.from(names);
 }
 function cashFlowSummary(report: QboReport) {
   return {
@@ -130,6 +144,9 @@ async function main() {
         await upsertFinancialSnapshot(c, { reportType: "balance_sheet", periodType: "as_of", periodStart: todayIso, periodEnd: todayIso, data: bs, summary });
         const fmt = (n: number | null) => (n != null ? `$${(n / 100).toLocaleString("en-US")}` : "(not found in report)");
         console.log(`  ✓ Balance Sheet as of ${todayIso} — assets ${fmt(summary.totalAssetsCents)}, liabilities ${fmt(summary.totalLiabilitiesCents)}, equity ${fmt(summary.totalEquityCents)}`);
+        if (summary.totalLiabilitiesCents == null || summary.totalEquityCents == null) {
+          console.log(`    (debug) actual group names in this report: ${collectGroupNames(bs).join(", ") || "(none found)"}`);
+        }
       } catch (e) {
         console.log(`  ✗ Balance Sheet: ${e instanceof Error ? e.message : e}`);
       }
