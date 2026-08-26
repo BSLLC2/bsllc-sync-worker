@@ -83,6 +83,17 @@ async function main() {
       console.log(`  ${String(x.name).slice(0,37).padEnd(38)}${nm(CATEGORY,x.category).padEnd(20)}${nm(CSTATUS,x.status).padEnd(10)}${p}`);
     }
   }
+  // The two actions that carry all the volume. Printed again, on their own, at the
+  // end of this section: in the full list they scroll out of a truncated log, and
+  // these two flags are the whole question.
+  const VOLUME = ["Calls from Ads", "Form Submission"];
+  const verdict: string[] = [];
+  if (acts) for (const r of acts) {
+    const x = r.conversion_action ?? {};
+    if (!VOLUME.includes(String(x.name))) continue;
+    verdict.push(`    ${String(x.name).padEnd(20)} status ${nm(CSTATUS,x.status).padEnd(9)} primary_for_goal = ${x.primary_for_goal === true ? "TRUE  (counts in Conversions)" : x.primary_for_goal === false ? "FALSE (does NOT count)" : "NOT REPORTED"}`);
+  }
+
   console.log(`\n  ACCOUNT-DEFAULT goals now`);
   const cg = await q(`SELECT customer_conversion_goal.category, customer_conversion_goal.origin,
       customer_conversion_goal.biddable FROM customer_conversion_goal`);
@@ -118,6 +129,10 @@ async function main() {
       console.log(`    ${k}  ${$(t.cost).padStart(9)}${String(t.cl).padStart(8)}${n1(t.c).padStart(8)}${n1(t.a).padStart(10)}${flag}`);
     }
   }
+
+  console.log(`\n  >>> THE TWO ACTIONS THAT CARRY ALL THE VOLUME <<<`);
+  for (const v of verdict) console.log(v);
+  if (!verdict.length) console.log(`    (neither action was returned by the conversion_action query)`);
 
   // ── B. Treatment Center Search on its own ─────────────────────────────────
   hr("B. TREATMENT CENTER SEARCH — ITS OWN CONVERSION COUNT");
