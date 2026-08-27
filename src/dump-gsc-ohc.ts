@@ -36,7 +36,23 @@ const n0 = (v: unknown) => Number(v ?? 0).toLocaleString("en-US");
 const pc = (v: unknown) => `${(Number(v ?? 0) * 100).toFixed(2)}%`;
 const p1 = (v: unknown) => Number(v ?? 0).toFixed(1);
 const sgn = (n: number) => `${n >= 0 ? "+" : ""}${n}`;
-const hr = (t: string) => console.log(`\n${"=".repeat(100)}\n${t}\n${"=".repeat(100)}`);
+/**
+ * Section gating. The full pull is longer than a retrievable log tail, so
+ * ONLY=34 prints sitemaps + performance and ONLY=5 prints the delta. Every query
+ * still runs; only printing is gated.
+ */
+const WANT = (() => {
+  const raw = String(process.env.ONLY ?? "").replace(/[^1-5]/g, "");
+  return raw ? new Set(raw.split("")) : null;
+})();
+const realLog = console.log.bind(console);
+let SEC = "";
+console.log = ((...a: unknown[]) => { if (!WANT || SEC === "" || WANT.has(SEC)) realLog(...a); }) as typeof console.log;
+const hr = (t: string) => {
+  const m = /^\s*([1-5])/.exec(t);
+  if (m) SEC = m[1]!;
+  console.log(`\n${"=".repeat(100)}\n${t}\n${"=".repeat(100)}`);
+};
 
 function env(n: string): string { const v = process.env[n]; if (!v?.trim()) throw new Error(`Missing ${n}`); return v.trim(); }
 

@@ -4,6 +4,11 @@ name: OHC Search Console pull (READ ONLY)
 # Index coverage and Crawl stats have no API surface and are not attempted here.
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: 'Sections to print, e.g. 34 or 5. Blank = all.'
+        required: false
+        default: ''
 
 jobs:
   dump:
@@ -17,9 +22,10 @@ jobs:
       - name: Pull Search Console
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          ONLY: ${{ inputs.only }}
         run: npm run dump-gsc-ohc 2>&1 | tee gsc-ohc.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gsc-ohc
+          name: gsc-ohc-${{ inputs.only || 'all' }}
           path: gsc-ohc.txt
