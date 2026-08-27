@@ -27,12 +27,19 @@ import { QboClient } from "./qbo.js";
 function env(n: string): string { const v = process.env[n]; if (!v?.trim()) throw new Error(`Missing ${n}`); return v.trim(); }
 
 // QBO's RecurringTransaction query response nests the actual template under
-// a key named after its txn type ("Invoice"), alongside a shared RecurringInfo
-// block. Loose/defensive parsing since Intuit's own docs for this entity are
-// thin — logs the raw shape of the first row so a live run can confirm it.
-interface RecurringInfo { Name?: string; Active?: boolean; Type?: string }
-interface RecurringInvoiceTemplate { Id?: string; CustomerRef?: { value?: string; name?: string }; Line?: { Amount?: number }[]; TotalAmt?: number }
-interface RecurringTransactionRow { RecurringInfo?: RecurringInfo; Invoice?: RecurringInvoiceTemplate }
+// a key named after its txn type ("Invoice") -- RecurringInfo (name, active
+// flag, and the ScheduleInfo interval/next-date block Gap Analysis needs)
+// is a field ON that Invoice object, NOT a sibling of it as first assumed.
+// Confirmed live 2026-08-27 against a real response:
+//   Invoice.RecurringInfo = {
+//     Name, RecurType, Active,
+//     ScheduleInfo: { IntervalType, NumInterval, DayOfMonth, DaysBefore,
+//                     StartDate, NextDate, PreviousDate }
+//   }
+interface RecurringScheduleInfo { IntervalType?: string; NumInterval?: number; NextDate?: string; PreviousDate?: string }
+interface RecurringInfo { Name?: string; Active?: boolean; ScheduleInfo?: RecurringScheduleInfo }
+interface RecurringInvoiceTemplate { Id?: string; CustomerRef?: { value?: string; name?: string }; Line?: { Amount?: number }[]; TotalAmt?: number; RecurringInfo?: RecurringInfo }
+interface RecurringTransactionRow { Invoice?: RecurringInvoiceTemplate }
 
 function toCents(n: number): number { return Math.round(n * 100); }
 
@@ -73,6 +80,15 @@ async function main() {
         active BOOLEAN NOT NULL DEFAULT true,
         synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`);
+    // interval_type/num_interval/next_date/previous_date -- the real QBO
+    // billing schedule (e.g. "Monthly" x1 = every month, "Monthly" x3 =
+    // every 3 months, "Yearly" x1 = annual), added so Gap Analysis's
+    // Scheduled revenue can be projected from this business's real recurring
+    // invoice templates instead of manually-entered client retainer figures.
+    await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS interval_type TEXT`);
+    await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS num_interval INTEGER NOT NULL DEFAULT 1`);
+    await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS next_date TEXT`);
+    await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS previous_date TEXT`);
     await c.query(`CREATE INDEX IF NOT EXISTS idx_qbo_recurring_invoices_customer ON qbo_recurring_invoices (customer_id)`);
     // Payments exploded to one row per invoice they were applied to — lets
     // us measure each customer's REAL historical days-to-pay (payment date
@@ -136,27 +152,25 @@ async function main() {
     console.log(`  ✓ ${payments.length} payment-to-invoice application(s)`);
 
     const recurring = (await qbo.getRecurringInvoiceTemplates()) as RecurringTransactionRow[];
-    if (recurring.length > 0) {
-      // Confirmed live: row.RecurringInfo is undefined -- it's NOT a sibling
-      // of Invoice as assumed. Checking both the top level and nested under
-      // Invoice to find where QBO actually puts the interval/next-date data.
-      const row0 = recurring[0] as Record<string, unknown>;
-      const invoice0 = row0.Invoice as Record<string, unknown> | undefined;
-      console.log(`  (debug) top-level keys on first row: ${JSON.stringify(Object.keys(row0))}`);
-      console.log(`  (debug) keys on first row's Invoice: ${JSON.stringify(invoice0 ? Object.keys(invoice0) : null)}`);
-      console.log(`  (debug) first row's Invoice.RecurringInfo: ${JSON.stringify(invoice0?.RecurringInfo)}`);
-    }
     let recurringSynced = 0;
     for (const row of recurring) {
       const tmpl = row.Invoice;
       if (!tmpl) continue; // not an invoice-type recurring transaction (could be Bill, SalesReceipt, etc.)
       const amountCents = tmpl.TotalAmt != null ? toCents(tmpl.TotalAmt) : toCents((tmpl.Line ?? []).reduce((s, l) => s + (l.Amount ?? 0), 0));
+      const info = tmpl.RecurringInfo;
+      const schedule = info?.ScheduleInfo;
       await c.query(
-        `INSERT INTO qbo_recurring_invoices (id, customer_id, customer_name, template_name, amount_cents, active, synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, now())
+        `INSERT INTO qbo_recurring_invoices (id, customer_id, customer_name, template_name, amount_cents, active, interval_type, num_interval, next_date, previous_date, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
          ON CONFLICT (id) DO UPDATE SET customer_id = EXCLUDED.customer_id, customer_name = EXCLUDED.customer_name,
-           template_name = EXCLUDED.template_name, amount_cents = EXCLUDED.amount_cents, active = EXCLUDED.active, synced_at = now()`,
-        [tmpl.Id ?? randomUUID(), tmpl.CustomerRef?.value ?? null, tmpl.CustomerRef?.name ?? null, row.RecurringInfo?.Name ?? null, amountCents, row.RecurringInfo?.Active !== false],
+           template_name = EXCLUDED.template_name, amount_cents = EXCLUDED.amount_cents, active = EXCLUDED.active,
+           interval_type = EXCLUDED.interval_type, num_interval = EXCLUDED.num_interval,
+           next_date = EXCLUDED.next_date, previous_date = EXCLUDED.previous_date, synced_at = now()`,
+        [
+          tmpl.Id ?? randomUUID(), tmpl.CustomerRef?.value ?? null, tmpl.CustomerRef?.name ?? null, info?.Name ?? null,
+          amountCents, info?.Active !== false, schedule?.IntervalType ?? null, schedule?.NumInterval ?? 1,
+          schedule?.NextDate ?? null, schedule?.PreviousDate ?? null,
+        ],
       );
       recurringSynced++;
     }
