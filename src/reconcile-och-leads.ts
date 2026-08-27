@@ -81,11 +81,23 @@ async function main() {
 
   // ── B. The calls themselves ───────────────────────────────────────────────
   hr("B. EVERY CALL GOOGLE LOGGED, BY DURATION");
-  const calls = await q(`SELECT call_view.call_duration_seconds, call_view.call_status,
-      call_view.type, call_view.start_call_date_time, campaign.name
-      FROM call_view WHERE segments.date BETWEEN '${W.from}' AND '${W.to}'`);
+  // call_view rejects segments.date in this API version. Pull the resource plain
+  // and window it client-side on its own start_call_date_time instead, so the
+  // range is still honest rather than "whatever Google felt like returning".
+  const raw = await q(`SELECT call_view.call_duration_seconds, call_view.call_status,
+      call_view.type, call_view.start_call_date_time, campaign.name FROM call_view`);
+  const inWindow = (r: any) => {
+    const t = String(r.call_view?.start_call_date_time ?? "").slice(0, 10);
+    return t >= W.from && t <= W.to;
+  };
+  const calls = raw ? raw.filter(inWindow) : null;
   if (calls) {
-    if (!calls.length) console.log(`  call_view returned 0 rows. Call detail may not be retained for this account.`);
+    console.log(`  call_view returned ${raw!.length} rows total; ${calls.length} fall inside ${W.from}..${W.to}.`);
+    if (raw!.length && !calls.length) {
+      const dates = raw!.map((r: any) => String(r.call_view?.start_call_date_time ?? "").slice(0,10)).filter(Boolean).sort();
+      console.log(`  Rows exist but none in window. Dates present run ${dates[0]} .. ${dates[dates.length-1]}.`);
+    }
+    if (!calls.length) console.log(`  No call detail for this window. Google retains call_view for a limited period.`);
     const buckets: Record<string, number> = { "0-9s": 0, "10-29s": 0, "30-59s": 0, "60-119s": 0, "120s+": 0 };
     let missed = 0, received = 0;
     for (const r of calls) {
