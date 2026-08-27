@@ -23,7 +23,18 @@ const CLIENT = "ohio-community-health-och";
 const W = { from: "2026-07-29", to: "2026-08-27" };
 
 const n1 = (v: unknown) => Number(v ?? 0).toFixed(1);
-const hr = (t: string) => console.log(`\n${"=".repeat(92)}\n${t}\n${"=".repeat(92)}`);
+const WANT = (() => {
+  const raw = String(process.env.ONLY ?? "").toUpperCase().replace(/[^A-E]/g, "");
+  return raw ? new Set(raw.split("")) : null;
+})();
+const realLog = console.log.bind(console);
+let SEC = "";
+console.log = ((...a: unknown[]) => { if (!WANT || SEC === "" || WANT.has(SEC)) realLog(...a); }) as typeof console.log;
+const hr = (t: string) => {
+  const m = /^\s*([A-E])\./.exec(t);
+  if (m) SEC = m[1]!;
+  console.log(`\n${"=".repeat(92)}\n${t}\n${"=".repeat(92)}`);
+};
 const CALLSTATUS: Record<string,string> = {"2":"MISSED","3":"RECEIVED"};
 const CALLTYPE: Record<string,string> = {"2":"MANUALLY_DIALED","3":"HIGH_END_MOBILE_SEARCH"};
 const nm = (m: Record<string,string>, v: unknown) => m[String(v ?? "")] ?? String(v ?? "—");
