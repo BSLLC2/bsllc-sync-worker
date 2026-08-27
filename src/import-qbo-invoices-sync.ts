@@ -137,12 +137,14 @@ async function main() {
 
     const recurring = (await qbo.getRecurringInvoiceTemplates()) as RecurringTransactionRow[];
     if (recurring.length > 0) {
-      console.log(`  (debug) first recurring-transaction row shape: ${JSON.stringify(recurring[0]).slice(0, 800)}`);
-      // The previous dump above cut off before reaching RecurringInfo (it's a
-      // sibling key to Invoice, and Invoice's own huge Line[].Description text
-      // ate the whole 800-char budget) -- this is the interval/next-date data
-      // the app's Gap Analysis actually needs, so log it directly and small.
-      console.log(`  (debug) first row's RecurringInfo: ${JSON.stringify(recurring[0]?.RecurringInfo)}`);
+      // Confirmed live: row.RecurringInfo is undefined -- it's NOT a sibling
+      // of Invoice as assumed. Checking both the top level and nested under
+      // Invoice to find where QBO actually puts the interval/next-date data.
+      const row0 = recurring[0] as Record<string, unknown>;
+      const invoice0 = row0.Invoice as Record<string, unknown> | undefined;
+      console.log(`  (debug) top-level keys on first row: ${JSON.stringify(Object.keys(row0))}`);
+      console.log(`  (debug) keys on first row's Invoice: ${JSON.stringify(invoice0 ? Object.keys(invoice0) : null)}`);
+      console.log(`  (debug) first row's Invoice.RecurringInfo: ${JSON.stringify(invoice0?.RecurringInfo)}`);
     }
     let recurringSynced = 0;
     for (const row of recurring) {
