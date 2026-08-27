@@ -85,7 +85,8 @@
     "dump-ads-conversions": "tsx src/dump-ads-conversions.ts",
     "dump-ga4-config": "tsx src/dump-ga4-config.ts",
     "diagnose-och-ads": "tsx src/diagnose-och-ads.ts",
-    "verify-och-ads": "tsx src/verify-och-ads.ts"
+    "verify-och-ads": "tsx src/verify-och-ads.ts",
+    "dump-gsc-ohc": "tsx src/dump-gsc-ohc.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

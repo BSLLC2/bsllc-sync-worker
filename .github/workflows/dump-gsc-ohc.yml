@@ -1,0 +1,25 @@
+name: OHC Search Console pull (READ ONLY)
+
+# Sitemaps, six-month query/page breakdown, and the Aug-vs-Jul query delta.
+# Index coverage and Crawl stats have no API surface and are not attempted here.
+on:
+  workflow_dispatch:
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Pull Search Console
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: npm run dump-gsc-ohc 2>&1 | tee gsc-ohc.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gsc-ohc
+          path: gsc-ohc.txt
