@@ -29,21 +29,32 @@ jobs:
       - name: Install pg_dump (matches Neon's server major, falls back to distro default)
         # pg_dump refuses to dump from a server NEWER than itself ("aborting
         # because of server version mismatch") -- it's fine to trail behind
-        # an older server, never ahead of a newer one. Neon moved to
-        # Postgres 18 (confirmed live 2026-08-26, which silently broke every
-        # nightly backup pinned to client 16 -- the dump step failed in ~1s
-        # every run with nothing uploaded, and would have kept failing
-        # indefinitely since a version pin doesn't self-heal). Bump this
-        # pin whenever Neon's server major moves past it again.
+        # an older server, never ahead of a newer one. This used to hardcode
+        # a specific version (postgresql-client-16, later bumped to -18 when
+        # Neon moved to Postgres 18 on 2026-08-26) -- that bump ALSO silently
+        # failed, because the -18 package name didn't resolve in PGDG's repo
+        # for this runner's distro at the time, and the script's own
+        # fallback branch swallowed the failure and quietly reinstalled
+        # Ubuntu's stock v16 client instead. A hardcoded guess is exactly
+        # the kind of pin that goes stale without anyone noticing, so this
+        # now asks the PGDG repo what its newest available client actually
+        # is and installs that -- no version number to remember to bump.
         run: |
           set -uo pipefail
           if sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list' \
             && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
-            && sudo apt-get update \
-            && sudo apt-get install -y postgresql-client-18; then
-            echo "Installed postgresql-client-18 from PGDG."
+            && sudo apt-get update; then
+            PKG=$(apt-cache search --names-only '^postgresql-client-[0-9]+$' | awk '{print $1}' | sed -E 's/postgresql-client-//' | sort -n | tail -1)
+            if [ -n "$PKG" ] && sudo apt-get install -y "postgresql-client-$PKG"; then
+              echo "Installed postgresql-client-$PKG from PGDG (newest available)."
+            else
+              echo "::warning::No installable postgresql-client-NN found in PGDG's repo — falling back to Ubuntu's default postgresql-client."
+              sudo rm -f /etc/apt/sources.list.d/pgdg.list
+              sudo apt-get update
+              sudo apt-get install -y postgresql-client
+            fi
           else
-            echo "::warning::PGDG install of postgresql-client-16 failed — falling back to Ubuntu's default postgresql-client."
+            echo "::warning::PGDG repo/key setup failed — falling back to Ubuntu's default postgresql-client."
             sudo rm -f /etc/apt/sources.list.d/pgdg.list
             sudo apt-get update
             sudo apt-get install -y postgresql-client

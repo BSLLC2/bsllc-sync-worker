@@ -53,9 +53,13 @@ async function main() {
         customer_name TEXT,
         doc_number TEXT,
         txn_date TEXT,
+        due_date TEXT,
         total_cents INTEGER NOT NULL DEFAULT 0,
+        balance_cents INTEGER NOT NULL DEFAULT 0,
         synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`);
+    await c.query(`ALTER TABLE qbo_invoices ADD COLUMN IF NOT EXISTS due_date TEXT`);
+    await c.query(`ALTER TABLE qbo_invoices ADD COLUMN IF NOT EXISTS balance_cents INTEGER NOT NULL DEFAULT 0`);
     await c.query(`CREATE INDEX IF NOT EXISTS idx_qbo_invoices_customer ON qbo_invoices (customer_id)`);
     await c.query(`
       CREATE TABLE IF NOT EXISTS qbo_recurring_invoices (
@@ -68,13 +72,29 @@ async function main() {
         synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`);
     await c.query(`CREATE INDEX IF NOT EXISTS idx_qbo_recurring_invoices_customer ON qbo_recurring_invoices (customer_id)`);
+    // Payments exploded to one row per invoice they were applied to — lets
+    // us measure each customer's REAL historical days-to-pay (payment date
+    // minus invoice date) so AR collection timing is based on how that
+    // customer actually pays, not just their stated terms.
+    await c.query(`
+      CREATE TABLE IF NOT EXISTS qbo_payments (
+        payment_id TEXT NOT NULL,
+        invoice_id TEXT NOT NULL,
+        customer_id TEXT,
+        txn_date TEXT,
+        amount_cents INTEGER NOT NULL DEFAULT 0,
+        synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (payment_id, invoice_id)
+      )`);
+    await c.query(`CREATE INDEX IF NOT EXISTS idx_qbo_payments_customer ON qbo_payments (customer_id)`);
+    await c.query(`CREATE INDEX IF NOT EXISTS idx_qbo_payments_invoice ON qbo_payments (invoice_id)`);
 
     console.log(`import-qbo-invoices-sync${dryRun ? " (dry-run)" : ""}`);
     const qbo = new QboClient(c);
     if (!dryRun) await qbo.connect();
 
     if (dryRun) {
-      console.log("  would sync QBO customers, invoices, and recurring invoice templates");
+      console.log("  would sync QBO customers, invoices, recurring invoice templates, and payments");
       return;
     }
 

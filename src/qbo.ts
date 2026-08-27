@@ -129,17 +129,44 @@ export class QboClient {
    *  billed to. Paginated the same way. Read-only; this is the real "has
    *  this customer actually been invoiced" signal our own quote-tracking
    *  marker can't see for anything billed outside Quote Designer. */
-  async getInvoices(): Promise<{ id: string; docNumber: string | null; txnDate: string | null; totalAmt: number; customerId: string | null; customerName: string | null }[]> {
-    const out: { id: string; docNumber: string | null; txnDate: string | null; totalAmt: number; customerId: string | null; customerName: string | null }[] = [];
+  async getInvoices(): Promise<{ id: string; docNumber: string | null; txnDate: string | null; dueDate: string | null; totalAmt: number; balance: number; customerId: string | null; customerName: string | null }[]> {
+    const out: { id: string; docNumber: string | null; txnDate: string | null; dueDate: string | null; totalAmt: number; balance: number; customerId: string | null; customerName: string | null }[] = [];
     let start = 1;
     for (;;) {
-      const q = encodeURIComponent(`SELECT Id, DocNumber, TxnDate, TotalAmt, CustomerRef FROM Invoice STARTPOSITION ${start} MAXRESULTS 1000`);
-      const res = await this.call<{ QueryResponse?: { Invoice?: { Id: string; DocNumber?: string; TxnDate?: string; TotalAmt?: number; CustomerRef?: { value?: string; name?: string } }[] } }>("GET", `query?query=${q}`);
+      const q = encodeURIComponent(`SELECT Id, DocNumber, TxnDate, DueDate, TotalAmt, Balance, CustomerRef FROM Invoice STARTPOSITION ${start} MAXRESULTS 1000`);
+      const res = await this.call<{ QueryResponse?: { Invoice?: { Id: string; DocNumber?: string; TxnDate?: string; DueDate?: string; TotalAmt?: number; Balance?: number; CustomerRef?: { value?: string; name?: string } }[] } }>("GET", `query?query=${q}`);
       const page = res.QueryResponse?.Invoice ?? [];
       out.push(...page.map((i) => ({
-        id: i.Id, docNumber: i.DocNumber ?? null, txnDate: i.TxnDate ?? null, totalAmt: i.TotalAmt ?? 0,
+        id: i.Id, docNumber: i.DocNumber ?? null, txnDate: i.TxnDate ?? null, dueDate: i.DueDate ?? null,
+        totalAmt: i.TotalAmt ?? 0, balance: i.Balance ?? 0,
         customerId: i.CustomerRef?.value ?? null, customerName: i.CustomerRef?.name ?? null,
       })));
+      if (page.length < 1000) break;
+      start += 1000;
+    }
+    return out;
+  }
+
+  /** Every payment, exploded to one row per invoice it was applied to (a
+   *  single payment can cover several invoices at once) — lets us measure
+   *  each customer's REAL historical days-to-pay (payment date minus the
+   *  invoice's txn date) instead of assuming everyone pays on their stated
+   *  terms. Line[].LinkedTxn is QBO's standard payment-application shape. */
+  async getPayments(): Promise<{ paymentId: string; invoiceId: string; customerId: string | null; txnDate: string | null; amount: number }[]> {
+    const out: { paymentId: string; invoiceId: string; customerId: string | null; txnDate: string | null; amount: number }[] = [];
+    let start = 1;
+    for (;;) {
+      const q = encodeURIComponent(`SELECT Id, TxnDate, CustomerRef, Line FROM Payment STARTPOSITION ${start} MAXRESULTS 1000`);
+      const res = await this.call<{ QueryResponse?: { Payment?: { Id: string; TxnDate?: string; CustomerRef?: { value?: string }; Line?: { Amount?: number; LinkedTxn?: { TxnId?: string; TxnType?: string }[] }[] }[] } }>("GET", `query?query=${q}`);
+      const page = res.QueryResponse?.Payment ?? [];
+      for (const p of page) {
+        for (const line of p.Line ?? []) {
+          for (const linked of line.LinkedTxn ?? []) {
+            if (linked.TxnType !== "Invoice" || !linked.TxnId) continue;
+            out.push({ paymentId: p.Id, invoiceId: linked.TxnId, customerId: p.CustomerRef?.value ?? null, txnDate: p.TxnDate ?? null, amount: line.Amount ?? 0 });
+          }
+        }
+      }
       if (page.length < 1000) break;
       start += 1000;
     }
