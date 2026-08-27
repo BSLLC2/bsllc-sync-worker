@@ -1,0 +1,49 @@
+name: QBO — customer/invoice/recurring-invoice sync
+
+# Pulls QBO's real Customer, Invoice, and RecurringTransaction (invoice-type)
+# lists into Postgres so the dashboard's "Closed won -- not yet billed"
+# worklist can check real QBO billing evidence instead of only the Quote
+# Designer push-side marker. Same QBO connection already used elsewhere; no
+# new secrets, no new OAuth consent.
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, write nothing to Postgres (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: import-qbo-invoices-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Sync QBO customers/invoices/recurring invoices
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-qbo-invoices-sync -- --dry-run
+          else
+            npm run import-qbo-invoices-sync
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=qbo_invoices_sync --status=${{ job.status }}

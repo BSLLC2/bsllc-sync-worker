@@ -108,6 +108,57 @@ export class QboClient {
     return (res.QueryResponse?.Account ?? []).map((a) => ({ id: a.Id, name: a.Name, balance: a.CurrentBalance ?? 0 }));
   }
 
+  /** Every active QBO customer — id + display name. Paginated (QBO caps a
+   *  single query at 1000 rows). Read-only; feeds the "link this CRM company
+   *  to its QBO customer" picker so matching doesn't rely on guessing names. */
+  async getCustomers(): Promise<{ id: string; name: string }[]> {
+    const out: { id: string; name: string }[] = [];
+    let start = 1;
+    for (;;) {
+      const q = encodeURIComponent(`SELECT Id, DisplayName FROM Customer WHERE Active = true STARTPOSITION ${start} MAXRESULTS 1000`);
+      const res = await this.call<{ QueryResponse?: { Customer?: { Id: string; DisplayName?: string }[] } }>("GET", `query?query=${q}`);
+      const page = res.QueryResponse?.Customer ?? [];
+      out.push(...page.map((c) => ({ id: c.Id, name: c.DisplayName ?? "" })));
+      if (page.length < 1000) break;
+      start += 1000;
+    }
+    return out;
+  }
+
+  /** Every invoice — id, doc number, date, total, and which customer it's
+   *  billed to. Paginated the same way. Read-only; this is the real "has
+   *  this customer actually been invoiced" signal our own quote-tracking
+   *  marker can't see for anything billed outside Quote Designer. */
+  async getInvoices(): Promise<{ id: string; docNumber: string | null; txnDate: string | null; totalAmt: number; customerId: string | null; customerName: string | null }[]> {
+    const out: { id: string; docNumber: string | null; txnDate: string | null; totalAmt: number; customerId: string | null; customerName: string | null }[] = [];
+    let start = 1;
+    for (;;) {
+      const q = encodeURIComponent(`SELECT Id, DocNumber, TxnDate, TotalAmt, CustomerRef FROM Invoice STARTPOSITION ${start} MAXRESULTS 1000`);
+      const res = await this.call<{ QueryResponse?: { Invoice?: { Id: string; DocNumber?: string; TxnDate?: string; TotalAmt?: number; CustomerRef?: { value?: string; name?: string } }[] } }>("GET", `query?query=${q}`);
+      const page = res.QueryResponse?.Invoice ?? [];
+      out.push(...page.map((i) => ({
+        id: i.Id, docNumber: i.DocNumber ?? null, txnDate: i.TxnDate ?? null, totalAmt: i.TotalAmt ?? 0,
+        customerId: i.CustomerRef?.value ?? null, customerName: i.CustomerRef?.name ?? null,
+      })));
+      if (page.length < 1000) break;
+      start += 1000;
+    }
+    return out;
+  }
+
+  /** Active recurring-invoice templates — a client with a template set up
+   *  counts as "billing is arranged" even before its next line-item invoice
+   *  actually generates. QBO's RecurringTransaction shape nests the template
+   *  under a key named after its type ("Invoice" here) alongside a shared
+   *  RecurringInfo block — logged raw on first encounter (see
+   *  import-qbo-invoices-sync.ts) since Intuit's docs for this entity are
+   *  thin and worth confirming against a real response once. */
+  async getRecurringInvoiceTemplates(): Promise<unknown[]> {
+    const q = encodeURIComponent(`SELECT * FROM RecurringTransaction`);
+    const res = await this.call<{ QueryResponse?: { RecurringTransaction?: unknown[] } }>("GET", `query?query=${q}`);
+    return res.QueryResponse?.RecurringTransaction ?? [];
+  }
+
   /** Find a customer by display name, or create one. Returns the QBO Customer id. */
   async findOrCreateCustomer(name: string, email?: string | null): Promise<string> {
     const safe = name.replace(/'/g, "''");
