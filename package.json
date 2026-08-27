@@ -39,6 +39,7 @@
     "snapshot-plans": "tsx src/snapshot-plan.ts",
     "share-meeting": "tsx src/share-meeting.ts",
     "dump-client-metrics": "tsx src/dump-client-metrics.ts",
+    "debug-match-companies": "tsx src/debug-match-companies.ts",
     "show-service-account-email": "tsx src/show-service-account-email.ts",
     "import-och-seo-set": "tsx src/import-och-seo-set.ts",
     "probe-aeo": "tsx src/probe-aeo.ts",
