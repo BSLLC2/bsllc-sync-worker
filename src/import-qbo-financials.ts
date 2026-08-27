@@ -42,6 +42,13 @@ function balanceSheetSummary(report: QboReport) {
     totalAssetsCents: toCents(findReportTotal(report, ["TotalAssets"])),
     totalLiabilitiesCents: toCents(findReportTotal(report, ["Liabilities", "TotalLiabilities"])),
     totalEquityCents: toCents(findReportTotal(report, ["Equity", "TotalEquity"])),
+    // Accounts Receivable — already invoiced, not yet collected. Confirmed
+    // present as group "AR" in the live report via collectGroupNames() above
+    // (same debug pass that found the Liabilities/Equity naming). Feeds the
+    // dashboard's "already invoiced, awaiting collection" figure alongside
+    // the Gap Analysis, since it's real committed cash QBO already knows
+    // about but our own revenue_schedules can't see.
+    arCents: toCents(findReportTotal(report, ["AR", "AccountsReceivable"])),
   };
 }
 /** Every `group` value present anywhere in a QBO report — a debug aid for
