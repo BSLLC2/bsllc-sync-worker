@@ -134,6 +134,20 @@ async function main() {
       { periodType: "quarter", start: quarterStart, end: todayIso },
       { periodType: "ytd", start: yearStart, end: todayIso },
     ];
+    // Real per-month actuals for every fully-completed calendar month this
+    // year (Jan through last month) — periodType "month_actual", distinct
+    // from "month" above (which is always month-to-date for the CURRENT
+    // month). QBO's Reports API can run a P&L for any past date range on
+    // demand — there's no need to wait for daily snapshots to accumulate
+    // history month by month; every past month is backfillable right now.
+    // Upsert key already includes period_start/period_end, so this can't
+    // collide with the month-to-date row and is safe to re-run daily
+    // (self-healing if a past month was ever missed).
+    for (let m = 0; m < today.getMonth(); m++) {
+      const start = iso(new Date(today.getFullYear(), m, 1));
+      const end = iso(new Date(today.getFullYear(), m + 1, 0));
+      periods.push({ periodType: "month_actual", start, end });
+    }
 
     for (const p of periods) {
       if (dryRun) { console.log(`  would pull P&L ${p.periodType}: ${p.start}..${p.end}`); continue; }
@@ -141,9 +155,9 @@ async function main() {
         const report = await qbo.getProfitAndLoss(p.start, p.end);
         const summary = pnlSummary(report);
         await upsertFinancialSnapshot(c, { reportType: "profit_and_loss", periodType: p.periodType, periodStart: p.start, periodEnd: p.end, data: report, summary });
-        console.log(`  ✓ P&L ${p.periodType} — net income ${summary.netIncomeCents != null ? `$${(summary.netIncomeCents / 100).toLocaleString("en-US")}` : "(unavailable)"}`);
+        console.log(`  ✓ P&L ${p.periodType} (${p.start}..${p.end}) — net income ${summary.netIncomeCents != null ? `$${(summary.netIncomeCents / 100).toLocaleString("en-US")}` : "(unavailable)"}`);
       } catch (e) {
-        console.log(`  ✗ P&L ${p.periodType}: ${e instanceof Error ? e.message : e}`);
+        console.log(`  ✗ P&L ${p.periodType} (${p.start}..${p.end}): ${e instanceof Error ? e.message : e}`);
       }
     }
 
