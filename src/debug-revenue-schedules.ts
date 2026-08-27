@@ -24,6 +24,14 @@ async function main() {
     const cutoffStr = cutoff.toISOString().slice(0, 10);
     const cutoffMonthEnd = new Date(now.getFullYear(), now.getMonth() + 3, 0).toISOString().slice(0, 10);
     console.log(`using cutoff date: ${cutoffStr} (checking end_date < this)`);
+
+    const { rows: countRows } = await c.query<{ active: boolean; count: string }>(
+      `SELECT active, count(*) FROM revenue_schedules GROUP BY active`,
+    );
+    console.log(`revenue_schedules row counts by active flag: ${JSON.stringify(countRows)}`);
+    const { rows: anyRows } = await c.query(`SELECT * FROM revenue_schedules ORDER BY created_at DESC NULLS LAST LIMIT 5`);
+    console.log(`most recent 5 revenue_schedules rows (any active state): ${JSON.stringify(anyRows, null, 2)}`);
+
     const { rows: schedules } = await c.query<{
       id: string; deal_id: string | null; client_id: string | null; kind: string;
       start_date: string; end_date: string | null; monthly_amount_cents: number | null;
