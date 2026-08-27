@@ -138,6 +138,11 @@ async function main() {
     const recurring = (await qbo.getRecurringInvoiceTemplates()) as RecurringTransactionRow[];
     if (recurring.length > 0) {
       console.log(`  (debug) first recurring-transaction row shape: ${JSON.stringify(recurring[0]).slice(0, 800)}`);
+      // The previous dump above cut off before reaching RecurringInfo (it's a
+      // sibling key to Invoice, and Invoice's own huge Line[].Description text
+      // ate the whole 800-char budget) -- this is the interval/next-date data
+      // the app's Gap Analysis actually needs, so log it directly and small.
+      console.log(`  (debug) first row's RecurringInfo: ${JSON.stringify(recurring[0]?.RecurringInfo)}`);
     }
     let recurringSynced = 0;
     for (const row of recurring) {
