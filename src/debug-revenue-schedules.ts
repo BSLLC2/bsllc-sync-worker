@@ -94,6 +94,34 @@ async function main() {
     console.log(`active/launch clients: ${allClients.length}, with a contract_end set: ${withContractEnd.length}, contract_end before cutoff: ${endingBeforeOct.length}`);
     console.log(`sample clients with contract_end before Oct (first 20):`);
     console.log(JSON.stringify(endingBeforeOct.slice(0, 20).map((c2) => ({ name: c2.name, contractEnd: c2.contract_end, monthly: (c2.monthly_retainer_cents ?? 0) / 100 })), null, 2));
+
+    const withMonthly = allClients.filter((c2) => (c2.monthly_retainer_cents ?? 0) > 0);
+    console.log(`active/launch clients with monthly_retainer_cents > 0: ${withMonthly.length} of ${allClients.length}`);
+    console.log(`ALL active/launch clients (name, status, monthly, contractEnd):`);
+    console.log(JSON.stringify(allClients.map((c2) => ({
+      name: c2.name, status: c2.status, monthly: (c2.monthly_retainer_cents ?? 0) / 100, contractEnd: c2.contract_end,
+    })), null, 2));
+
+    // Closed Won deals: does this business's actual deal data carry the
+    // fields createRevenueScheduleForDeal needs (oneTimeAmountCents /
+    // monthlyRetainerCents / retainerTermMonths / closeDate / billingStructure
+    // / amountCents), or would it fall back to a flat heuristic?
+    const { rows: wonDeals } = await c.query<{
+      id: string; name: string; amount_cents: number | null; one_time_amount_cents: number | null;
+      monthly_retainer_cents: number | null; retainer_term_months: number | null;
+      billing_structure: string | null; close_date: string | null; closed_at: string | null; company_id: string | null;
+    }>(`SELECT id, name, amount_cents, one_time_amount_cents, monthly_retainer_cents, retainer_term_months, billing_structure, close_date, closed_at, company_id FROM deals WHERE status = 'won'`);
+    const withExplicitSplit = wonDeals.filter((d) => d.one_time_amount_cents != null || d.monthly_retainer_cents != null);
+    const withRetainerTerm = wonDeals.filter((d) => d.retainer_term_months != null);
+    const withCloseDate = wonDeals.filter((d) => d.close_date != null);
+    const zeroAmount = wonDeals.filter((d) => !d.amount_cents && d.one_time_amount_cents == null && d.monthly_retainer_cents == null);
+    console.log(`total Closed Won deals: ${wonDeals.length}`);
+    console.log(`  with explicit oneTime/monthlyRetainer split set: ${withExplicitSplit.length}`);
+    console.log(`  with retainer_term_months set: ${withRetainerTerm.length}`);
+    console.log(`  with close_date set: ${withCloseDate.length}`);
+    console.log(`  with $0 / no usable amount at all (would produce no schedule row even after backfill): ${zeroAmount.length}`);
+    console.log(`sample of 10 Closed Won deals (raw fields):`);
+    console.log(JSON.stringify(wonDeals.slice(0, 10), null, 2));
   } finally {
     await c.end();
   }
