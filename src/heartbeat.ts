@@ -29,11 +29,17 @@ async function main() {
   const c = new pg.Client({ connectionString: url.trim() });
   await c.connect();
   try {
-    await c.query(`CREATE TABLE IF NOT EXISTS job_heartbeats (
+    // Schema-qualified on purpose: this is the one safety net that must
+    // never itself fail silently (see backup-db.yml's 2026-08-26 incident,
+    // where a bare unqualified CREATE TABLE hit "no schema has been
+    // selected to create in" on a connection whose search_path came back
+    // empty — a transient Postgres-side hiccup, but this is cheap insurance
+    // against it recurring).
+    await c.query(`CREATE TABLE IF NOT EXISTS public.job_heartbeats (
       job TEXT PRIMARY KEY, ran_at TIMESTAMPTZ NOT NULL DEFAULT now(), ok BOOLEAN NOT NULL DEFAULT true, note TEXT
     )`);
     await c.query(
-      `INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ($1, now(), $2, $3)
+      `INSERT INTO public.job_heartbeats (job, ran_at, ok, note) VALUES ($1, now(), $2, $3)
        ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = EXCLUDED.ok, note = EXCLUDED.note`,
       [job, ok, note],
     );

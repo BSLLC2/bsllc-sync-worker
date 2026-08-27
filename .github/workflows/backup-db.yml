@@ -27,13 +27,21 @@ jobs:
       # plain-format dump is broadly compatible across nearby major versions,
       # and a dump that runs beats no dump because of a strict version pin.
       - name: Install pg_dump (matches Neon's server major, falls back to distro default)
+        # pg_dump refuses to dump from a server NEWER than itself ("aborting
+        # because of server version mismatch") -- it's fine to trail behind
+        # an older server, never ahead of a newer one. Neon moved to
+        # Postgres 18 (confirmed live 2026-08-26, which silently broke every
+        # nightly backup pinned to client 16 -- the dump step failed in ~1s
+        # every run with nothing uploaded, and would have kept failing
+        # indefinitely since a version pin doesn't self-heal). Bump this
+        # pin whenever Neon's server major moves past it again.
         run: |
           set -uo pipefail
           if sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list' \
             && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
             && sudo apt-get update \
-            && sudo apt-get install -y postgresql-client-16; then
-            echo "Installed postgresql-client-16 from PGDG."
+            && sudo apt-get install -y postgresql-client-18; then
+            echo "Installed postgresql-client-18 from PGDG."
           else
             echo "::warning::PGDG install of postgresql-client-16 failed — falling back to Ubuntu's default postgresql-client."
             sudo rm -f /etc/apt/sources.list.d/pgdg.list
