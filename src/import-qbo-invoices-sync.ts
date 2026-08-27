@@ -14,10 +14,12 @@ import { QboClient } from "./qbo.js";
  * Designer marker (pricing_quotes.qbo_invoice_id), was flagging deals that
  * were already fully billed in QBO as false positives.
  *
- * This job reads QBO's real Customer/Invoice/RecurringTransaction lists
- * (read-only, same OAuth scope already used) into three local tables so the
- * dashboard can check "has this company actually been invoiced or put on a
- * recurring invoice in QBO" without the app ever calling QBO directly.
+ * This job reads QBO's real Customer/Invoice/RecurringTransaction/Payment
+ * lists (read-only, same OAuth scope already used) into four local tables so
+ * the dashboard can check "has this company actually been invoiced or put
+ * on a recurring invoice in QBO," and predict WHEN an outstanding invoice
+ * will actually be collected using that customer's real historical
+ * days-to-pay, without the app ever calling QBO directly.
  *
  *   npm run import-qbo-invoices-sync
  *   npm run import-qbo-invoices-sync -- --dry-run
@@ -111,14 +113,27 @@ async function main() {
     const invoices = await qbo.getInvoices();
     for (const inv of invoices) {
       await c.query(
-        `INSERT INTO qbo_invoices (id, customer_id, customer_name, doc_number, txn_date, total_cents, synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, now())
+        `INSERT INTO qbo_invoices (id, customer_id, customer_name, doc_number, txn_date, due_date, total_cents, balance_cents, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
          ON CONFLICT (id) DO UPDATE SET customer_id = EXCLUDED.customer_id, customer_name = EXCLUDED.customer_name,
-           doc_number = EXCLUDED.doc_number, txn_date = EXCLUDED.txn_date, total_cents = EXCLUDED.total_cents, synced_at = now()`,
-        [inv.id, inv.customerId, inv.customerName, inv.docNumber, inv.txnDate, toCents(inv.totalAmt)],
+           doc_number = EXCLUDED.doc_number, txn_date = EXCLUDED.txn_date, due_date = EXCLUDED.due_date,
+           total_cents = EXCLUDED.total_cents, balance_cents = EXCLUDED.balance_cents, synced_at = now()`,
+        [inv.id, inv.customerId, inv.customerName, inv.docNumber, inv.txnDate, inv.dueDate, toCents(inv.totalAmt), toCents(inv.balance)],
       );
     }
     console.log(`  ✓ ${invoices.length} invoice(s)`);
+
+    const payments = await qbo.getPayments();
+    for (const p of payments) {
+      await c.query(
+        `INSERT INTO qbo_payments (payment_id, invoice_id, customer_id, txn_date, amount_cents, synced_at)
+         VALUES ($1, $2, $3, $4, $5, now())
+         ON CONFLICT (payment_id, invoice_id) DO UPDATE SET customer_id = EXCLUDED.customer_id, txn_date = EXCLUDED.txn_date,
+           amount_cents = EXCLUDED.amount_cents, synced_at = now()`,
+        [p.paymentId, p.invoiceId, p.customerId, p.txnDate, toCents(p.amount)],
+      );
+    }
+    console.log(`  ✓ ${payments.length} payment-to-invoice application(s)`);
 
     const recurring = (await qbo.getRecurringInvoiceTemplates()) as RecurringTransactionRow[];
     if (recurring.length > 0) {

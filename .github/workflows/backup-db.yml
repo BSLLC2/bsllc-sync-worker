@@ -29,26 +29,32 @@ jobs:
       - name: Install pg_dump (matches Neon's server major, falls back to distro default)
         # pg_dump refuses to dump from a server NEWER than itself ("aborting
         # because of server version mismatch") -- it's fine to trail behind
-        # an older server, never ahead of a newer one. This used to hardcode
-        # a specific version (postgresql-client-16, later bumped to -18 when
-        # Neon moved to Postgres 18 on 2026-08-26) -- that bump ALSO silently
-        # failed, because the -18 package name didn't resolve in PGDG's repo
-        # for this runner's distro at the time, and the script's own
-        # fallback branch swallowed the failure and quietly reinstalled
-        # Ubuntu's stock v16 client instead. A hardcoded guess is exactly
-        # the kind of pin that goes stale without anyone noticing, so this
-        # now asks the PGDG repo what its newest available client actually
-        # is and installs that -- no version number to remember to bump.
+        # an older server, never ahead of a newer one. This has now failed
+        # TWICE in different ways when Neon moved to Postgres 18 on
+        # 2026-08-26: first a hardcoded postgresql-client-16 pin went stale;
+        # then bumping the pin to -18 STILL failed, because installing
+        # postgresql-client-18 alongside the runner image's preinstalled v16
+        # client does NOT repoint the bare `pg_dump` on PATH -- Debian's
+        # postgresql-common only manages a few tools (psql) via
+        # update-alternatives, not pg_dump itself, so `pg_dump --version`
+        # kept silently reporting 16.15 even with 18 installed right next to
+        # it. Fixed for real this time by resolving the actual installed
+        # binary's path (/usr/lib/postgresql/<version>/bin/pg_dump) and
+        # passing THAT to the next step explicitly, instead of trusting
+        # whatever bare `pg_dump` happens to resolve to on PATH.
+        id: install
         run: |
           set -uo pipefail
+          PG_DUMP_BIN=""
           if sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list' \
             && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg \
             && sudo apt-get update; then
             PKG=$(apt-cache search --names-only '^postgresql-client-[0-9]+$' | awk '{print $1}' | sed -E 's/postgresql-client-//' | sort -n | tail -1)
-            if [ -n "$PKG" ] && sudo apt-get install -y "postgresql-client-$PKG"; then
+            if [ -n "$PKG" ] && sudo apt-get install -y "postgresql-client-$PKG" && [ -x "/usr/lib/postgresql/$PKG/bin/pg_dump" ]; then
               echo "Installed postgresql-client-$PKG from PGDG (newest available)."
+              PG_DUMP_BIN="/usr/lib/postgresql/$PKG/bin/pg_dump"
             else
-              echo "::warning::No installable postgresql-client-NN found in PGDG's repo — falling back to Ubuntu's default postgresql-client."
+              echo "::warning::postgresql-client-$PKG installed but its pg_dump binary wasn't found where expected — falling back to Ubuntu's default postgresql-client."
               sudo rm -f /etc/apt/sources.list.d/pgdg.list
               sudo apt-get update
               sudo apt-get install -y postgresql-client
@@ -59,18 +65,23 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y postgresql-client
           fi
-          pg_dump --version
+          # Explicit path if PGDG's versioned binary was found; otherwise
+          # fall back to whatever bare `pg_dump` resolves to on PATH (the
+          # distro-default install above).
+          echo "pg_dump_bin=${PG_DUMP_BIN:-pg_dump}" >> "$GITHUB_OUTPUT"
+          "${PG_DUMP_BIN:-pg_dump}" --version
 
       - name: Dump + encrypt
         id: dump
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          PG_DUMP_BIN: ${{ steps.install.outputs.pg_dump_bin }}
         run: |
           set -euo pipefail
           ts=$(date -u +%Y%m%dT%H%M%SZ)
           base="bsllc-db-$ts.sql.gz"
-          pg_dump "$DATABASE_URL" --no-owner --no-privileges --format=plain | gzip -9 > "$base"
+          "$PG_DUMP_BIN" "$DATABASE_URL" --no-owner --no-privileges --format=plain | gzip -9 > "$base"
           if [ -n "${BACKUP_PASSPHRASE:-}" ]; then
             enc="$base.gpg"
             gpg --batch --yes --passphrase "$BACKUP_PASSPHRASE" --cipher-algo AES256 --symmetric -o "$enc" "$base"
