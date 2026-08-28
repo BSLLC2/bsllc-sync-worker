@@ -88,7 +88,9 @@
     "diagnose-och-ads": "tsx src/diagnose-och-ads.ts",
     "verify-och-ads": "tsx src/verify-och-ads.ts",
     "dump-gsc-ohc": "tsx src/dump-gsc-ohc.ts",
-    "check-och-status": "tsx src/check-och-status.ts"
+    "check-och-status": "tsx src/check-och-status.ts",
+    "och-revenue-levers": "tsx src/och-revenue-levers.ts",
+    "reconcile-och-leads": "tsx src/reconcile-och-leads.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

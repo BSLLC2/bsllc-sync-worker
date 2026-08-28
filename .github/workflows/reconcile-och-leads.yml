@@ -1,0 +1,38 @@
+name: OHC lead reconciliation (READ ONLY)
+
+# Follow-up reads left open by the diagnostic, plus a re-check of conversion
+# state after the 2026-08-26 changes. Queries only; performs no mutates.
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Sections A-E, e.g. ABC. Blank = all.'
+        required: false
+        default: ''
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run diagnostic
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          ONLY: ${{ inputs.only }}
+        run: npm run reconcile-och-leads 2>&1 | tee diagnostic.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: och-reconcile-${{ inputs.only || 'all' }}
+          path: diagnostic.txt
