@@ -55,6 +55,15 @@ async function main() {
         name TEXT NOT NULL,
         synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`);
+    // fully_qualified_name/parent_id -- QBO's real sub-customer hierarchy
+    // ("Parent:Child", e.g. a company with several billed projects
+    // underneath it). DisplayName/CustomerRef.name on an invoice is just the
+    // sub-customer's own short name with no parent qualifier, so matching a
+    // linked CRM company (companies.qbo_customer_id, set to the TOP-LEVEL
+    // parent) against a project's billing requires walking parent_id up the
+    // chain -- string-matching DisplayName alone can't see this at all.
+    await c.query(`ALTER TABLE qbo_customers ADD COLUMN IF NOT EXISTS fully_qualified_name TEXT`);
+    await c.query(`ALTER TABLE qbo_customers ADD COLUMN IF NOT EXISTS parent_id TEXT`);
     await c.query(`
       CREATE TABLE IF NOT EXISTS qbo_invoices (
         id TEXT PRIMARY KEY,
@@ -124,9 +133,10 @@ async function main() {
     const customers = await qbo.getCustomers();
     for (const cust of customers) {
       await c.query(
-        `INSERT INTO qbo_customers (id, name, synced_at) VALUES ($1, $2, now())
-         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, synced_at = now()`,
-        [cust.id, cust.name],
+        `INSERT INTO qbo_customers (id, name, fully_qualified_name, parent_id, synced_at) VALUES ($1, $2, $3, $4, now())
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, fully_qualified_name = EXCLUDED.fully_qualified_name,
+           parent_id = EXCLUDED.parent_id, synced_at = now()`,
+        [cust.id, cust.name, cust.fullyQualifiedName, cust.parentId],
       );
     }
     console.log(`  ✓ ${customers.length} customer(s)`);

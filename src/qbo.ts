@@ -108,17 +108,27 @@ export class QboClient {
     return (res.QueryResponse?.Account ?? []).map((a) => ({ id: a.Id, name: a.Name, balance: a.CurrentBalance ?? 0 }));
   }
 
-  /** Every active QBO customer — id + display name. Paginated (QBO caps a
-   *  single query at 1000 rows). Read-only; feeds the "link this CRM company
-   *  to its QBO customer" picker so matching doesn't rely on guessing names. */
-  async getCustomers(): Promise<{ id: string; name: string }[]> {
-    const out: { id: string; name: string }[] = [];
+  /** Every active QBO customer — id, display name, fully-qualified name
+   *  (QBO's own "Parent:Child" path for a sub-customer/project — what the
+   *  UI's "Client/Vendor" column actually shows, distinct from DisplayName
+   *  which is just the sub-customer's own short name), and parentId (the
+   *  immediate parent's Customer Id, unset for a top-level customer).
+   *  Paginated (QBO caps a single query at 1000 rows). Read-only; feeds the
+   *  "link this CRM company to its QBO customer" picker AND lets the app
+   *  walk a sub-customer up to its top-level parent without guessing from
+   *  names. */
+  async getCustomers(): Promise<{ id: string; name: string; fullyQualifiedName: string | null; parentId: string | null }[]> {
+    const out: { id: string; name: string; fullyQualifiedName: string | null; parentId: string | null }[] = [];
     let start = 1;
     for (;;) {
-      const q = encodeURIComponent(`SELECT Id, DisplayName FROM Customer WHERE Active = true STARTPOSITION ${start} MAXRESULTS 1000`);
-      const res = await this.call<{ QueryResponse?: { Customer?: { Id: string; DisplayName?: string }[] } }>("GET", `query?query=${q}`);
+      const q = encodeURIComponent(`SELECT Id, DisplayName, FullyQualifiedName, ParentRef FROM Customer WHERE Active = true STARTPOSITION ${start} MAXRESULTS 1000`);
+      const res = await this.call<{ QueryResponse?: { Customer?: { Id: string; DisplayName?: string; FullyQualifiedName?: string; ParentRef?: { value?: string } }[] } }>("GET", `query?query=${q}`);
       const page = res.QueryResponse?.Customer ?? [];
-      out.push(...page.map((c) => ({ id: c.Id, name: c.DisplayName ?? "" })));
+      out.push(...page.map((c) => ({
+        id: c.Id, name: c.DisplayName ?? "",
+        fullyQualifiedName: c.FullyQualifiedName ?? null,
+        parentId: c.ParentRef?.value ?? null,
+      })));
       if (page.length < 1000) break;
       start += 1000;
     }
