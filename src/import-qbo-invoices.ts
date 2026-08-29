@@ -39,6 +39,34 @@ function addMonthsToYmd(startYmd: string, months: number): string {
   return `${ny}-${String(nm).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
+/** Real recurring billing waits on the client's confirmed accounting/AP
+ *  contact (accounting_setup_requests, written by the app's onboarding
+ *  automation on close-won) — "the project officially begins once
+ *  accounting is set up." Resolved via the quote's deal -> company -> client
+ *  chain (pricing_quotes.client_id itself is a looser, often-null field, not
+ *  reliable for a net-new signup). Defaults to "complete, no contact" (never
+ *  blocks) whenever the chain doesn't resolve to a real, still-open request
+ *  -- this gate exists to hold billing for a genuine pending ask, not to
+ *  invent a new stall for data gaps (a legacy quote with no deal, a deal
+ *  with no company yet, or a client that predates this feature). */
+async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Promise<{ complete: boolean; email: string | null; ccEmails: string | null }> {
+  const notBlocked = { complete: true, email: null, ccEmails: null };
+  if (!dealId) return notBlocked;
+  const { rows: dealRows } = await c.query<{ client_id: string | null }>(
+    `SELECT co.client_id FROM deals d LEFT JOIN companies co ON co.id = d.company_id WHERE d.id = $1`,
+    [dealId],
+  );
+  const clientId = dealRows[0]?.client_id;
+  if (!clientId) return notBlocked;
+  const { rows: reqRows } = await c.query<{ billing_email: string | null; cc_emails: string | null; completed_at: string | null }>(
+    `SELECT billing_email, cc_emails, completed_at FROM accounting_setup_requests WHERE client_id = $1 ORDER BY requested_at DESC LIMIT 1`,
+    [clientId],
+  );
+  const row = reqRows[0];
+  if (!row) return notBlocked;
+  return { complete: row.completed_at != null, email: row.billing_email, ccEmails: row.cc_emails };
+}
+
 async function main() {
   const dryRun = process.argv.slice(2).includes("--dry-run");
   const autoInvoice = (process.env.QBO_AUTO_INVOICE || "").trim().toLowerCase() === "true";
@@ -52,10 +80,10 @@ async function main() {
     // template id can never become non-null).
     const { rows } = await c.query<{
       id: string; quote_number: string | null; client_name: string; line_items_json: string | null;
-      signed_email: string | null; signed_at: string | null; retainer_term_months: number | null;
+      signed_email: string | null; signed_at: string | null; retainer_term_months: number | null; deal_id: string | null;
       qbo_estimate_id: string | null; qbo_invoice_id: string | null; qbo_recurring_template_id: string | null;
     }>(
-      `SELECT id, quote_number, client_name, line_items_json, signed_email, signed_at, retainer_term_months,
+      `SELECT id, quote_number, client_name, line_items_json, signed_email, signed_at, retainer_term_months, deal_id,
               qbo_estimate_id, qbo_invoice_id, qbo_recurring_template_id
          FROM pricing_quotes
         WHERE status = 'signed' AND kind = 'designer'
@@ -88,10 +116,13 @@ async function main() {
       const monthlyLines = lines.filter((l) => l.monthly);
       const needEstimate = !r.qbo_estimate_id;
       const needInvoice = autoInvoice && !r.qbo_invoice_id;
-      const needRecurring = monthlyLines.length > 0 && !r.qbo_recurring_template_id;
+      const wantsRecurring = monthlyLines.length > 0 && !r.qbo_recurring_template_id;
+      const accounting = wantsRecurring ? await resolveAccountingSetup(c, r.deal_id) : { complete: true, email: null, ccEmails: null };
+      const needRecurring = wantsRecurring && accounting.complete;
       if (dryRun) {
         const total = lines.reduce((s, l) => s + l.amount, 0).toFixed(2);
-        console.log(`  would ${[needEstimate && "estimate", needInvoice && "invoice", needRecurring && "recurring template"].filter(Boolean).join(" + ")} for ${r.client_name} (${r.quote_number}) — $${total}`);
+        const parts = [needEstimate && "estimate", needInvoice && "invoice", needRecurring && "recurring template", wantsRecurring && !accounting.complete && "recurring template (BLOCKED on accounting setup)"];
+        console.log(`  would ${parts.filter(Boolean).join(" + ")} for ${r.client_name} (${r.quote_number}) — $${total}`);
         done++; continue;
       }
       try {
@@ -106,11 +137,16 @@ async function main() {
           await c.query(`UPDATE pricing_quotes SET qbo_invoice_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, invoiceId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → invoice ${invoiceId}`);
         }
+        if (wantsRecurring && !accounting.complete) {
+          console.log(`  … ${r.client_name} (${r.quote_number}): recurring template held — waiting on accounting setup`);
+        }
         if (needRecurring) {
           const startDate = r.signed_at ? ymd(new Date(r.signed_at)) : ymd(new Date());
           const endDate = r.retainer_term_months ? addMonthsToYmd(startDate, r.retainer_term_months) : null;
           const templateName = `${r.quote_number ?? r.client_name} — Monthly Retainer`;
-          const recurringId = await qbo.createRecurringInvoiceTemplate(customerId, templateName, monthlyLines, startDate, endDate);
+          const recurringId = await qbo.createRecurringInvoiceTemplate(customerId, templateName, monthlyLines, startDate, endDate, {
+            email: accounting.email ?? r.signed_email, ccEmails: accounting.ccEmails,
+          });
           await c.query(`UPDATE pricing_quotes SET qbo_recurring_template_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, recurringId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → recurring template ${recurringId}${endDate ? ` (ends ${endDate})` : " (ongoing)"}`);
         }

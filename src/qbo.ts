@@ -247,28 +247,33 @@ export class QboClient {
    *  items. Mirrors the shape import-qbo-invoices-sync.ts already reads
    *  back (RecurringTransaction → Invoice.RecurringInfo.ScheduleInfo).
    *  startDate/endDate are YYYY-MM-DD; startDate's day-of-month becomes the
-   *  template's billing day. endDate omitted = ongoing/evergreen. */
+   *  template's billing day. endDate omitted = ongoing/evergreen. opts sets
+   *  who invoices go to/CC once the client's accounting setup confirms it —
+   *  falls back to whoever signed if there's no confirmed billing contact
+   *  yet. */
   async createRecurringInvoiceTemplate(
     customerId: string, name: string, lines: QboLine[], startDate: string, endDate?: string | null,
+    opts?: { email?: string | null; ccEmails?: string | null },
   ): Promise<string> {
     const dayOfMonth = Number(startDate.slice(8, 10)) || 1;
-    const created = await this.call<{ Invoice: { Id: string } }>("POST", "recurringtransaction", {
-      Invoice: {
-        CustomerRef: { value: customerId },
-        Line: this.buildLines(lines),
-        RecurringInfo: {
-          Name: name,
-          Active: true,
-          ScheduleInfo: {
-            IntervalType: "Monthly",
-            NumInterval: 1,
-            DayOfMonth: dayOfMonth,
-            StartDate: startDate,
-            ...(endDate ? { EndDate: endDate } : {}),
-          },
+    const invoice: Record<string, unknown> = {
+      CustomerRef: { value: customerId },
+      Line: this.buildLines(lines),
+      RecurringInfo: {
+        Name: name,
+        Active: true,
+        ScheduleInfo: {
+          IntervalType: "Monthly",
+          NumInterval: 1,
+          DayOfMonth: dayOfMonth,
+          StartDate: startDate,
+          ...(endDate ? { EndDate: endDate } : {}),
         },
       },
-    });
+    };
+    if (opts?.email) invoice.BillEmail = { Address: opts.email };
+    if (opts?.ccEmails) invoice.BillEmailCc = { Address: opts.ccEmails };
+    const created = await this.call<{ Invoice: { Id: string } }>("POST", "recurringtransaction", { Invoice: invoice });
     return created.Invoice.Id;
   }
 }
