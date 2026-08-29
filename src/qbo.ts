@@ -241,6 +241,36 @@ export class QboClient {
     const inv = await this.call<{ Invoice: { Id: string } }>("POST", "invoice", body);
     return inv.Invoice.Id;
   }
+
+  /** Create a QBO Recurring Invoice template — the monthly-billing
+   *  counterpart to createInvoice, for a signed quote's recurring line
+   *  items. Mirrors the shape import-qbo-invoices-sync.ts already reads
+   *  back (RecurringTransaction → Invoice.RecurringInfo.ScheduleInfo).
+   *  startDate/endDate are YYYY-MM-DD; startDate's day-of-month becomes the
+   *  template's billing day. endDate omitted = ongoing/evergreen. */
+  async createRecurringInvoiceTemplate(
+    customerId: string, name: string, lines: QboLine[], startDate: string, endDate?: string | null,
+  ): Promise<string> {
+    const dayOfMonth = Number(startDate.slice(8, 10)) || 1;
+    const created = await this.call<{ Invoice: { Id: string } }>("POST", "recurringtransaction", {
+      Invoice: {
+        CustomerRef: { value: customerId },
+        Line: this.buildLines(lines),
+        RecurringInfo: {
+          Name: name,
+          Active: true,
+          ScheduleInfo: {
+            IntervalType: "Monthly",
+            NumInterval: 1,
+            DayOfMonth: dayOfMonth,
+            StartDate: startDate,
+            ...(endDate ? { EndDate: endDate } : {}),
+          },
+        },
+      },
+    });
+    return created.Invoice.Id;
+  }
 }
 
 export interface QboLine { name: string; amount: number; itemId?: string | null; monthly?: boolean }
