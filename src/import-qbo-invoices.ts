@@ -48,9 +48,12 @@ function addMonthsToYmd(startYmd: string, months: number): string {
  *  blocks) whenever the chain doesn't resolve to a real, still-open request
  *  -- this gate exists to hold billing for a genuine pending ask, not to
  *  invent a new stall for data gaps (a legacy quote with no deal, a deal
- *  with no company yet, or a client that predates this feature). */
-async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Promise<{ complete: boolean; email: string | null; ccEmails: string | null }> {
-  const notBlocked = { complete: true, email: null, ccEmails: null };
+ *  with no company yet, or a client that predates this feature).
+ *  paysByCard/ccFeePct come along for the ride — most clients pay by
+ *  check/ACH, but a client who opted into card payment on that same form
+ *  gets a processing-fee line item added to their invoices (see withCcFee). */
+async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Promise<{ complete: boolean; email: string | null; ccEmails: string | null; paysByCard: boolean; ccFeePct: number | null }> {
+  const notBlocked = { complete: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
   if (!dealId) return notBlocked;
   const { rows: dealRows } = await c.query<{ client_id: string | null }>(
     `SELECT co.client_id FROM deals d LEFT JOIN companies co ON co.id = d.company_id WHERE d.id = $1`,
@@ -58,13 +61,29 @@ async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Prom
   );
   const clientId = dealRows[0]?.client_id;
   if (!clientId) return notBlocked;
-  const { rows: reqRows } = await c.query<{ billing_email: string | null; cc_emails: string | null; completed_at: string | null }>(
-    `SELECT billing_email, cc_emails, completed_at FROM accounting_setup_requests WHERE client_id = $1 ORDER BY requested_at DESC LIMIT 1`,
+  const { rows: reqRows } = await c.query<{ billing_email: string | null; cc_emails: string | null; completed_at: string | null; pays_by_card: boolean; cc_fee_pct: number | null }>(
+    `SELECT billing_email, cc_emails, completed_at, pays_by_card, cc_fee_pct FROM accounting_setup_requests WHERE client_id = $1 ORDER BY requested_at DESC LIMIT 1`,
     [clientId],
   );
   const row = reqRows[0];
   if (!row) return notBlocked;
-  return { complete: row.completed_at != null, email: row.billing_email, ccEmails: row.cc_emails };
+  return {
+    complete: row.completed_at != null, email: row.billing_email, ccEmails: row.cc_emails,
+    paysByCard: row.pays_by_card, ccFeePct: row.cc_fee_pct,
+  };
+}
+
+interface QuoteLine { name: string; amount: number; itemId: string | null; monthly: boolean }
+
+/** Append a processing-fee line item (a % of the given lines' subtotal) when
+ *  the client opted into paying by card — the rare exception, so this only
+ *  ever adds a line, never touches the base pricing lines. */
+function withCcFee(lines: QuoteLine[], accounting: { paysByCard: boolean; ccFeePct: number | null }): QuoteLine[] {
+  if (!accounting.paysByCard || !accounting.ccFeePct) return lines;
+  const subtotal = lines.reduce((s, l) => s + l.amount, 0);
+  const fee = Math.round(subtotal * (accounting.ccFeePct / 100) * 100) / 100;
+  if (fee <= 0) return lines;
+  return [...lines, { name: `Credit card processing fee (${accounting.ccFeePct}%)`, amount: fee, itemId: null, monthly: false }];
 }
 
 async function main() {
@@ -117,12 +136,15 @@ async function main() {
       const needEstimate = !r.qbo_estimate_id;
       const needInvoice = autoInvoice && !r.qbo_invoice_id;
       const wantsRecurring = monthlyLines.length > 0 && !r.qbo_recurring_template_id;
-      const accounting = wantsRecurring ? await resolveAccountingSetup(c, r.deal_id) : { complete: true, email: null, ccEmails: null };
+      const accounting = (needInvoice || wantsRecurring)
+        ? await resolveAccountingSetup(c, r.deal_id)
+        : { complete: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
       const needRecurring = wantsRecurring && accounting.complete;
       if (dryRun) {
         const total = lines.reduce((s, l) => s + l.amount, 0).toFixed(2);
+        const feeNote = accounting.paysByCard && accounting.ccFeePct ? ` (+${accounting.ccFeePct}% card fee)` : "";
         const parts = [needEstimate && "estimate", needInvoice && "invoice", needRecurring && "recurring template", wantsRecurring && !accounting.complete && "recurring template (BLOCKED on accounting setup)"];
-        console.log(`  would ${parts.filter(Boolean).join(" + ")} for ${r.client_name} (${r.quote_number}) — $${total}`);
+        console.log(`  would ${parts.filter(Boolean).join(" + ")} for ${r.client_name} (${r.quote_number}) — $${total}${feeNote}`);
         done++; continue;
       }
       try {
@@ -133,7 +155,7 @@ async function main() {
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → estimate ${estimateId}`);
         }
         if (needInvoice) {
-          const invoiceId = await qbo.createInvoice(customerId, lines, { email: r.signed_email });
+          const invoiceId = await qbo.createInvoice(customerId, withCcFee(lines, accounting), { email: r.signed_email });
           await c.query(`UPDATE pricing_quotes SET qbo_invoice_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, invoiceId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → invoice ${invoiceId}`);
         }
@@ -144,7 +166,7 @@ async function main() {
           const startDate = r.signed_at ? ymd(new Date(r.signed_at)) : ymd(new Date());
           const endDate = r.retainer_term_months ? addMonthsToYmd(startDate, r.retainer_term_months) : null;
           const templateName = `${r.quote_number ?? r.client_name} — Monthly Retainer`;
-          const recurringId = await qbo.createRecurringInvoiceTemplate(customerId, templateName, monthlyLines, startDate, endDate, {
+          const recurringId = await qbo.createRecurringInvoiceTemplate(customerId, templateName, withCcFee(monthlyLines, accounting), startDate, endDate, {
             email: accounting.email ?? r.signed_email, ccEmails: accounting.ccEmails,
           });
           await c.query(`UPDATE pricing_quotes SET qbo_recurring_template_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, recurringId]);
