@@ -1,9 +1,10 @@
-name: QBO — estimate on quote signature
+name: QBO — invoice on quote signature
 
-# When a Quote Designer quote is signed, create a QuickBooks estimate (customer
-# + line items) in the sandbox/prod company and record the estimate id back on
-# the quote. Estimate first (non-binding); invoicing is a follow-up. Runs every
-# 15 min + on demand. No-op when nothing new is signed.
+# When a Quote Designer quote is signed, create a QuickBooks invoice (customer
+# + line items, with the signed-quote PDF attached) in the sandbox/prod
+# company, plus a recurring template for any monthly line items. Records the
+# ids back on the quote so it's idempotent. Runs every 15 min + on demand.
+# No-op when nothing new is signed.
 on:
   schedule:
     - cron: "*/15 * * * *"
@@ -36,7 +37,6 @@ jobs:
           QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
           QBO_ENV: ${{ secrets.QBO_ENV }}
           QBO_DEFAULT_ITEM_ID: ${{ secrets.QBO_DEFAULT_ITEM_ID }}
-          QBO_AUTO_INVOICE: ${{ secrets.QBO_AUTO_INVOICE }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             npm run import-qbo-invoices -- --dry-run
@@ -47,4 +47,4 @@ jobs:
         if: always()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npm run heartbeat -- --job=qbo_estimate --status=${{ job.status }}
+        run: npm run heartbeat -- --job=qbo_invoice --status=${{ job.status }}

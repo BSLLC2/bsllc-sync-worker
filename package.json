@@ -97,11 +97,13 @@
     "dotenv": "^17.4.2",
     "google-ads-api": "^24.1.0",
     "google-auth-library": "^11.0.0",
+    "pdfkit": "^0.20.1",
     "pg": "^8.22.0",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "@types/pdfkit": "^0.17.6",
     "@types/pg": "^8.20.3",
     "tsx": "^4.23.5",
     "typescript": "^7.0.2"

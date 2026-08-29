@@ -220,15 +220,6 @@ export class QboClient {
     }));
   }
 
-  /** Create an estimate from line items. Amounts are dollars. */
-  async createEstimate(customerId: string, lines: QboLine[]): Promise<string> {
-    const est = await this.call<{ Estimate: { Id: string } }>("POST", "estimate", {
-      CustomerRef: { value: customerId },
-      Line: this.buildLines(lines),
-    });
-    return est.Estimate.Id;
-  }
-
   /** Create an invoice from line items. Amounts are dollars. Optionally link the
    *  originating estimate and set an email + due date. */
   async createInvoice(customerId: string, lines: QboLine[], opts?: { email?: string | null; dueDate?: string | null }): Promise<string> {
@@ -275,6 +266,32 @@ export class QboClient {
     if (opts?.ccEmails) invoice.BillEmailCc = { Address: opts.ccEmails };
     const created = await this.call<{ Invoice: { Id: string } }>("POST", "recurringtransaction", { Invoice: invoice });
     return created.Invoice.Id;
+  }
+
+  /** Attach a file (e.g. the signed-quote PDF) to an Invoice record via QBO's
+   *  multipart Attachable upload — a separate endpoint from the JSON
+   *  Accounting API `call()` above, since it needs actual multipart/
+   *  form-data, not JSON. Best-effort by design at the call site: a failed
+   *  attach shouldn't fail the invoice/billing it's attached to. */
+  async attachPdfToInvoice(invoiceId: string, fileName: string, pdfBytes: Buffer): Promise<void> {
+    if (!this.accessToken) await this.connect();
+    const metadata = {
+      AttachableRef: [{ EntityRef: { type: "Invoice", value: invoiceId } }],
+      FileName: fileName,
+      ContentType: "application/pdf",
+    };
+    const form = new FormData();
+    form.append("file_metadata_01", new Blob([JSON.stringify(metadata)], { type: "application/json" }), "attachment.json");
+    form.append("file_content_01", new Blob([new Uint8Array(pdfBytes)], { type: "application/pdf" }), fileName);
+    const res = await fetch(`${apiBase()}/v3/company/${this.realmId}/upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.accessToken}`, Accept: "application/json" },
+      body: form,
+    });
+    const text = await res.text();
+    const tid = res.headers.get("intuit_tid") ?? "";
+    console.log(`  qbo POST upload(attach) ${res.status} intuit_tid=${tid || "-"}`);
+    if (!res.ok) throw new Error(`QBO upload ${res.status} [intuit_tid=${tid}]: ${text}`);
   }
 }
 

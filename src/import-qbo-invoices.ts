@@ -3,19 +3,25 @@ import "dotenv/config";
 import pg from "pg";
 import { QboClient } from "./qbo.js";
 import { ymd } from "./dates.js";
+import { buildQuotePdf } from "./quote-pdf.js";
 
 /**
  * On quote signature → QuickBooks. Finds signed quotes and, in the sandbox/prod
  * company, creates:
- *   • an ESTIMATE (always) — the accepted quote as a non-binding QBO record,
- *   • an INVOICE (when QBO_AUTO_INVOICE=true) — the billable document, emailed to
- *     the signer if we have their address, and
+ *   • an INVOICE — the one-time/setup line items, always created (no
+ *     QBO_AUTO_INVOICE gate — an Estimate-only quote was never a real billing
+ *     document, so this used to silently mean nothing landed in QBO at all
+ *     unless that flag was set). Emailed to the signer if we have their
+ *     address. The signed-quote PDF is attached to it.
  *   • a RECURRING INVOICE TEMPLATE, if the quote has any monthly line items —
  *     the retainer's actual ongoing billing, not just its one-time setup fee.
  *     Starts on the signature date; ends after retainer_term_months if the
- *     quote set one, else runs ongoing/evergreen.
- * The estimate/invoice/recurring-template ids are recorded back on the quote
- * so it's idempotent.
+ *     quote set one, else runs ongoing/evergreen. The signed-quote PDF is
+ *     attached to the template's own invoice record too, though whether QBO
+ *     carries that attachment onto each auto-generated monthly instance is
+ *     unconfirmed — worth checking after the first one lands.
+ * The invoice/recurring-template ids are recorded back on the quote so it's
+ * idempotent.
  *
  * The deployed app writes zero to QBO — it just marks quotes signed; this worker
  * job is the only thing that touches QuickBooks.
@@ -88,31 +94,30 @@ function withCcFee(lines: QuoteLine[], accounting: { paysByCard: boolean; ccFeeP
 
 async function main() {
   const dryRun = process.argv.slice(2).includes("--dry-run");
-  const autoInvoice = (process.env.QBO_AUTO_INVOICE || "").trim().toLowerCase() === "true";
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
-    // Need an estimate whenever it's missing; an invoice when auto-invoicing
-    // is on and one hasn't been created yet; or a recurring template when the
-    // quote has monthly line items and hasn't gotten one yet (the LIKE check
-    // avoids re-selecting a one-time-only quote forever, since its recurring
-    // template id can never become non-null).
+    // Need an invoice whenever it's missing (always — no more Estimate-only
+    // gate), or a recurring template when the quote has monthly line items
+    // and hasn't gotten one yet (the LIKE check avoids re-selecting a
+    // one-time-only quote forever, since its recurring template id can never
+    // become non-null).
     const { rows } = await c.query<{
       id: string; quote_number: string | null; client_name: string; line_items_json: string | null;
-      signed_email: string | null; signed_at: string | null; retainer_term_months: number | null; deal_id: string | null;
-      qbo_estimate_id: string | null; qbo_invoice_id: string | null; qbo_recurring_template_id: string | null;
+      signed_name: string | null; signed_email: string | null; signed_at: string | null;
+      retainer_term_months: number | null; deal_id: string | null;
+      qbo_invoice_id: string | null; qbo_recurring_template_id: string | null;
     }>(
-      `SELECT id, quote_number, client_name, line_items_json, signed_email, signed_at, retainer_term_months, deal_id,
-              qbo_estimate_id, qbo_invoice_id, qbo_recurring_template_id
+      `SELECT id, quote_number, client_name, line_items_json, signed_name, signed_email, signed_at, retainer_term_months, deal_id,
+              qbo_invoice_id, qbo_recurring_template_id
          FROM pricing_quotes
         WHERE status = 'signed' AND kind = 'designer'
-          AND (qbo_estimate_id IS NULL
-               ${autoInvoice ? "OR qbo_invoice_id IS NULL" : ""}
+          AND (qbo_invoice_id IS NULL
                OR (qbo_recurring_template_id IS NULL AND line_items_json LIKE '%"recurring":"monthly"%'))
         ORDER BY signed_at ASC NULLS LAST
         LIMIT 50`,
     );
-    console.log(`import-qbo-invoices — ${rows.length} signed quote(s) to sync${autoInvoice ? " (auto-invoice ON)" : ""}${dryRun ? " (dry-run)" : ""}`);
+    console.log(`import-qbo-invoices — ${rows.length} signed quote(s) to sync${dryRun ? " (dry-run)" : ""}`);
     if (rows.length === 0) return;
 
     const qbo = new QboClient(c);
@@ -133,8 +138,7 @@ async function main() {
         continue;
       }
       const monthlyLines = lines.filter((l) => l.monthly);
-      const needEstimate = !r.qbo_estimate_id;
-      const needInvoice = autoInvoice && !r.qbo_invoice_id;
+      const needInvoice = !r.qbo_invoice_id;
       const wantsRecurring = monthlyLines.length > 0 && !r.qbo_recurring_template_id;
       const accounting = (needInvoice || wantsRecurring)
         ? await resolveAccountingSetup(c, r.deal_id)
@@ -143,21 +147,25 @@ async function main() {
       if (dryRun) {
         const total = lines.reduce((s, l) => s + l.amount, 0).toFixed(2);
         const feeNote = accounting.paysByCard && accounting.ccFeePct ? ` (+${accounting.ccFeePct}% card fee)` : "";
-        const parts = [needEstimate && "estimate", needInvoice && "invoice", needRecurring && "recurring template", wantsRecurring && !accounting.complete && "recurring template (BLOCKED on accounting setup)"];
+        const parts = [needInvoice && "invoice", needRecurring && "recurring template", wantsRecurring && !accounting.complete && "recurring template (BLOCKED on accounting setup)"];
         console.log(`  would ${parts.filter(Boolean).join(" + ")} for ${r.client_name} (${r.quote_number}) — $${total}${feeNote}`);
         done++; continue;
       }
       try {
         const customerId = await qbo.findOrCreateCustomer(r.client_name || "Client", r.signed_email);
-        if (needEstimate) {
-          const estimateId = await qbo.createEstimate(customerId, lines);
-          await c.query(`UPDATE pricing_quotes SET qbo_estimate_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, estimateId]);
-          console.log(`  ✓ ${r.client_name} (${r.quote_number}) → estimate ${estimateId}`);
-        }
+        const quotePdf = () => buildQuotePdf({
+          quoteNumber: r.quote_number, clientName: r.client_name, lines,
+          signedName: r.signed_name, signedEmail: r.signed_email, signedAt: r.signed_at,
+        });
         if (needInvoice) {
           const invoiceId = await qbo.createInvoice(customerId, withCcFee(lines, accounting), { email: r.signed_email });
           await c.query(`UPDATE pricing_quotes SET qbo_invoice_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, invoiceId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → invoice ${invoiceId}`);
+          try {
+            await qbo.attachPdfToInvoice(invoiceId, `${r.quote_number ?? "quote"}-signed.pdf`, await quotePdf());
+          } catch (e) {
+            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't attach signed quote to invoice ${invoiceId}: ${e instanceof Error ? e.message : e}`);
+          }
         }
         if (wantsRecurring && !accounting.complete) {
           console.log(`  … ${r.client_name} (${r.quote_number}): recurring template held — waiting on accounting setup`);
@@ -171,6 +179,14 @@ async function main() {
           });
           await c.query(`UPDATE pricing_quotes SET qbo_recurring_template_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, recurringId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → recurring template ${recurringId}${endDate ? ` (ends ${endDate})` : " (ongoing)"}`);
+          // Attaches to the template's own underlying Invoice record. Whether
+          // QBO carries this onto each auto-generated monthly instance is
+          // unconfirmed -- check after the first one lands.
+          try {
+            await qbo.attachPdfToInvoice(recurringId, `${r.quote_number ?? "quote"}-signed.pdf`, await quotePdf());
+          } catch (e) {
+            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't attach signed quote to recurring template ${recurringId}: ${e instanceof Error ? e.message : e}`);
+          }
         }
         done++;
       } catch (e) {
