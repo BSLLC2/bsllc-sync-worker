@@ -233,6 +233,16 @@ export class QboClient {
     return inv.Invoice.Id;
   }
 
+  /** (Re)send an existing invoice by email — QBO's own dedicated endpoint,
+   *  distinct from creating one. This is also the only lever for "remind the
+   *  client about an overdue invoice": QBO has no separate reminder
+   *  endpoint, so sending the same invoice again IS the nudge. sendTo
+   *  overrides the invoice's own BillEmail for this one send only. */
+  async sendInvoice(invoiceId: string, sendTo?: string | null): Promise<void> {
+    const q = sendTo ? `?sendTo=${encodeURIComponent(sendTo)}` : "";
+    await this.call("POST", `invoice/${invoiceId}/send${q}`);
+  }
+
   /** Create a QBO Recurring Invoice template — the monthly-billing
    *  counterpart to createInvoice, for a signed quote's recurring line
    *  items. Mirrors the shape import-qbo-invoices-sync.ts already reads

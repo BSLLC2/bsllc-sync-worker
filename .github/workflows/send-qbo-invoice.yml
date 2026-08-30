@@ -1,0 +1,42 @@
+name: QBO — send invoice on demand
+
+# Fired by the client-detail Invoices card's "Send"/"Remind" button (via
+# GitHub's Actions API) to (re)send one existing QBO invoice by email right
+# now. This is the app's only path to touching an invoice's send state — the
+# app itself never calls QuickBooks directly, same narrow exception as
+# sync-client-now.yml. Resending an overdue invoice IS the reminder; QBO has
+# no separate reminder endpoint.
+on:
+  workflow_dispatch:
+    inputs:
+      invoice_id:
+        description: "QBO invoice id to (re)send"
+        required: true
+
+concurrency:
+  group: send-qbo-invoice-${{ inputs.invoice_id }}
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Send invoice
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: npm run send-qbo-invoice -- --invoice-id="${{ inputs.invoice_id }}"
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=qbo_send_invoice --status=${{ job.status }}
