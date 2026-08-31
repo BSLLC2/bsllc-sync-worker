@@ -111,17 +111,27 @@ async function main() {
     // billing automation just because they never got a proper quote.
     const { rows } = await c.query<{
       id: string; quote_number: string | null; client_name: string; line_items_json: string | null;
-      signed_name: string | null; signed_email: string | null; signed_at: string | null;
-      retainer_term_months: number | null; deal_id: string | null;
+      signed_name: string | null; signed_email: string | null; signed_at: string | null; signed_ip: string | null;
+      retainer_term_months: number | null; deal_id: string | null; company_name: string | null;
       qbo_invoice_id: string | null; qbo_recurring_template_id: string | null;
+      comments: string | null; sow_text: string | null; contract_text: string | null;
+      payment_terms: string | null; payment_months: number | null;
+      deposit_cents: number | null; deposit_type: string | null; deposit_percent: number | null;
+      accepted_price_cents: number | null; terms_label: string | null;
     }>(
-      `SELECT id, quote_number, client_name, line_items_json, signed_name, signed_email, signed_at, retainer_term_months, deal_id,
-              qbo_invoice_id, qbo_recurring_template_id
-         FROM pricing_quotes
-        WHERE status IN ('signed', 'legacy') AND kind = 'designer'
-          AND (qbo_invoice_id IS NULL
-               OR (qbo_recurring_template_id IS NULL AND line_items_json LIKE '%"recurring":"monthly"%'))
-        ORDER BY signed_at ASC NULLS LAST
+      `SELECT q.id, q.quote_number, q.client_name, q.line_items_json, q.signed_name, q.signed_email, q.signed_at, q.signed_ip,
+              q.retainer_term_months, q.deal_id, co.name AS company_name,
+              q.qbo_invoice_id, q.qbo_recurring_template_id,
+              q.comments, q.sow_text, q.contract_text, q.payment_terms, q.payment_months,
+              q.deposit_cents, q.deposit_type, q.deposit_percent, q.accepted_price_cents,
+              tv.label AS terms_label
+         FROM pricing_quotes q
+         LEFT JOIN companies co ON co.id = q.company_id
+         LEFT JOIN terms_versions tv ON tv.id = q.accepted_terms_version_id
+        WHERE q.status IN ('signed', 'legacy') AND q.kind = 'designer'
+          AND (q.qbo_invoice_id IS NULL
+               OR (q.qbo_recurring_template_id IS NULL AND q.line_items_json LIKE '%"recurring":"monthly"%'))
+        ORDER BY q.signed_at ASC NULLS LAST
         LIMIT 50`,
     );
     console.log(`import-qbo-invoices — ${rows.length} signed quote(s) to sync${dryRun ? " (dry-run)" : ""}`);
@@ -168,8 +178,17 @@ async function main() {
       try {
         const customerId = await qbo.findOrCreateCustomer(r.client_name || "Client", r.signed_email);
         const quotePdf = () => buildQuotePdf({
-          quoteNumber: r.quote_number, clientName: r.client_name, lines,
-          signedName: r.signed_name, signedEmail: r.signed_email, signedAt: r.signed_at,
+          quoteNumber: r.quote_number, clientName: r.client_name, companyName: r.company_name,
+          lines: items.map((i) => ({
+            name: i.name || "Service", description: i.description || null,
+            qty: i.qty || 1, unitPriceCents: i.unitPriceCents || 0, monthly: i.recurring === "monthly",
+          })),
+          comments: r.comments, sowText: r.sow_text, contractText: r.contract_text,
+          paymentTerms: r.payment_terms, paymentMonths: r.payment_months,
+          depositCents: r.deposit_cents, depositType: r.deposit_type, depositPercent: r.deposit_percent,
+          retainerTermMonths: r.retainer_term_months, acceptedPriceCents: r.accepted_price_cents,
+          signedName: r.signed_name, signedEmail: r.signed_email, signedAt: r.signed_at, signedIp: r.signed_ip,
+          termsLabel: r.terms_label,
         });
         if (needInvoice) {
           const billTo = accounting.email ?? r.signed_email;

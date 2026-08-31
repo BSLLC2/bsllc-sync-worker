@@ -118,3 +118,20 @@ jobs:
           WP_UMBRELLA_BASE: ${{ secrets.WP_UMBRELLA_BASE }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npm run import-webops -- --client="${{ inputs.client_id }}"
+
+      # QBO customer/invoice/payment sync isn't per-client filterable (QBO's
+      # API returns the whole portfolio at once), but it's cheap and
+      # idempotent, so Refresh runs the same full sync the nightly cron does
+      # rather than making the AM wait until 9am UTC to see a just-recorded
+      # payment reflected here.
+      - name: QuickBooks invoices/payments
+        working-directory: worker
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: npm run import-qbo-invoices-sync
