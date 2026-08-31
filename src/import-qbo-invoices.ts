@@ -81,7 +81,7 @@ async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Prom
   };
 }
 
-interface QuoteLine { name: string; amount: number; itemId: string | null; monthly: boolean }
+interface QuoteLine { name: string; description: string | null; amount: number; itemId: string | null; monthly: boolean }
 
 /** Append a processing-fee line item (a % of the given lines' subtotal) when
  *  the client opted into paying by card — the rare exception, so this only
@@ -91,7 +91,7 @@ function withCcFee(lines: QuoteLine[], accounting: { paysByCard: boolean; ccFeeP
   const subtotal = lines.reduce((s, l) => s + l.amount, 0);
   const fee = Math.round(subtotal * (accounting.ccFeePct / 100) * 100) / 100;
   if (fee <= 0) return lines;
-  return [...lines, { name: `Credit card processing fee (${accounting.ccFeePct}%)`, amount: fee, itemId: null, monthly: false }];
+  return [...lines, { name: `Credit card processing fee (${accounting.ccFeePct}%)`, description: null, amount: fee, itemId: null, monthly: false }];
 }
 
 async function main() {
@@ -136,6 +136,7 @@ async function main() {
       try { items = r.line_items_json ? JSON.parse(r.line_items_json) : []; } catch { items = []; }
       const lines = items.map((i) => ({
         name: i.name || "Service",
+        description: i.description || null,
         amount: ((i.unitPriceCents || 0) * (i.qty || 1)) / 100,
         itemId: i.qboItemId ?? null,
         monthly: i.recurring === "monthly",
@@ -171,13 +172,26 @@ async function main() {
           signedName: r.signed_name, signedEmail: r.signed_email, signedAt: r.signed_at,
         });
         if (needInvoice) {
-          const invoiceId = await qbo.createInvoice(customerId, withCcFee(lines, accounting), { email: r.signed_email, allowOnlinePayment: accounting.paysByCard });
+          const billTo = accounting.email ?? r.signed_email;
+          const invoiceId = await qbo.createInvoice(customerId, withCcFee(lines, accounting), { email: billTo, allowOnlinePayment: accounting.paysByCard });
           await c.query(`UPDATE pricing_quotes SET qbo_invoice_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, invoiceId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → invoice ${invoiceId}`);
           try {
             await qbo.attachPdfToInvoice(invoiceId, `${r.quote_number ?? "quote"}-signed.pdf`, await quotePdf());
           } catch (e) {
             console.log(`  … ${r.client_name} (${r.quote_number}): couldn't attach signed quote to invoice ${invoiceId}: ${e instanceof Error ? e.message : e}`);
+          }
+          // Creating the invoice does NOT email it -- QBO only marks it
+          // "needs to be sent" until a separate send call fires. Without
+          // this, every auto-created invoice sat in QBO undelivered.
+          if (billTo) {
+            try {
+              await qbo.sendInvoice(invoiceId, billTo);
+            } catch (e) {
+              console.log(`  … ${r.client_name} (${r.quote_number}): couldn't send invoice ${invoiceId} to ${billTo}: ${e instanceof Error ? e.message : e}`);
+            }
+          } else {
+            console.log(`  … ${r.client_name} (${r.quote_number}): invoice ${invoiceId} created but not sent -- no billing email on file.`);
           }
         }
         if ((wantsInvoice || wantsRecurring) && !canInvoice) {

@@ -212,12 +212,15 @@ export class QboClient {
 
   private buildLines(lines: QboLine[]) {
     const defaultItem = process.env.QBO_DEFAULT_ITEM_ID?.trim() || "1";
-    return lines.filter((l) => l.amount > 0).map((l) => ({
-      DetailType: "SalesItemLineDetail",
-      Amount: Math.round(l.amount * 100) / 100,
-      Description: l.monthly ? `${l.name} (monthly)` : l.name,
-      SalesItemLineDetail: { ItemRef: { value: l.itemId || defaultItem } },
-    }));
+    return lines.filter((l) => l.amount > 0).map((l) => {
+      const label = l.description ? `${l.name}: ${l.description}` : l.name;
+      return {
+        DetailType: "SalesItemLineDetail",
+        Amount: Math.round(l.amount * 100) / 100,
+        Description: l.monthly ? `${label} (monthly)` : label,
+        SalesItemLineDetail: { ItemRef: { value: l.itemId || defaultItem } },
+      };
+    });
   }
 
   /** Create an invoice from line items. Amounts are dollars. Optionally link the
@@ -310,7 +313,10 @@ export class QboClient {
   async attachPdfToInvoice(invoiceId: string, fileName: string, pdfBytes: Buffer): Promise<void> {
     if (!this.accessToken) await this.connect();
     const metadata = {
-      AttachableRef: [{ EntityRef: { type: "Invoice", value: invoiceId } }],
+      // IncludeOnSend: without it, QBO attaches the file to the invoice
+      // record but leaves "Attach to email" unchecked, so sendInvoice()
+      // wouldn't actually deliver the signed-quote PDF to the client.
+      AttachableRef: [{ EntityRef: { type: "Invoice", value: invoiceId }, IncludeOnSend: true }],
       FileName: fileName,
       ContentType: "application/pdf",
     };
@@ -329,7 +335,7 @@ export class QboClient {
   }
 }
 
-export interface QboLine { name: string; amount: number; itemId?: string | null; monthly?: boolean }
+export interface QboLine { name: string; description?: string | null; amount: number; itemId?: string | null; monthly?: boolean }
 
 // Shape of a QBO Reports API response (ProfitAndLoss/BalanceSheet/CashFlow) —
 // deliberately loose since the exact nesting varies by report and by which
