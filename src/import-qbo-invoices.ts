@@ -6,8 +6,8 @@ import { ymd } from "./dates.js";
 import { buildQuotePdf } from "./quote-pdf.js";
 
 /**
- * On quote signature → QuickBooks. Finds signed quotes and, in the sandbox/prod
- * company, creates:
+ * On quote signature → QuickBooks. Finds signed (or legacy — see below)
+ * quotes and, in the sandbox/prod company, creates:
  *   • an INVOICE — the one-time/setup line items, always created (no
  *     QBO_AUTO_INVOICE gate — an Estimate-only quote was never a real billing
  *     document, so this used to silently mean nothing landed in QBO at all
@@ -101,7 +101,12 @@ async function main() {
     // gate), or a recurring template when the quote has monthly line items
     // and hasn't gotten one yet (the LIKE check avoids re-selecting a
     // one-time-only quote forever, since its recurring template id can never
-    // become non-null).
+    // become non-null). 'legacy' = pricing already agreed outside this
+    // system (a deal that predates Quote Designer, or the old CRM) and
+    // recorded via POST /api/quotes/:id/mark-legacy with no client
+    // signature — treated identically to 'signed' here so those deals still
+    // get a real QBO invoice/recurring template instead of sitting with no
+    // billing automation just because they never got a proper quote.
     const { rows } = await c.query<{
       id: string; quote_number: string | null; client_name: string; line_items_json: string | null;
       signed_name: string | null; signed_email: string | null; signed_at: string | null;
@@ -111,7 +116,7 @@ async function main() {
       `SELECT id, quote_number, client_name, line_items_json, signed_name, signed_email, signed_at, retainer_term_months, deal_id,
               qbo_invoice_id, qbo_recurring_template_id
          FROM pricing_quotes
-        WHERE status = 'signed' AND kind = 'designer'
+        WHERE status IN ('signed', 'legacy') AND kind = 'designer'
           AND (qbo_invoice_id IS NULL
                OR (qbo_recurring_template_id IS NULL AND line_items_json LIKE '%"recurring":"monthly"%'))
         ORDER BY signed_at ASC NULLS LAST
