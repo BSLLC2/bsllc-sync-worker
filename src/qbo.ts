@@ -221,14 +221,21 @@ export class QboClient {
   }
 
   /** Create an invoice from line items. Amounts are dollars. Optionally link the
-   *  originating estimate and set an email + due date. */
-  async createInvoice(customerId: string, lines: QboLine[], opts?: { email?: string | null; dueDate?: string | null }): Promise<string> {
+   *  originating estimate, set an email + due date, and turn on QBO's own
+   *  hosted "Pay Now" online-payment link (AllowOnlineACHPayment /
+   *  AllowOnlineCreditCardPayment — confirmed real Invoice fields; requires
+   *  QuickBooks Payments enabled on the company). That hosted page is also
+   *  where a client can save a card, so this is the one piece of "autopay"
+   *  actually settable via the public Accounting API — see the doc comment
+   *  on createRecurringInvoiceTemplate for what isn't. */
+  async createInvoice(customerId: string, lines: QboLine[], opts?: { email?: string | null; dueDate?: string | null; allowOnlinePayment?: boolean }): Promise<string> {
     const body: Record<string, unknown> = {
       CustomerRef: { value: customerId },
       Line: this.buildLines(lines),
     };
     if (opts?.email) { body.BillEmail = { Address: opts.email }; body.EmailStatus = "NeedToSend"; }
     if (opts?.dueDate) body.DueDate = opts.dueDate;
+    if (opts?.allowOnlinePayment) { body.AllowOnlineACHPayment = true; body.AllowOnlineCreditCardPayment = true; }
     const inv = await this.call<{ Invoice: { Id: string } }>("POST", "invoice", body);
     return inv.Invoice.Id;
   }
@@ -251,10 +258,26 @@ export class QboClient {
    *  template's billing day. endDate omitted = ongoing/evergreen. opts sets
    *  who invoices go to/CC once the client's accounting setup confirms it —
    *  falls back to whoever signed if there's no confirmed billing contact
-   *  yet. */
+   *  yet, and turns on the same hosted online-payment link as createInvoice
+   *  on every invoice this template generates.
+   *
+   *  What this does NOT do: enroll the client in QBO's actual "Autopay"
+   *  (the toggle in a recurring invoice's Payment Options that auto-charges
+   *  their saved card on every future due date with no click). That's a
+   *  documented QBO product feature, but Intuit doesn't expose a field for
+   *  it on the public v3 RecurringTransaction/Invoice resource — it's
+   *  either UI-only or requires a separate Payments-specific API this
+   *  integration doesn't hold credentials for. Confirmed via Intuit's own
+   *  support docs; direct API-reference access was blocked from this
+   *  environment, so treat "is there a field after all" as still open if
+   *  revisited. Until resolved, a client who picks the lower autopay rate
+   *  gets AllowOnlineCreditCardPayment (can save a card at pay time) but not
+   *  true zero-click future billing — check qbo_sync_error-style follow-up
+   *  or ask BS LLC's QBO rep whether Autopay can be turned on per-template
+   *  from the QBO UI after this creates it. */
   async createRecurringInvoiceTemplate(
     customerId: string, name: string, lines: QboLine[], startDate: string, endDate?: string | null,
-    opts?: { email?: string | null; ccEmails?: string | null },
+    opts?: { email?: string | null; ccEmails?: string | null; allowOnlinePayment?: boolean },
   ): Promise<string> {
     const dayOfMonth = Number(startDate.slice(8, 10)) || 1;
     const invoice: Record<string, unknown> = {
@@ -274,6 +297,7 @@ export class QboClient {
     };
     if (opts?.email) invoice.BillEmail = { Address: opts.email };
     if (opts?.ccEmails) invoice.BillEmailCc = { Address: opts.ccEmails };
+    if (opts?.allowOnlinePayment) { invoice.AllowOnlineACHPayment = true; invoice.AllowOnlineCreditCardPayment = true; }
     const created = await this.call<{ Invoice: { Id: string } }>("POST", "recurringtransaction", { Invoice: invoice });
     return created.Invoice.Id;
   }

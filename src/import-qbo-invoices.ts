@@ -6,13 +6,12 @@ import { ymd } from "./dates.js";
 import { buildQuotePdf } from "./quote-pdf.js";
 
 /**
- * On quote signature → QuickBooks. Finds signed (or legacy — see below)
- * quotes and, in the sandbox/prod company, creates:
- *   • an INVOICE — the one-time/setup line items, always created (no
- *     QBO_AUTO_INVOICE gate — an Estimate-only quote was never a real billing
- *     document, so this used to silently mean nothing landed in QBO at all
- *     unless that flag was set). Emailed to the signer if we have their
- *     address. The signed-quote PDF is attached to it.
+ * On quote signature → QuickBooks, once an AM presses "Launch invoicing" on
+ * the client's Onboarding timeline (see resolveAccountingSetup). Finds
+ * signed (or legacy — see below) quotes ready to invoice and, in the
+ * sandbox/prod company, creates:
+ *   • an INVOICE — the one-time/setup line items. Emailed to the signer if
+ *     we have their address. The signed-quote PDF is attached to it.
  *   • a RECURRING INVOICE TEMPLATE, if the quote has any monthly line items —
  *     the retainer's actual ongoing billing, not just its one-time setup fee.
  *     Starts on the signature date; ends after retainer_term_months if the
@@ -45,21 +44,23 @@ function addMonthsToYmd(startYmd: string, months: number): string {
   return `${ny}-${String(nm).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
-/** Real recurring billing waits on the client's confirmed accounting/AP
- *  contact (accounting_setup_requests, written by the app's onboarding
- *  automation on close-won) — "the project officially begins once
- *  accounting is set up." Resolved via the quote's deal -> company -> client
- *  chain (pricing_quotes.client_id itself is a looser, often-null field, not
- *  reliable for a net-new signup). Defaults to "complete, no contact" (never
- *  blocks) whenever the chain doesn't resolve to a real, still-open request
- *  -- this gate exists to hold billing for a genuine pending ask, not to
- *  invent a new stall for data gaps (a legacy quote with no deal, a deal
- *  with no company yet, or a client that predates this feature).
- *  paysByCard/ccFeePct come along for the ride — most clients pay by
- *  check/ACH, but a client who opted into card payment on that same form
+/** Real billing waits on two human checkpoints: the client's confirmed
+ *  accounting/AP contact (accounting_setup_requests.completed_at, written by
+ *  the app's onboarding automation on close-won), AND an AM's explicit
+ *  "Launch invoicing" click on the client's Onboarding timeline
+ *  (invoicing_launched_at) — nothing hits QuickBooks just because a form got
+ *  filled out. Resolved via the quote's deal -> company -> client chain
+ *  (pricing_quotes.client_id itself is a looser, often-null field, not
+ *  reliable for a net-new signup). Defaults to "complete + launched, no
+ *  contact" (never blocks) whenever the chain doesn't resolve to a real,
+ *  still-open request -- this gate exists to hold billing for a genuine
+ *  pending ask, not to invent a new stall for data gaps (a legacy quote with
+ *  no deal, a deal with no company yet, or a client that predates this
+ *  feature). paysByCard/ccFeePct come along for the ride — most clients pay
+ *  by check/ACH, but a client who opted into card payment on that same form
  *  gets a processing-fee line item added to their invoices (see withCcFee). */
-async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Promise<{ complete: boolean; email: string | null; ccEmails: string | null; paysByCard: boolean; ccFeePct: number | null }> {
-  const notBlocked = { complete: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
+async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Promise<{ complete: boolean; launched: boolean; email: string | null; ccEmails: string | null; paysByCard: boolean; ccFeePct: number | null }> {
+  const notBlocked = { complete: true, launched: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
   if (!dealId) return notBlocked;
   const { rows: dealRows } = await c.query<{ client_id: string | null }>(
     `SELECT co.client_id FROM deals d LEFT JOIN companies co ON co.id = d.company_id WHERE d.id = $1`,
@@ -67,14 +68,15 @@ async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Prom
   );
   const clientId = dealRows[0]?.client_id;
   if (!clientId) return notBlocked;
-  const { rows: reqRows } = await c.query<{ billing_email: string | null; cc_emails: string | null; completed_at: string | null; pays_by_card: boolean; cc_fee_pct: number | null }>(
-    `SELECT billing_email, cc_emails, completed_at, pays_by_card, cc_fee_pct FROM accounting_setup_requests WHERE client_id = $1 ORDER BY requested_at DESC LIMIT 1`,
+  const { rows: reqRows } = await c.query<{ billing_email: string | null; cc_emails: string | null; completed_at: string | null; invoicing_launched_at: string | null; pays_by_card: boolean; cc_fee_pct: number | null }>(
+    `SELECT billing_email, cc_emails, completed_at, invoicing_launched_at, pays_by_card, cc_fee_pct FROM accounting_setup_requests WHERE client_id = $1 ORDER BY requested_at DESC LIMIT 1`,
     [clientId],
   );
   const row = reqRows[0];
   if (!row) return notBlocked;
   return {
-    complete: row.completed_at != null, email: row.billing_email, ccEmails: row.cc_emails,
+    complete: row.completed_at != null, launched: row.invoicing_launched_at != null,
+    email: row.billing_email, ccEmails: row.cc_emails,
     paysByCard: row.pays_by_card, ccFeePct: row.cc_fee_pct,
   };
 }
@@ -143,16 +145,22 @@ async function main() {
         continue;
       }
       const monthlyLines = lines.filter((l) => l.monthly);
-      const needInvoice = !r.qbo_invoice_id;
+      const wantsInvoice = !r.qbo_invoice_id;
       const wantsRecurring = monthlyLines.length > 0 && !r.qbo_recurring_template_id;
-      const accounting = (needInvoice || wantsRecurring)
+      const accounting = (wantsInvoice || wantsRecurring)
         ? await resolveAccountingSetup(c, r.deal_id)
-        : { complete: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
-      const needRecurring = wantsRecurring && accounting.complete;
+        : { complete: true, launched: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
+      // Nothing hits QuickBooks until both the billing contact is confirmed
+      // AND an AM has pressed "Launch invoicing" on the client's Onboarding
+      // timeline — see resolveAccountingSetup.
+      const canInvoice = accounting.complete && accounting.launched;
+      const needInvoice = wantsInvoice && canInvoice;
+      const needRecurring = wantsRecurring && canInvoice;
       if (dryRun) {
         const total = lines.reduce((s, l) => s + l.amount, 0).toFixed(2);
         const feeNote = accounting.paysByCard && accounting.ccFeePct ? ` (+${accounting.ccFeePct}% card fee)` : "";
-        const parts = [needInvoice && "invoice", needRecurring && "recurring template", wantsRecurring && !accounting.complete && "recurring template (BLOCKED on accounting setup)"];
+        const blockedNote = !canInvoice ? (accounting.complete ? " (BLOCKED on invoicing launch)" : " (BLOCKED on accounting setup)") : "";
+        const parts = [needInvoice && "invoice", needRecurring && "recurring template", !canInvoice && (wantsInvoice || wantsRecurring) && `${[wantsInvoice && "invoice", wantsRecurring && "recurring template"].filter(Boolean).join("/")}${blockedNote}`];
         console.log(`  would ${parts.filter(Boolean).join(" + ")} for ${r.client_name} (${r.quote_number}) — $${total}${feeNote}`);
         done++; continue;
       }
@@ -163,7 +171,7 @@ async function main() {
           signedName: r.signed_name, signedEmail: r.signed_email, signedAt: r.signed_at,
         });
         if (needInvoice) {
-          const invoiceId = await qbo.createInvoice(customerId, withCcFee(lines, accounting), { email: r.signed_email });
+          const invoiceId = await qbo.createInvoice(customerId, withCcFee(lines, accounting), { email: r.signed_email, allowOnlinePayment: accounting.paysByCard });
           await c.query(`UPDATE pricing_quotes SET qbo_invoice_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, invoiceId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → invoice ${invoiceId}`);
           try {
@@ -172,15 +180,15 @@ async function main() {
             console.log(`  … ${r.client_name} (${r.quote_number}): couldn't attach signed quote to invoice ${invoiceId}: ${e instanceof Error ? e.message : e}`);
           }
         }
-        if (wantsRecurring && !accounting.complete) {
-          console.log(`  … ${r.client_name} (${r.quote_number}): recurring template held — waiting on accounting setup`);
+        if ((wantsInvoice || wantsRecurring) && !canInvoice) {
+          console.log(`  … ${r.client_name} (${r.quote_number}): held — waiting on ${accounting.complete ? "invoicing launch" : "accounting setup"}`);
         }
         if (needRecurring) {
           const startDate = r.signed_at ? ymd(new Date(r.signed_at)) : ymd(new Date());
           const endDate = r.retainer_term_months ? addMonthsToYmd(startDate, r.retainer_term_months) : null;
           const templateName = `${r.quote_number ?? r.client_name} — Monthly Retainer`;
           const recurringId = await qbo.createRecurringInvoiceTemplate(customerId, templateName, withCcFee(monthlyLines, accounting), startDate, endDate, {
-            email: accounting.email ?? r.signed_email, ccEmails: accounting.ccEmails,
+            email: accounting.email ?? r.signed_email, ccEmails: accounting.ccEmails, allowOnlinePayment: accounting.paysByCard,
           });
           await c.query(`UPDATE pricing_quotes SET qbo_recurring_template_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, recurringId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → recurring template ${recurringId}${endDate ? ` (ends ${endDate})` : " (ongoing)"}`);
