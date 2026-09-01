@@ -305,6 +305,13 @@ export class QboClient {
       RecurringInfo: {
         Name: name,
         Active: true,
+        // Required by QBO's API (confirmed live 2026-09-01: creation fails
+        // with "Required param missing... RecurringInfo.RecurType" without
+        // it) but undocumented as required in most third-party references.
+        // "Automated" = QBO generates and sends each cycle's invoice on its
+        // own; "Reminder" would only nudge a human to create it manually,
+        // which defeats the point of a recurring retainer template.
+        RecurType: "Automated",
         ScheduleInfo: {
           IntervalType: "Monthly",
           NumInterval: 1,
