@@ -259,11 +259,23 @@ async function main() {
           const startDate = r.signed_at ? ymd(new Date(r.signed_at)) : ymd(new Date());
           const endDate = r.retainer_term_months ? addMonthsToYmd(startDate, r.retainer_term_months) : null;
           const templateName = `${r.quote_number ?? r.client_name} — Monthly Retainer`;
-          const recurringId = await qbo.createRecurringInvoiceTemplate(customerId, templateName, withCcFee(monthlyLines, accounting), startDate, endDate, {
-            email: accounting.email ?? r.signed_email, ccEmails: accounting.ccEmails, allowOnlinePayment: accounting.paysByCard,
-          });
+          // Guard against creating a second template for the same quote --
+          // a template can succeed in QBO (200) and then the id never make
+          // it back to qbo_recurring_template_id if anything after the
+          // create call throws (confirmed live 2026-09-01: a response-shape
+          // bug did exactly this), and this row's own retry logic has no
+          // other way to know one already exists. Cheap since it's the same
+          // query getRecurringInvoiceTemplates() already knows how to run.
+          const existingTemplates = (await qbo.getRecurringInvoiceTemplates()) as { Invoice?: { Id?: string; CustomerRef?: { value?: string }; RecurringInfo?: { Name?: string } } }[];
+          const existing = existingTemplates.find((t) => t.Invoice?.CustomerRef?.value === customerId && t.Invoice?.RecurringInfo?.Name === templateName);
+          const recurringId = existing?.Invoice?.Id
+            ?? await qbo.createRecurringInvoiceTemplate(customerId, templateName, withCcFee(monthlyLines, accounting), startDate, endDate, {
+              email: accounting.email ?? r.signed_email, ccEmails: accounting.ccEmails, allowOnlinePayment: accounting.paysByCard,
+            });
           await c.query(`UPDATE pricing_quotes SET qbo_recurring_template_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, recurringId]);
-          console.log(`  ✓ ${r.client_name} (${r.quote_number}) → recurring template ${recurringId}${endDate ? ` (ends ${endDate})` : " (ongoing)"}`);
+          console.log(existing
+            ? `  ✓ ${r.client_name} (${r.quote_number}) → found existing recurring template ${recurringId} (recovered from a prior run)`
+            : `  ✓ ${r.client_name} (${r.quote_number}) → recurring template ${recurringId}${endDate ? ` (ends ${endDate})` : " (ongoing)"}`);
           // Attaches to the template's own underlying Invoice record. Whether
           // QBO carries this onto each auto-generated monthly instance is
           // unconfirmed -- check after the first one lands.

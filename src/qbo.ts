@@ -324,8 +324,14 @@ export class QboClient {
     if (opts?.email) invoice.BillEmail = { Address: opts.email };
     if (opts?.ccEmails) invoice.BillEmailCc = { Address: opts.ccEmails };
     if (opts?.allowOnlinePayment) { invoice.AllowOnlineACHPayment = true; invoice.AllowOnlineCreditCardPayment = true; }
-    const created = await this.call<{ Invoice: { Id: string } }>("POST", "recurringtransaction", { Invoice: invoice });
-    return created.Invoice.Id;
+    // Wrapped as RecurringTransaction.Invoice.Id, NOT flat Invoice.Id --
+    // confirmed live 2026-09-01 (the flat shape threw "Cannot read
+    // properties of undefined (reading 'Id')" despite QBO returning 200).
+    // Matches the read-side shape getRecurringInvoiceTemplates() already
+    // expects (RecurringTransaction[].Invoice), which should have been the
+    // tell the first time this was written.
+    const created = await this.call<{ RecurringTransaction: { Invoice: { Id: string } } }>("POST", "recurringtransaction", { Invoice: invoice });
+    return created.RecurringTransaction.Invoice.Id;
   }
 
   /** Attach a file (e.g. the signed-quote PDF) to an Invoice record via QBO's
