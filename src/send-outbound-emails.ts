@@ -39,8 +39,20 @@ async function sendAsDigital(rfc822: string): Promise<void> {
   if (!res.ok) throw new Error(`Gmail send → ${res.status} ${await res.text()}`);
 }
 
+// Header fields are ASCII-only per RFC 2822 -- any non-ASCII (e.g. the em
+// dash in "Welcome — set up your BS LLC dashboard") has to be wrapped as an
+// RFC 2047 encoded-word or it gets left as raw UTF-8 bytes sitting in a
+// header, which some renderers along the way then mis-decode as Latin-1,
+// producing exactly the "Ã¢Â€Â"" garbage that showed up in a client's inbox.
+// The body parts already declare charset=UTF-8 and are unaffected -- this is
+// header-only.
+function encodeHeaderWord(s: string): string {
+  if (/^[\x00-\x7F]*$/.test(s)) return s;
+  return `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
+}
+
 /** RFC822 with an HTML part (links clickable) + a plain-text fallback. */
-function buildEmail(to: string, toName: string | null, subject: string, body: string): string {
+function buildEmail(to: string, toName: string | null, subject: string, body: string, ccEmail: string | null): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   // Turn bare URLs into links and newlines into <br> for the HTML part.
   const htmlBody = esc(body)
@@ -49,11 +61,12 @@ function buildEmail(to: string, toName: string | null, subject: string, body: st
   const html =
     `<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:560px;margin:0 auto;color:#111;font-size:15px;line-height:1.5">${htmlBody}</div>`;
   const boundary = "bsllc_" + Math.abs(hash(subject + to)).toString(36);
-  const toHeader = toName ? `${toName} <${to}>` : to;
+  const toHeader = toName ? `${encodeHeaderWord(toName)} <${to}>` : to;
   return [
     `From: BS LLC <${FROM}>`,
     `To: ${toHeader}`,
-    `Subject: ${subject}`,
+    ...(ccEmail?.trim() ? [`Cc: ${ccEmail.trim()}`] : []),
+    `Subject: ${encodeHeaderWord(subject)}`,
     "MIME-Version: 1.0",
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     "",
@@ -77,8 +90,8 @@ async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
-    const { rows } = await c.query<{ id: string; kind: string; to_email: string; to_name: string | null; subject: string; body: string }>(
-      `SELECT id, kind, to_email, to_name, subject, body
+    const { rows } = await c.query<{ id: string; kind: string; to_email: string; to_name: string | null; subject: string; body: string; cc_email: string | null }>(
+      `SELECT id, kind, to_email, to_name, subject, body, cc_email
          FROM outbound_emails
         WHERE status = 'pending'
         ORDER BY created_at ASC
@@ -93,7 +106,7 @@ async function main() {
       }
       if (dryRun) { console.log(`  would send → ${r.to_email} · "${r.subject}"`); sent++; continue; }
       try {
-        await sendAsDigital(buildEmail(r.to_email, r.to_name, r.subject, r.body));
+        await sendAsDigital(buildEmail(r.to_email, r.to_name, r.subject, r.body, r.cc_email));
         await c.query(`UPDATE outbound_emails SET status='sent', sent_at=now(), error=NULL WHERE id=$1`, [r.id]);
         console.log(`  sent → ${r.to_email} (${r.kind})`); sent++;
       } catch (e) {
