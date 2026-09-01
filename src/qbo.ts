@@ -196,18 +196,80 @@ export class QboClient {
     return res.QueryResponse?.RecurringTransaction ?? [];
   }
 
-  /** Find a customer by display name, or create one. Returns the QBO Customer id. */
-  async findOrCreateCustomer(name: string, email?: string | null): Promise<string> {
+  /** Every Product/Service item — id, name, description, type, unit price,
+   *  active flag, and income account name. Read-only; feeds
+   *  import-qbo-items.ts's sync into qbo_catalog_items so Quote Designer can
+   *  offer a live picker instead of every line silently billing against one
+   *  hardcoded default item. Fetches everything (not just Active = true) so
+   *  a since-deactivated item a past quote still references stays
+   *  resolvable; the sync marks it inactive rather than deleting it. */
+  async getItems(): Promise<{ id: string; name: string; description: string | null; type: string | null; unitPrice: number | null; active: boolean; incomeAccountName: string | null }[]> {
+    const out: { id: string; name: string; description: string | null; type: string | null; unitPrice: number | null; active: boolean; incomeAccountName: string | null }[] = [];
+    let start = 1;
+    for (;;) {
+      const q = encodeURIComponent(`SELECT Id, Name, Description, Type, UnitPrice, Active, IncomeAccountRef FROM Item STARTPOSITION ${start} MAXRESULTS 1000`);
+      const res = await this.call<{ QueryResponse?: { Item?: { Id: string; Name?: string; Description?: string; Type?: string; UnitPrice?: number; Active?: boolean; IncomeAccountRef?: { name?: string } }[] } }>("GET", `query?query=${q}`);
+      const page = res.QueryResponse?.Item ?? [];
+      out.push(...page.map((i) => ({
+        id: i.Id, name: i.Name ?? "", description: i.Description ?? null, type: i.Type ?? null,
+        unitPrice: i.UnitPrice ?? null, active: i.Active !== false, incomeAccountName: i.IncomeAccountRef?.name ?? null,
+      })));
+      if (page.length < 1000) break;
+      start += 1000;
+    }
+    return out;
+  }
+
+  /** Find a customer by display name, or create one. Returns the QBO Customer
+   *  id. contact carries whatever real billing info we have (email, phone,
+   *  address) -- on either path, an existing customer gets a sparse update
+   *  with it too, so a customer created bare before a billing contact was
+   *  confirmed (see resolveAccountingSetup in import-qbo-invoices.ts) gets
+   *  self-healed on the next run once one shows up, without a separate
+   *  one-off backfill. Deliberately does NOT touch Notes or the
+   *  Given/Family name fields -- there's no clean, non-destructive place to
+   *  put a contact's name on a company-type Customer record, and sparse-
+   *  updating Notes risks clobbering something a human typed directly into
+   *  QBO. */
+  async findOrCreateCustomer(name: string, contact?: {
+    email?: string | null; phone?: string | null;
+    address?: { line1?: string | null; line2?: string | null; city?: string | null; state?: string | null; postalCode?: string | null; country?: string | null } | null;
+  }): Promise<string> {
     const safe = name.replace(/'/g, "''");
     const q = encodeURIComponent(`SELECT * FROM Customer WHERE DisplayName = '${safe}'`);
-    const found = await this.call<{ QueryResponse?: { Customer?: { Id: string }[] } }>("GET", `query?query=${q}`);
+    const found = await this.call<{ QueryResponse?: { Customer?: { Id: string; SyncToken: string }[] } }>("GET", `query?query=${q}`);
     const hit = found.QueryResponse?.Customer?.[0];
-    if (hit) return hit.Id;
-    const created = await this.call<{ Customer: { Id: string } }>("POST", "customer", {
-      DisplayName: name,
-      ...(email ? { PrimaryEmailAddr: { Address: email } } : {}),
-    });
+    const patch = this.buildContactPatch(contact);
+    if (hit) {
+      if (Object.keys(patch).length > 0) {
+        await this.call("POST", "customer", { sparse: true, Id: hit.Id, SyncToken: hit.SyncToken, ...patch });
+      }
+      return hit.Id;
+    }
+    const created = await this.call<{ Customer: { Id: string } }>("POST", "customer", { DisplayName: name, ...patch });
     return created.Customer.Id;
+  }
+
+  private buildContactPatch(contact?: {
+    email?: string | null; phone?: string | null;
+    address?: { line1?: string | null; line2?: string | null; city?: string | null; state?: string | null; postalCode?: string | null; country?: string | null } | null;
+  }): Record<string, unknown> {
+    const patch: Record<string, unknown> = {};
+    if (!contact) return patch;
+    if (contact.email) patch.PrimaryEmailAddr = { Address: contact.email };
+    if (contact.phone) patch.PrimaryPhone = { FreeFormNumber: contact.phone };
+    const a = contact.address;
+    if (a && (a.line1 || a.city)) {
+      patch.BillAddr = {
+        ...(a.line1 ? { Line1: a.line1 } : {}),
+        ...(a.line2 ? { Line2: a.line2 } : {}),
+        ...(a.city ? { City: a.city } : {}),
+        ...(a.state ? { CountrySubDivisionCode: a.state } : {}),
+        ...(a.postalCode ? { PostalCode: a.postalCode } : {}),
+        ...(a.country ? { Country: a.country } : {}),
+      };
+    }
+    return patch;
   }
 
   /** Sparse-update a Customer's own email address (distinct from an

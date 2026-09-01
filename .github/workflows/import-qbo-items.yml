@@ -1,0 +1,38 @@
+name: QBO — Products/Services catalog sync
+
+# Mirrors QuickBooks' real Item (Products/Services) list into Postgres
+# (qbo_catalog_items) so Quote Designer can offer a live picker of real QBO
+# items on every line, and auto-matches service_library rows to a same-named
+# item. Same QBO connection already used elsewhere; no new secrets.
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: import-qbo-items
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Sync QBO Products/Services
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: npm run import-qbo-items
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=qbo_items_sync --status=${{ job.status }}

@@ -44,6 +44,8 @@ function addMonthsToYmd(startYmd: string, months: number): string {
   return `${ny}-${String(nm).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
+interface BillingAddress { line1: string | null; line2: string | null; city: string | null; state: string | null; postalCode: string | null; country: string | null }
+
 /** Real billing waits on two human checkpoints: the client's confirmed
  *  accounting/AP contact (accounting_setup_requests.completed_at, written by
  *  the app's onboarding automation on close-won), AND an AM's explicit
@@ -58,9 +60,18 @@ function addMonthsToYmd(startYmd: string, months: number): string {
  *  no deal, a deal with no company yet, or a client that predates this
  *  feature). paysByCard/ccFeePct come along for the ride — most clients pay
  *  by check/ACH, but a client who opted into card payment on that same form
- *  gets a processing-fee line item added to their invoices (see withCcFee). */
-async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Promise<{ complete: boolean; launched: boolean; email: string | null; ccEmails: string | null; paysByCard: boolean; ccFeePct: number | null }> {
-  const notBlocked = { complete: true, launched: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
+ *  gets a processing-fee line item added to their invoices (see withCcFee).
+ *
+ *  phone/contactName/address are best-effort extras for the QBO Customer
+ *  record itself (see qbo.findOrCreateCustomer) -- never gate anything on
+ *  them. contactName/phone come from the dedicated accounting-setup ask;
+ *  address only ever comes from the fuller onboarding wizard (the
+ *  accounting-setup form itself has no address field), so both sources are
+ *  joined in and whichever has a contact name/phone wins (accounting-setup's
+ *  is the more likely to be current, since it can be resubmitted on its own
+ *  without redoing the whole onboarding sequence). */
+async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Promise<{ complete: boolean; launched: boolean; email: string | null; ccEmails: string | null; paysByCard: boolean; ccFeePct: number | null; contactName: string | null; phone: string | null; address: BillingAddress | null }> {
+  const notBlocked = { complete: true, launched: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null, contactName: null, phone: null, address: null };
   if (!dealId) return notBlocked;
   const { rows: dealRows } = await c.query<{ client_id: string | null }>(
     `SELECT co.client_id FROM deals d LEFT JOIN companies co ON co.id = d.company_id WHERE d.id = $1`,
@@ -68,16 +79,38 @@ async function resolveAccountingSetup(c: pg.Client, dealId: string | null): Prom
   );
   const clientId = dealRows[0]?.client_id;
   if (!clientId) return notBlocked;
-  const { rows: reqRows } = await c.query<{ billing_email: string | null; cc_emails: string | null; completed_at: string | null; invoicing_launched_at: string | null; pays_by_card: boolean; cc_fee_pct: number | null }>(
-    `SELECT billing_email, cc_emails, completed_at, invoicing_launched_at, pays_by_card, cc_fee_pct FROM accounting_setup_requests WHERE client_id = $1 ORDER BY requested_at DESC LIMIT 1`,
+  const { rows: reqRows } = await c.query<{
+    billing_email: string | null; cc_emails: string | null; completed_at: string | null; invoicing_launched_at: string | null;
+    pays_by_card: boolean; cc_fee_pct: number | null; contact_name: string | null; phone: string | null;
+    ob_contact_name: string | null; ob_phone: string | null;
+    ob_line1: string | null; ob_line2: string | null; ob_city: string | null; ob_state: string | null; ob_postal: string | null; ob_country: string | null;
+  }>(
+    `SELECT a.billing_email, a.cc_emails, a.completed_at, a.invoicing_launched_at, a.pays_by_card, a.cc_fee_pct,
+            a.contact_name, a.phone,
+            ob.billing_contact_name AS ob_contact_name, ob.billing_phone AS ob_phone,
+            ob.billing_address_line1 AS ob_line1, ob.billing_address_line2 AS ob_line2,
+            ob.billing_city AS ob_city, ob.billing_state AS ob_state,
+            ob.billing_postal_code AS ob_postal, ob.billing_country AS ob_country
+       FROM accounting_setup_requests a
+       LEFT JOIN LATERAL (
+         SELECT * FROM client_onboarding_submissions
+          WHERE client_id = a.client_id ORDER BY created_at DESC LIMIT 1
+       ) ob ON true
+      WHERE a.client_id = $1
+      ORDER BY a.requested_at DESC LIMIT 1`,
     [clientId],
   );
   const row = reqRows[0];
   if (!row) return notBlocked;
+  const address: BillingAddress | null = (row.ob_line1 || row.ob_city)
+    ? { line1: row.ob_line1, line2: row.ob_line2, city: row.ob_city, state: row.ob_state, postalCode: row.ob_postal, country: row.ob_country }
+    : null;
   return {
     complete: row.completed_at != null, launched: row.invoicing_launched_at != null,
     email: row.billing_email, ccEmails: row.cc_emails,
     paysByCard: row.pays_by_card, ccFeePct: row.cc_fee_pct,
+    contactName: row.contact_name ?? row.ob_contact_name, phone: row.phone ?? row.ob_phone,
+    address,
   };
 }
 
@@ -175,7 +208,7 @@ async function main() {
       const wantsSendExisting = !!r.qbo_invoice_id && !r.qbo_invoice_sent_at;
       const accounting = (wantsInvoice || wantsRecurring || wantsSendExisting)
         ? await resolveAccountingSetup(c, r.deal_id)
-        : { complete: true, launched: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
+        : { complete: true, launched: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null, contactName: null, phone: null, address: null };
       // Nothing hits QuickBooks until both the billing contact is confirmed
       // AND an AM has pressed "Launch invoicing" on the client's Onboarding
       // timeline — see resolveAccountingSetup.
@@ -197,7 +230,11 @@ async function main() {
         done++; continue;
       }
       try {
-        const customerId = await qbo.findOrCreateCustomer(r.client_name || "Client", r.signed_email);
+        const customerId = await qbo.findOrCreateCustomer(r.client_name || "Client", {
+          email: accounting.email ?? r.signed_email,
+          phone: accounting.phone,
+          address: accounting.address,
+        });
         const quotePdf = () => buildQuotePdf({
           quoteNumber: r.quote_number, clientName: r.client_name, companyName: r.company_name,
           lines: items.map((i) => ({
@@ -258,7 +295,16 @@ async function main() {
         if (needRecurring) {
           const startDate = r.signed_at ? ymd(new Date(r.signed_at)) : ymd(new Date());
           const endDate = r.retainer_term_months ? addMonthsToYmd(startDate, r.retainer_term_months) : null;
-          const templateName = `${r.quote_number ?? r.client_name} — Monthly Retainer`;
+          // Leads with the client's name so it's actually findable by
+          // searching QBO's global Recurring Transactions list (confirmed
+          // live 2026-09-01: a name like "Q-1006 — Monthly Retainer" with no
+          // client name in it doesn't turn up searching "integrus", even
+          // though the template is genuinely real and correctly tied to that
+          // customer). legacyTemplateName is the old format -- matched below
+          // too so a template already created under it (e.g. Integrus's
+          // Q-1006) is still found as "existing" instead of duplicated.
+          const templateName = `${r.client_name} — Monthly Retainer${r.quote_number ? ` (${r.quote_number})` : ""}`;
+          const legacyTemplateName = `${r.quote_number ?? r.client_name} — Monthly Retainer`;
           // Guard against creating a second template for the same quote --
           // a template can succeed in QBO (200) and then the id never make
           // it back to qbo_recurring_template_id if anything after the
@@ -267,7 +313,8 @@ async function main() {
           // other way to know one already exists. Cheap since it's the same
           // query getRecurringInvoiceTemplates() already knows how to run.
           const existingTemplates = (await qbo.getRecurringInvoiceTemplates()) as { Invoice?: { Id?: string; CustomerRef?: { value?: string }; RecurringInfo?: { Name?: string } } }[];
-          const existing = existingTemplates.find((t) => t.Invoice?.CustomerRef?.value === customerId && t.Invoice?.RecurringInfo?.Name === templateName);
+          const existing = existingTemplates.find((t) => t.Invoice?.CustomerRef?.value === customerId
+            && (t.Invoice?.RecurringInfo?.Name === templateName || t.Invoice?.RecurringInfo?.Name === legacyTemplateName));
           const recurringId = existing?.Invoice?.Id
             ?? await qbo.createRecurringInvoiceTemplate(customerId, templateName, withCcFee(monthlyLines, accounting), startDate, endDate, {
               email: accounting.email ?? r.signed_email, ccEmails: accounting.ccEmails, allowOnlinePayment: accounting.paysByCard,
