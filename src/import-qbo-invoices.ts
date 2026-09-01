@@ -178,6 +178,26 @@ async function main() {
     const qbo = new QboClient(c);
     if (!dryRun) await qbo.connect();
 
+    // Defense-in-depth against ever double-billing a customer again --
+    // confirmed live 2026-09-01 that a one-time invoice + a recurring
+    // template's own first cycle could land the same day (see the
+    // oneTimeLines fix above for the actual root cause of that one). This
+    // doesn't depend on understanding every future code path that could
+    // create an invoice; it just refuses to create a NEW one-time invoice
+    // for a customer QBO's own records show was already billed within the
+    // last MIN_DAYS_BETWEEN_INVOICES days, full stop. Not checked in
+    // dry-run (no QBO connection yet at that point) -- a dry-run preview
+    // may show a hold that a real run would actually apply.
+    const MIN_DAYS_BETWEEN_INVOICES = 15;
+    const lastInvoiceDateByCustomer = new Map<string, string>();
+    if (!dryRun) {
+      for (const inv of await qbo.getInvoices()) {
+        if (!inv.customerId || !inv.txnDate) continue;
+        const prev = lastInvoiceDateByCustomer.get(inv.customerId);
+        if (!prev || inv.txnDate > prev) lastInvoiceDateByCustomer.set(inv.customerId, inv.txnDate);
+      }
+    }
+
     let done = 0, failed = 0;
     for (const r of rows) {
       let items: Line[] = [];
@@ -257,7 +277,15 @@ async function main() {
           signedName: r.signed_name, signedEmail: r.signed_email, signedAt: r.signed_at, signedIp: r.signed_ip,
           termsLabel: r.terms_label,
         });
-        if (needInvoice) {
+        const lastBilledDate = lastInvoiceDateByCustomer.get(customerId);
+        const daysSinceLastBill = lastBilledDate ? Math.round((Date.now() - new Date(lastBilledDate).getTime()) / 86_400_000) : null;
+        const tooSoonToInvoice = needInvoice && daysSinceLastBill != null && daysSinceLastBill < MIN_DAYS_BETWEEN_INVOICES;
+        if (tooSoonToInvoice) {
+          const msg = `Held: QBO shows this customer was already billed ${daysSinceLastBill}d ago (${lastBilledDate}) -- refusing to create another invoice within ${MIN_DAYS_BETWEEN_INVOICES}d. Needs manual review.`;
+          await c.query(`UPDATE pricing_quotes SET qbo_sync_error=$2 WHERE id=$1`, [r.id, msg]);
+          console.log(`  ⚠ ${r.client_name} (${r.quote_number}): ${msg}`);
+        }
+        if (needInvoice && !tooSoonToInvoice) {
           const billTo = accounting.email ?? r.signed_email;
           const invoiceId = await qbo.createInvoice(customerId, withCcFee(oneTimeLines, accounting), { email: billTo, allowOnlinePayment: accounting.paysByCard });
           await c.query(`UPDATE pricing_quotes SET qbo_invoice_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, invoiceId]);
