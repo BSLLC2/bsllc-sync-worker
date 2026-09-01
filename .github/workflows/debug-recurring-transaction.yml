@@ -1,0 +1,28 @@
+name: Debug — raw QBO recurring transaction (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      customer:
+        description: "Customer name substring to filter on (blank = all)"
+        required: false
+        default: ""
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Debug
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: npm run debug-recurring-transaction -- --customer="${{ inputs.customer }}"

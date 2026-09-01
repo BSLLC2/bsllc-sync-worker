@@ -42,6 +42,7 @@
     "debug-match-companies": "tsx src/debug-match-companies.ts",
     "debug-revenue-schedules": "tsx src/debug-revenue-schedules.ts",
     "debug-stage-timing": "tsx src/debug-stage-timing.ts",
+    "debug-recurring-transaction": "tsx src/debug-recurring-transaction.ts",
     "debug-scheduled-overlap": "tsx src/debug-scheduled-overlap.ts",
     "show-service-account-email": "tsx src/show-service-account-email.ts",
     "import-och-seo-set": "tsx src/import-och-seo-set.ts",
