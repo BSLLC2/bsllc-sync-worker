@@ -51,6 +51,7 @@
     "dump-client-tasks": "tsx src/dump-client-tasks.ts",
     "import-qbo-invoices": "tsx src/import-qbo-invoices.ts",
     "import-qbo-items": "tsx src/import-qbo-items.ts",
+    "oneoff-integrus-billing": "tsx src/oneoff-integrus-billing.ts",
     "import-qbo-invoices-sync": "tsx src/import-qbo-invoices-sync.ts",
     "send-qbo-invoice": "tsx src/send-qbo-invoice.ts",
     "import-qbo-financials": "tsx src/import-qbo-financials.ts",

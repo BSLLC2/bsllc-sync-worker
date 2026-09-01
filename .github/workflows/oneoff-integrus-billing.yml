@@ -1,0 +1,20 @@
+name: One-off — Integrus billing contact + qbo_catalog_items table
+
+# Run-once script, not on a schedule. See src/oneoff-integrus-billing.ts for
+# why this exists. Safe to delete (workflow + script) once run.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run oneoff-integrus-billing
