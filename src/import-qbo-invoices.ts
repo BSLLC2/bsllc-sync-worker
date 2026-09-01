@@ -194,7 +194,16 @@ async function main() {
         continue;
       }
       const monthlyLines = lines.filter((l) => l.monthly);
-      const wantsInvoice = !r.qbo_invoice_id;
+      // The recurring template (below) bills every monthly line every cycle,
+      // including its very first one -- confirmed live 2026-09-01: Integrus
+      // (a retainer-only quote, no one-time lines) got double-billed $5,000
+      // because this one-time invoice used to include the monthly lines too,
+      // then the template's first cycle fired the same day and billed them
+      // again. Only genuinely one-time lines belong on this invoice; a
+      // quote with nothing one-time to bill (retainer-only) gets no separate
+      // invoice at all -- the recurring template's first cycle is the bill.
+      const oneTimeLines = lines.filter((l) => !l.monthly);
+      const wantsInvoice = !r.qbo_invoice_id && oneTimeLines.length > 0;
       const wantsRecurring = monthlyLines.length > 0 && !r.qbo_recurring_template_id;
       // An invoice that already exists in QBO but was created with no
       // billing email (e.g. pushed via skipAccountingSetup, so nothing
@@ -250,7 +259,7 @@ async function main() {
         });
         if (needInvoice) {
           const billTo = accounting.email ?? r.signed_email;
-          const invoiceId = await qbo.createInvoice(customerId, withCcFee(lines, accounting), { email: billTo, allowOnlinePayment: accounting.paysByCard });
+          const invoiceId = await qbo.createInvoice(customerId, withCcFee(oneTimeLines, accounting), { email: billTo, allowOnlinePayment: accounting.paysByCard });
           await c.query(`UPDATE pricing_quotes SET qbo_invoice_id=$2, qbo_synced_at=now(), qbo_sync_error=NULL WHERE id=$1`, [r.id, invoiceId]);
           console.log(`  ✓ ${r.client_name} (${r.quote_number}) → invoice ${invoiceId}`);
           try {
