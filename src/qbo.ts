@@ -379,6 +379,11 @@ export class QboClient {
           NumInterval: 1,
           DayOfMonth: dayOfMonth,
           StartDate: startDate,
+          // Generate each cycle's invoice 3 days ahead of its bill date
+          // instead of same-day, so there's a review window before it goes
+          // out rather than it appearing (and, once "Automatically send
+          // emails" is ever turned on, sending) with zero lead time.
+          DaysInAdvance: 3,
           ...(endDate ? { EndDate: endDate } : {}),
         },
       },
