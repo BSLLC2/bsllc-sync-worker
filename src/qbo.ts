@@ -210,6 +210,22 @@ export class QboClient {
     return created.Customer.Id;
   }
 
+  /** Sparse-update a Customer's own email address (distinct from an
+   *  invoice's per-send BillEmail) -- for the case where a customer was
+   *  created before a real billing contact was known (see resolveAccountingSetup
+   *  in import-qbo-invoices.ts) and the real one arrives later. QBO's update
+   *  API requires the entity's current SyncToken for optimistic concurrency,
+   *  so this reads it fresh immediately before writing. */
+  async updateCustomerEmail(customerId: string, email: string): Promise<void> {
+    const cur = await this.call<{ Customer: { SyncToken: string } }>("GET", `customer/${customerId}`);
+    await this.call("POST", "customer", {
+      sparse: true,
+      Id: customerId,
+      SyncToken: cur.Customer.SyncToken,
+      PrimaryEmailAddr: { Address: email },
+    });
+  }
+
   private buildLines(lines: QboLine[]) {
     const defaultItem = process.env.QBO_DEFAULT_ITEM_ID?.trim() || "1";
     return lines.filter((l) => l.amount > 0).map((l) => {

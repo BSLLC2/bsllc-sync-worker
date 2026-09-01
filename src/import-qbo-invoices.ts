@@ -113,7 +113,7 @@ async function main() {
       id: string; quote_number: string | null; client_name: string; line_items_json: string | null;
       signed_name: string | null; signed_email: string | null; signed_at: string | null; signed_ip: string | null;
       retainer_term_months: number | null; deal_id: string | null; company_name: string | null;
-      qbo_invoice_id: string | null; qbo_recurring_template_id: string | null;
+      qbo_invoice_id: string | null; qbo_recurring_template_id: string | null; qbo_invoice_sent_at: string | null;
       comments: string | null; sow_text: string | null; contract_text: string | null;
       payment_terms: string | null; payment_months: number | null;
       deposit_cents: number | null; deposit_type: string | null; deposit_percent: number | null;
@@ -121,7 +121,7 @@ async function main() {
     }>(
       `SELECT q.id, q.quote_number, q.client_name, q.line_items_json, q.signed_name, q.signed_email, q.signed_at, q.signed_ip,
               q.retainer_term_months, q.deal_id, co.name AS company_name,
-              q.qbo_invoice_id, q.qbo_recurring_template_id,
+              q.qbo_invoice_id, q.qbo_recurring_template_id, q.qbo_invoice_sent_at,
               q.comments, q.sow_text, q.contract_text, q.payment_terms, q.payment_months,
               q.deposit_cents, q.deposit_type, q.deposit_percent, q.accepted_price_cents,
               tv.label AS terms_label
@@ -130,7 +130,12 @@ async function main() {
          LEFT JOIN terms_versions tv ON tv.id = q.accepted_terms_version_id
         WHERE q.status IN ('signed', 'legacy') AND q.kind = 'designer'
           AND (q.qbo_invoice_id IS NULL
-               OR (q.qbo_recurring_template_id IS NULL AND q.line_items_json LIKE '%"recurring":"monthly"%'))
+               OR (q.qbo_recurring_template_id IS NULL AND q.line_items_json LIKE '%"recurring":"monthly"%')
+               -- Invoice already exists in QBO but was never emailed (created
+               -- before a billing contact was confirmed, e.g. via
+               -- skipAccountingSetup) -- revisit every run until a real
+               -- billing email shows up and we can actually send it.
+               OR (q.qbo_invoice_id IS NOT NULL AND q.qbo_invoice_sent_at IS NULL))
         ORDER BY q.signed_at ASC NULLS LAST
         LIMIT 50`,
     );
@@ -158,7 +163,17 @@ async function main() {
       const monthlyLines = lines.filter((l) => l.monthly);
       const wantsInvoice = !r.qbo_invoice_id;
       const wantsRecurring = monthlyLines.length > 0 && !r.qbo_recurring_template_id;
-      const accounting = (wantsInvoice || wantsRecurring)
+      // An invoice that already exists in QBO but was created with no
+      // billing email (e.g. pushed via skipAccountingSetup, so nothing
+      // spammy went out before the real contact was confirmed) -- revisit
+      // every run until one shows up, then update the QBO customer's own
+      // email and actually send it. Deliberately does NOT require
+      // accounting.launched below: invoicing was obviously already launched
+      // if the invoice exists, and requestAccountingSetupUpdate's fresh row
+      // never carries invoicing_launched_at forward, so gating on it here
+      // would make this un-satisfiable forever.
+      const wantsSendExisting = !!r.qbo_invoice_id && !r.qbo_invoice_sent_at;
+      const accounting = (wantsInvoice || wantsRecurring || wantsSendExisting)
         ? await resolveAccountingSetup(c, r.deal_id)
         : { complete: true, launched: true, email: null, ccEmails: null, paysByCard: false, ccFeePct: null };
       // Nothing hits QuickBooks until both the billing contact is confirmed
@@ -167,11 +182,17 @@ async function main() {
       const canInvoice = accounting.complete && accounting.launched;
       const needInvoice = wantsInvoice && canInvoice;
       const needRecurring = wantsRecurring && canInvoice;
+      const needSendExisting = wantsSendExisting && accounting.complete && !!accounting.email;
       if (dryRun) {
         const total = lines.reduce((s, l) => s + l.amount, 0).toFixed(2);
         const feeNote = accounting.paysByCard && accounting.ccFeePct ? ` (+${accounting.ccFeePct}% card fee)` : "";
         const blockedNote = !canInvoice ? (accounting.complete ? " (BLOCKED on invoicing launch)" : " (BLOCKED on accounting setup)") : "";
-        const parts = [needInvoice && "invoice", needRecurring && "recurring template", !canInvoice && (wantsInvoice || wantsRecurring) && `${[wantsInvoice && "invoice", wantsRecurring && "recurring template"].filter(Boolean).join("/")}${blockedNote}`];
+        const parts = [
+          needInvoice && "invoice", needRecurring && "recurring template",
+          !canInvoice && (wantsInvoice || wantsRecurring) && `${[wantsInvoice && "invoice", wantsRecurring && "recurring template"].filter(Boolean).join("/")}${blockedNote}`,
+          needSendExisting && `send previously-unsent invoice ${r.qbo_invoice_id} to ${accounting.email}`,
+          wantsSendExisting && !needSendExisting && `invoice ${r.qbo_invoice_id} still has no billing email — nothing to send yet`,
+        ];
         console.log(`  would ${parts.filter(Boolean).join(" + ")} for ${r.client_name} (${r.quote_number}) — $${total}${feeNote}`);
         done++; continue;
       }
@@ -206,15 +227,33 @@ async function main() {
           if (billTo) {
             try {
               await qbo.sendInvoice(invoiceId, billTo);
+              await c.query(`UPDATE pricing_quotes SET qbo_invoice_sent_at=now() WHERE id=$1`, [r.id]);
             } catch (e) {
               console.log(`  … ${r.client_name} (${r.quote_number}): couldn't send invoice ${invoiceId} to ${billTo}: ${e instanceof Error ? e.message : e}`);
             }
           } else {
-            console.log(`  … ${r.client_name} (${r.quote_number}): invoice ${invoiceId} created but not sent -- no billing email on file.`);
+            console.log(`  … ${r.client_name} (${r.quote_number}): invoice ${invoiceId} created but not sent -- no billing email on file. Will retry sending once one shows up.`);
           }
         }
         if ((wantsInvoice || wantsRecurring) && !canInvoice) {
           console.log(`  … ${r.client_name} (${r.quote_number}): held — waiting on ${accounting.complete ? "invoicing launch" : "accounting setup"}`);
+        }
+        // The client's real billing contact just showed up (via a later
+        // accounting-setup update) for an invoice we already created without
+        // one -- override the QBO customer's own email and finally send it,
+        // instead of leaving a fully-created invoice sitting undelivered
+        // forever. See the wantsSendExisting comment above.
+        if (needSendExisting && r.qbo_invoice_id) {
+          try {
+            await qbo.updateCustomerEmail(customerId, accounting.email as string);
+            await qbo.sendInvoice(r.qbo_invoice_id, accounting.email);
+            await c.query(`UPDATE pricing_quotes SET qbo_invoice_sent_at=now() WHERE id=$1`, [r.id]);
+            console.log(`  ✓ ${r.client_name} (${r.quote_number}): billing contact confirmed — sent invoice ${r.qbo_invoice_id} to ${accounting.email}`);
+          } catch (e) {
+            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't send existing invoice ${r.qbo_invoice_id} to ${accounting.email}: ${e instanceof Error ? e.message : e}`);
+          }
+        } else if (wantsSendExisting && !needSendExisting) {
+          console.log(`  … ${r.client_name} (${r.quote_number}): invoice ${r.qbo_invoice_id} still has no billing email on file — nothing to send yet.`);
         }
         if (needRecurring) {
           const startDate = r.signed_at ? ymd(new Date(r.signed_at)) : ymd(new Date());
