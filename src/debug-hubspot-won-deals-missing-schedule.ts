@@ -6,10 +6,13 @@ import pg from "pg";
  * Revenue schedules only ever get created inside the app's updateDeal(),
  * on the actual open->won transition (server/storage.ts). Any deal that
  * arrived already Closed Won -- e.g. imported straight from HubSpot's own
- * closed history, or inserted directly by a one-off script -- never passed
- * through that transition, so it never got a revenue_schedules row at all.
- * This is very likely the "few things in HubSpot we haven't accounted for
- * yet" the user is pointing at. Quantifying before fixing.
+ * closed history -- never passed through that transition, so it never got
+ * a revenue_schedules row at all. A first pass of this found 372 such
+ * deals totaling $4.89M -- but most of that is old one-time engagements
+ * that are done and fully collected, not missing FUTURE cash. What
+ * actually matters for the Scheduled breakdown is the RECURRING subset
+ * still inside (or past, with no end date) its retainer term -- that's
+ * real ongoing revenue invisible to Gap Analysis/Scheduled right now.
  *
  *   npm run debug-hubspot-won-deals-missing-schedule
  */
@@ -19,28 +22,37 @@ async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
-    const { rows } = await c.query(
-      `SELECT d.id, d.name, d.company_id, co.name AS company_name, d.source, d.amount_cents,
-              d.one_time_amount_cents, d.monthly_retainer_cents, d.billing_structure, d.closed_at, d.close_date
+    const { rows: all } = await c.query(
+      `SELECT d.id FROM deals d LEFT JOIN revenue_schedules rs ON rs.deal_id = d.id
+        WHERE d.status = 'won' AND d.amount_cents > 0 AND rs.id IS NULL`,
+    );
+    console.log(`${all.length} total Closed Won deals with amount_cents > 0 and no revenue_schedules row (any type, any age).`);
+
+    const { rows: recurring } = await c.query(
+      `SELECT d.id, d.name, co.name AS company_name, d.amount_cents, d.monthly_retainer_cents,
+              d.one_time_amount_cents, d.billing_structure, d.retainer_term_months, d.close_date, d.closed_at
          FROM deals d
          LEFT JOIN companies co ON co.id = d.company_id
          LEFT JOIN revenue_schedules rs ON rs.deal_id = d.id
         WHERE d.status = 'won' AND d.amount_cents > 0 AND rs.id IS NULL
+          AND (d.billing_structure IN ('Monthly retainer', 'Subscription') OR d.monthly_retainer_cents IS NOT NULL)
         ORDER BY d.amount_cents DESC`,
     );
-    console.log(`${rows.length} Closed Won deal(s) with amount_cents > 0 and NO revenue_schedules row at all:`);
-    let totalCents = 0;
-    const bySource = new Map<string, { n: number; cents: number }>();
-    for (const r of rows) {
-      totalCents += r.amount_cents;
-      const src = r.source ?? "(null)";
-      const s = bySource.get(src) ?? { n: 0, cents: 0 };
-      s.n++; s.cents += r.amount_cents;
-      bySource.set(src, s);
-      console.log(JSON.stringify(r));
-    }
-    console.log(`\nTotal missing-schedule Closed Won value: $${(totalCents / 100).toLocaleString("en-US")}`);
-    console.log(`By source:`, JSON.stringify(Object.fromEntries(bySource)));
+    console.log(`\n${recurring.length} of those are RECURRING-type (billing_structure Monthly retainer/Subscription, or monthly_retainer_cents set) -- these are the ones that would represent ongoing revenue missing from Scheduled:`);
+    let cents = 0;
+    for (const r of recurring) { cents += r.amount_cents; console.log(JSON.stringify(r)); }
+    console.log(`\nRecurring-subset total deal value (not monthly -- see individual monthly_retainer_cents above): $${(cents / 100).toLocaleString("en-US")}`);
+
+    // Closed within the last 24 months -- old one-time engagements from
+    // years back are very unlikely to still be "expected cash" today.
+    const { rows: recentOneTime } = await c.query(
+      `SELECT count(*) AS n, coalesce(sum(d.amount_cents),0) AS cents
+         FROM deals d LEFT JOIN revenue_schedules rs ON rs.deal_id = d.id
+        WHERE d.status = 'won' AND d.amount_cents > 0 AND rs.id IS NULL
+          AND NOT (d.billing_structure IN ('Monthly retainer', 'Subscription') OR d.monthly_retainer_cents IS NOT NULL)
+          AND COALESCE(d.close_date::date, d.closed_at::date) >= (now() - interval '24 months')`,
+    );
+    console.log(`\nOne-time-type missing-schedule deals closed in the last 24 months: ${JSON.stringify(recentOneTime[0])}`);
   } finally {
     await c.end();
   }
