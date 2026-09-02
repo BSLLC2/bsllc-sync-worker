@@ -57,6 +57,7 @@
     "debug-integrus-revenue-schedule": "tsx src/debug-integrus-revenue-schedule.ts",
     "oneoff-fix-integrus-revenue-schedule": "tsx src/oneoff-fix-integrus-revenue-schedule.ts",
     "debug-colorado-herbalism-schedule": "tsx src/debug-colorado-herbalism-schedule.ts",
+    "oneoff-deactivate-non-won-schedules": "tsx src/oneoff-deactivate-non-won-schedules.ts",
     "import-qbo-invoices-sync": "tsx src/import-qbo-invoices-sync.ts",
     "send-qbo-invoice": "tsx src/send-qbo-invoice.ts",
     "import-qbo-financials": "tsx src/import-qbo-financials.ts",
