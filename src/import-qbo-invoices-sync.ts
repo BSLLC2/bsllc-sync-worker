@@ -36,7 +36,7 @@ function env(n: string): string { const v = process.env[n]; if (!v?.trim()) thro
 //     ScheduleInfo: { IntervalType, NumInterval, DayOfMonth, DaysBefore,
 //                     StartDate, NextDate, PreviousDate }
 //   }
-interface RecurringScheduleInfo { IntervalType?: string; NumInterval?: number; NextDate?: string; PreviousDate?: string; EndDate?: string }
+interface RecurringScheduleInfo { IntervalType?: string; NumInterval?: number; StartDate?: string; NextDate?: string; PreviousDate?: string; EndDate?: string }
 interface RecurringInfo { Name?: string; Active?: boolean; ScheduleInfo?: RecurringScheduleInfo }
 interface RecurringInvoiceTemplate { Id?: string; CustomerRef?: { value?: string; name?: string }; Line?: { Amount?: number }[]; TotalAmt?: number; RecurringInfo?: RecurringInfo }
 interface RecurringTransactionRow { Invoice?: RecurringInvoiceTemplate }
@@ -96,6 +96,12 @@ async function main() {
     // invoice templates instead of manually-entered client retainer figures.
     await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS interval_type TEXT`);
     await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS num_interval INTEGER NOT NULL DEFAULT 1`);
+    // The only anchor available for a template QBO hasn't fired the first
+    // invoice from yet (no next_date/previous_date) -- without it, Gap
+    // Analysis silently dropped a brand-new recurring template from every
+    // month entirely (see the Integrus incident: it got marked superseded by
+    // this very template, which itself never showed up anywhere in its place).
+    await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS start_date TEXT`);
     await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS next_date TEXT`);
     await c.query(`ALTER TABLE qbo_recurring_invoices ADD COLUMN IF NOT EXISTS previous_date TEXT`);
     // A template QBO itself has set to stop on a specific date (a retainer
@@ -178,16 +184,16 @@ async function main() {
       const id = tmpl.Id ?? randomUUID();
       seenIds.push(id);
       await c.query(
-        `INSERT INTO qbo_recurring_invoices (id, customer_id, customer_name, template_name, amount_cents, active, interval_type, num_interval, next_date, previous_date, end_date, synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+        `INSERT INTO qbo_recurring_invoices (id, customer_id, customer_name, template_name, amount_cents, active, interval_type, num_interval, start_date, next_date, previous_date, end_date, synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
          ON CONFLICT (id) DO UPDATE SET customer_id = EXCLUDED.customer_id, customer_name = EXCLUDED.customer_name,
            template_name = EXCLUDED.template_name, amount_cents = EXCLUDED.amount_cents, active = EXCLUDED.active,
-           interval_type = EXCLUDED.interval_type, num_interval = EXCLUDED.num_interval,
+           interval_type = EXCLUDED.interval_type, num_interval = EXCLUDED.num_interval, start_date = EXCLUDED.start_date,
            next_date = EXCLUDED.next_date, previous_date = EXCLUDED.previous_date, end_date = EXCLUDED.end_date, synced_at = now()`,
         [
           id, tmpl.CustomerRef?.value ?? null, tmpl.CustomerRef?.name ?? null, info?.Name ?? null,
           amountCents, info?.Active !== false, schedule?.IntervalType ?? null, schedule?.NumInterval ?? 1,
-          schedule?.NextDate ?? null, schedule?.PreviousDate ?? null, schedule?.EndDate ?? null,
+          schedule?.StartDate ?? null, schedule?.NextDate ?? null, schedule?.PreviousDate ?? null, schedule?.EndDate ?? null,
         ],
       );
       recurringSynced++;
