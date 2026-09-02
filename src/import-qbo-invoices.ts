@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { randomUUID } from "node:crypto";
 import { QboClient } from "./qbo.js";
 import { ymd } from "./dates.js";
 import { buildQuotePdf } from "./quote-pdf.js";
@@ -145,7 +146,7 @@ async function main() {
     const { rows } = await c.query<{
       id: string; quote_number: string | null; client_name: string; line_items_json: string | null;
       signed_name: string | null; signed_email: string | null; signed_at: string | null; signed_ip: string | null;
-      retainer_term_months: number | null; deal_id: string | null; company_name: string | null;
+      retainer_term_months: number | null; deal_id: string | null; company_id: string | null; company_name: string | null;
       qbo_invoice_id: string | null; qbo_recurring_template_id: string | null; qbo_invoice_sent_at: string | null;
       comments: string | null; sow_text: string | null; contract_text: string | null;
       payment_terms: string | null; payment_months: number | null;
@@ -153,7 +154,7 @@ async function main() {
       accepted_price_cents: number | null; terms_label: string | null;
     }>(
       `SELECT q.id, q.quote_number, q.client_name, q.line_items_json, q.signed_name, q.signed_email, q.signed_at, q.signed_ip,
-              q.retainer_term_months, q.deal_id, co.name AS company_name,
+              q.retainer_term_months, q.deal_id, q.company_id, co.name AS company_name,
               q.qbo_invoice_id, q.qbo_recurring_template_id, q.qbo_invoice_sent_at,
               q.comments, q.sow_text, q.contract_text, q.payment_terms, q.payment_months,
               q.deposit_cents, q.deposit_type, q.deposit_percent, q.accepted_price_cents,
@@ -264,6 +265,19 @@ async function main() {
           phone: accounting.phone,
           address: accounting.address,
         });
+        // Auto-link the CRM company to this QBO customer the moment we
+        // find-or-create it, instead of leaving an AM to notice the
+        // "QuickBooks customers" card on the Company page is empty and link
+        // it by hand every time — confirmed live this session that even
+        // Integrus's own company record needed a manual link after this
+        // exact script created its customer/invoice/recurring template.
+        if (r.company_id) {
+          await c.query(
+            `INSERT INTO company_qbo_customers (id, company_id, qbo_customer_id) VALUES ($1, $2, $3)
+             ON CONFLICT (company_id, qbo_customer_id) DO NOTHING`,
+            [randomUUID(), r.company_id, customerId],
+          );
+        }
         const quotePdf = () => buildQuotePdf({
           quoteNumber: r.quote_number, clientName: r.client_name, companyName: r.company_name,
           lines: items.map((i) => ({
@@ -360,6 +374,25 @@ async function main() {
           console.log(existing
             ? `  ✓ ${r.client_name} (${r.quote_number}) → found existing recurring template ${recurringId} (recovered from a prior run)`
             : `  ✓ ${r.client_name} (${r.quote_number}) → recurring template ${recurringId}${endDate ? ` (ends ${endDate})` : " (ongoing)"}`);
+          if (r.company_id) {
+            // Seed a minimal qbo_recurring_invoices row so the Company page's
+            // "QuickBooks recurring line items" link resolves to a real name
+            // immediately, instead of showing "Untitled" until the next
+            // separate import-qbo-invoices-sync run overwrites it with QBO's
+            // own interval/next-date fields.
+            const monthlyTotalCents = Math.round(monthlyLines.reduce((s, l) => s + l.amount, 0) * 100);
+            await c.query(
+              `INSERT INTO qbo_recurring_invoices (id, customer_id, customer_name, template_name, amount_cents, active, start_date)
+               VALUES ($1, $2, $3, $4, $5, true, $6)
+               ON CONFLICT (id) DO NOTHING`,
+              [recurringId, customerId, r.client_name, templateName, monthlyTotalCents, startDate],
+            );
+            await c.query(
+              `INSERT INTO company_qbo_recurring_invoices (id, company_id, qbo_recurring_invoice_id) VALUES ($1, $2, $3)
+               ON CONFLICT (company_id, qbo_recurring_invoice_id) DO NOTHING`,
+              [randomUUID(), r.company_id, recurringId],
+            );
+          }
           // Attaches to the template's own underlying Invoice record. Whether
           // QBO carries this onto each auto-generated monthly instance is
           // unconfirmed -- check after the first one lands.
