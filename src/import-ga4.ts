@@ -178,15 +178,19 @@ async function main() {
     // GA4 renamed "conversions" → "keyEvents". Ask for keyEvents first (current
     // properties), fall back to conversions (older ones) on a 400. Always pull
     // sessions too so the traffic tile lights up even when 0 conversions exist.
+    // totalRevenue is GA4's own e-commerce revenue metric (e.g. Tablespoon's
+    // class-ticket purchases tracked as GA4 purchase events) — a genuinely
+    // separate income stream from HubSpot/Square, not an alternate read of
+    // the same number. See shared/schema.ts SIGNAL_CONNECTOR_KEYS.revenue.
     let report: any;
     let convMetric = "keyEvents";
     try {
       try {
-        report = await runReport(token, propertyId, args.since, ["sessions", "keyEvents"]);
+        report = await runReport(token, propertyId, args.since, ["sessions", "keyEvents", "totalRevenue"]);
       } catch (e) {
         if ((e as any).status === 400) {
           convMetric = "conversions";
-          report = await runReport(token, propertyId, args.since, ["sessions", "conversions"]);
+          report = await runReport(token, propertyId, args.since, ["sessions", "conversions", "totalRevenue"]);
         } else throw e;
       }
     } catch (e) {
@@ -207,7 +211,15 @@ async function main() {
       if (!ym || !/^\d{6}$/.test(ym)) continue;
       const sessions = Number(row.metricValues?.[0]?.value ?? 0);
       const conv = Number(row.metricValues?.[1]?.value ?? 0);
+      const revenueCents = Math.round(Number(row.metricValues?.[2]?.value ?? 0) * 100);
       const { start, end } = monthBounds(ym);
+      const metrics: Record<string, number> = { "ga4.conversions": conv, "ga4.sessions": sessions };
+      // Only plant ga4.revenue_cents when there's an actual figure. Most
+      // clients have no e-commerce tracking configured at all, so GA4 always
+      // answers 0 — planting that as a "live" $0 would add a spurious zero
+      // row to every revenue-by-channel breakdown, not just the clients (like
+      // Tablespoon) that genuinely track purchases in GA4.
+      if (revenueCents > 0) metrics["ga4.revenue_cents"] = revenueCents;
       syncs.push({
         client_id: slug,
         source: "ga4",
@@ -218,7 +230,7 @@ async function main() {
         data_state: "live",
         error_message: null,
         // namespaced keys — sync.ts stores them verbatim; dashboard reads ga4.*
-        metrics: { "ga4.conversions": conv, "ga4.sessions": sessions },
+        metrics,
       });
       planted++;
     }
