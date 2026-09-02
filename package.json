@@ -54,6 +54,7 @@
     "import-qbo-items": "tsx src/import-qbo-items.ts",
     "oneoff-integrus-billing": "tsx src/oneoff-integrus-billing.ts",
     "debug-integrus-invoices": "tsx src/debug-integrus-invoices.ts",
+    "debug-integrus-revenue-schedule": "tsx src/debug-integrus-revenue-schedule.ts",
     "import-qbo-invoices-sync": "tsx src/import-qbo-invoices-sync.ts",
     "send-qbo-invoice": "tsx src/send-qbo-invoice.ts",
     "import-qbo-financials": "tsx src/import-qbo-financials.ts",
