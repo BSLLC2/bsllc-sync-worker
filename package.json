@@ -60,6 +60,7 @@
     "oneoff-deactivate-non-won-schedules": "tsx src/oneoff-deactivate-non-won-schedules.ts",
     "oneoff-backfill-company-qbo-links": "tsx src/oneoff-backfill-company-qbo-links.ts",
     "debug-scheduled-revenue-gaps": "tsx src/debug-scheduled-revenue-gaps.ts",
+    "debug-lbl-scheduled-gap": "tsx src/debug-lbl-scheduled-gap.ts",
     "import-qbo-invoices-sync": "tsx src/import-qbo-invoices-sync.ts",
     "send-qbo-invoice": "tsx src/send-qbo-invoice.ts",
     "import-qbo-financials": "tsx src/import-qbo-financials.ts",
