@@ -1,0 +1,79 @@
+name: Import per-client HubSpot metrics
+
+# Reads each ENABLED client's own HubSpot portal (Admin → Connectors →
+# HubSpot) and plants hubspot.revenue_cents / hubspot.deals_won /
+# hubspot.leads per month via `npm run sync`. Distinct from import-hubspot
+# (which syncs BS LLC's own internal HubSpot account) — this one reads a
+# CLIENT's separate portal using a per-client private-app token.
+#
+# To add a client: generate a private-app token in THEIR HubSpot (Settings →
+# Integrations → Private Apps, scopes crm.objects.deals.read +
+# crm.objects.contacts.read), add it as a repo secret named
+# HUBSPOT_TOKEN_<CLIENT_NAME_UPPER_SNAKE> (e.g. HUBSPOT_TOKEN_TABLESPOON),
+# list it in the `env:` block below, and turn their HubSpot connector on in
+# Admin. The importer seeds it into client_integration_tokens on first run —
+# it's never stored in the plain-text external_id column.
+on:
+  schedule:
+    - cron: "15 7 * * *" # 07:15 UTC daily, before GA4/OCH
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse + print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: hubspot-metrics-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run HubSpot metrics import
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+          # One secret per connected client — add a line here each time a new
+          # client's HubSpot connector is turned on.
+          HUBSPOT_TOKEN_TABLESPOON: ${{ secrets.HUBSPOT_TOKEN_TABLESPOON }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-hubspot-metrics -- --dry-run
+          else
+            npm run import-hubspot-metrics
+          fi
+
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=import_hubspot_metrics --status=${{ job.status }}

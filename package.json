@@ -11,6 +11,7 @@
     "mint-token": "tsx src/mint-refresh-token.ts",
     "import-csv": "tsx src/import-csv.ts",
     "import-hubspot": "tsx src/import-hubspot.ts",
+    "import-hubspot-metrics": "tsx src/import-hubspot-metrics.ts",
     "import-och": "tsx src/import-och.ts",
     "import-web-inquiries": "tsx src/import-web-inquiries.ts",
     "import-offline-conversions": "tsx src/import-offline-conversions.ts",
