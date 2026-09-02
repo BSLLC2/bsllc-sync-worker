@@ -62,6 +62,7 @@
     "debug-scheduled-revenue-gaps": "tsx src/debug-scheduled-revenue-gaps.ts",
     "debug-lbl-scheduled-gap": "tsx src/debug-lbl-scheduled-gap.ts",
     "debug-lbl-customer-hierarchy": "tsx src/debug-lbl-customer-hierarchy.ts",
+    "oneoff-link-lbl-qbo-customers": "tsx src/oneoff-link-lbl-qbo-customers.ts",
     "import-qbo-invoices-sync": "tsx src/import-qbo-invoices-sync.ts",
     "send-qbo-invoice": "tsx src/send-qbo-invoice.ts",
     "import-qbo-financials": "tsx src/import-qbo-financials.ts",

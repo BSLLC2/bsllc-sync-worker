@@ -1,0 +1,23 @@
+name: One-off — link LBL's QBO sub-customers
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (no writes)"
+        type: boolean
+        default: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run oneoff-link-lbl-qbo-customers -- ${{ inputs.dry_run == 'true' && '--dry-run' || '' }}
