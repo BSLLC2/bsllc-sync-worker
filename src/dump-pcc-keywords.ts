@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
-import { credsFromEnv, keywordResearch, rankedKeywords, domainAuthority, keywordGap, type KeywordIdea } from "./dataforseo.js";
+import { credsFromEnv, rankedKeywords, domainAuthority, bulkKeywordMetrics, type KeywordIdea } from "./dataforseo.js";
 
 /**
  * READ-ONLY current-data audit for Pink Cash Cow (pinkcashcow.com).
@@ -18,19 +18,35 @@ import { credsFromEnv, keywordResearch, rankedKeywords, domainAuthority, keyword
 
 const DOMAIN = "pinkcashcow.com";
 
-// Seeds are investor/owner-intent, furnished/short-term specific — the 2023
-// "Blog Opportunities" list's framing, not the 2022 list's tenant-intent terms.
-const SEEDS_CIN = [
+// The real, human-built 2023 "Blog Opportunities" list — investor/owner
+// intent, furnished/short-term specific, each already carrying a content
+// schema + writing guide in Drive. Checked EXACT-PHRASE (bulkKeywordMetrics),
+// not expanded from a seed: DataForSEO's keyword_ideas endpoint broadens a
+// seed topically and returns geography-blind noise ("porta potty rental" for
+// an "airbnb management cincinnati" seed) with the local intent stripped out.
+const TERMS_CIN = [
+  "cincinnati rental management companies",
+  "rental management cincinnati",
+  "short term rental cincinnati",
+  "short term rentals cincinnati",
   "property management cincinnati",
-  "short term rental management cincinnati",
-  "furnished rental management cincinnati",
-  "airbnb management cincinnati",
+  "property manager cincinnati",
+  "how to manage short term rentals",
+  "best rental property management companies",
+  "cincinnati property management",
+  "furnished short term rentals cincinnati",
+  "how to furnish a short term rental",
+  "investment property cincinnati",
+  "managing apartments",
+  "owning a short term rental",
+  "short term apartment rentals cincinnati",
 ];
-const SEEDS_LOU = [
-  "property management louisville",
-  "short term rental management louisville",
-  "airbnb management louisville",
-];
+// Same phrases, city swapped, for the 6 that are Cincinnati-qualified —
+// checks a real market gap rather than guessing Louisville volume from the
+// Cincinnati number.
+const TERMS_LOU = TERMS_CIN
+  .filter((t) => t.includes("cincinnati"))
+  .map((t) => t.replace("cincinnati", "louisville"));
 
 const n0 = (v: number | null) => (v == null ? "—" : v.toLocaleString("en-US"));
 const money = (v: number | null) => (v == null ? "—" : `$${v.toFixed(2)}`);
@@ -53,12 +69,16 @@ async function main() {
   hr("A. CURRENT DOMAIN STANDING — pinkcashcow.com");
   try {
     const auth = await domainAuthority(creds, DOMAIN);
-    console.log(`  authority score      ${n0(auth.authorityScore)}`);
+    console.log(`  backlink authority (DataForSEO rank, 0-1000 scale) ${n0(auth.authorityScore)}`);
     console.log(`  backlinks            ${n0(auth.backlinks)}`);
     console.log(`  referring domains    ${n0(auth.referringDomains)}`);
-    console.log(`  est. organic traffic ${n0(auth.organicTraffic)}/mo`);
+    console.log(`  est. traffic VALUE   ${money(auth.organicTraffic)}/mo  (ETV — what this traffic would cost as paid clicks; NOT a visit count)`);
     console.log(`  ranking keywords     ${n0(auth.keywordCount)}`);
-    console.log(`\n  2023 Semrush baseline for comparison: Domain Authority 2, ~28 organic users/mo.`);
+    console.log(`\n  Not directly comparable to the 2023 Semrush baseline (Domain Authority 2, ~28`);
+    console.log(`  organic users/mo) — different vendor, different scale, different metric`);
+    console.log(`  (Moz-style DA 0-100 vs. DataForSEO backlink rank 0-1000; visits vs. traffic $).`);
+    console.log(`  Directionally the domain now has a real backlink profile it didn't in 2023.`);
+    console.log(`  Section B below (actual ranked keywords) is the trustworthy current-state read.`);
   } catch (e) {
     console.log(`  [UNAVAILABLE] ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -75,39 +95,29 @@ async function main() {
     console.log(`  [UNAVAILABLE] ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  // ── Cincinnati, correct-audience seeds ──────────────────────────────────
-  for (const seed of SEEDS_CIN) {
-    hr(`C. CINCINNATI — "${seed}"`);
-    try {
-      const ideas = await keywordResearch(creds, seed, "United States", "English", 100);
-      // The audit finding from last time: filter OUT tenant-intent noise
-      // ("for rent", "apartment for rent") a keyword_ideas pull for a PM seed
-      // will still surface, so the owner/investor signal isn't buried again.
-      const tenantNoise = /\bfor rent\b|\bapartments? for rent\b|\brent(al)? listings?\b/i;
-      const ownerSide = ideas.filter((k) => !tenantNoise.test(k.keyword));
-      const filtered = ideas.length - ownerSide.length;
-      console.log(`  ${ideas.length} ideas returned; ${filtered} look tenant/renter-intent and are excluded below.`);
-      table(ownerSide, 15);
-    } catch (e) {
-      console.log(`  [UNAVAILABLE] ${e instanceof Error ? e.message : String(e)}`);
-    }
+  // ── Cincinnati — the real 2023 curated list, re-priced today ────────────
+  hr("C. CINCINNATI — 2023 CURATED LIST, CURRENT VOLUME/DIFFICULTY/CPC");
+  console.log(`  Same ${TERMS_CIN.length} phrases as the 2023 "Blog Opportunities" sheet (owner/investor`);
+  console.log(`  intent, furnished/short-term specific). Re-priced with today's data.`);
+  try {
+    const metrics = await bulkKeywordMetrics(creds, TERMS_CIN, "United States", "English");
+    table(metrics.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0)), TERMS_CIN.length);
+  } catch (e) {
+    console.log(`  [UNAVAILABLE] ${e instanceof Error ? e.message : String(e)}`);
   }
 
   // ── Louisville — unconfirmed second market ──────────────────────────────
   hr("D. LOUISVILLE — UNCONFIRMED MARKET, per the site footer only");
   console.log(`  The 2021 website copy doc lists two locations: Cincinnati and Louisville.`);
-  console.log(`  No prior keyword research (2022 or 2023) covers Louisville at all. Pulling`);
-  console.log(`  it now so the gap is sized, not just noted — confirm with the client whether`);
+  console.log(`  No prior keyword research (2022 or 2023) covers Louisville at all. Checking`);
+  console.log(`  the ${TERMS_LOU.length} city-qualified terms from the Cincinnati list, swapped to Louisville,`);
+  console.log(`  so the gap is sized, not just noted — confirm with the client whether`);
   console.log(`  Louisville is still active before this drives any sitemap decision.`);
-  for (const seed of SEEDS_LOU) {
-    console.log(`\n  "${seed}"`);
-    try {
-      const ideas = await keywordResearch(creds, seed, "United States", "English", 30);
-      const tenantNoise = /\bfor rent\b|\bapartments? for rent\b/i;
-      table(ideas.filter((k) => !tenantNoise.test(k.keyword)), 8);
-    } catch (e) {
-      console.log(`  [UNAVAILABLE] ${e instanceof Error ? e.message : String(e)}`);
-    }
+  try {
+    const metrics = await bulkKeywordMetrics(creds, TERMS_LOU, "United States", "English");
+    table(metrics.sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0)), TERMS_LOU.length);
+  } catch (e) {
+    console.log(`  [UNAVAILABLE] ${e instanceof Error ? e.message : String(e)}`);
   }
 
   // ── Direct local competitor named in the 2022 sheet ─────────────────────

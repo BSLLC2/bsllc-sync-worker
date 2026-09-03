@@ -438,6 +438,66 @@ export async function keywordGap(
   return gaps.slice(0, limit);
 }
 
+/**
+ * Exact-phrase keyword metrics — search volume, CPC, competition (Keywords
+ * Data API) merged with keyword difficulty (Labs bulk_keyword_difficulty).
+ *
+ * This is deliberately NOT keywordResearch(). That endpoint expands a seed
+ * topically (Google's "related ideas"), so a location-qualified seed like
+ * "property management cincinnati" comes back full of nationally-popular,
+ * geography-blind noise ("rental cars", "porta potty rental") with the local
+ * intent stripped out. Use this instead whenever the caller already has the
+ * exact phrases to check — a curated list, a client's existing sheet, a
+ * competitor's ranked terms — and wants real volume/difficulty for THOSE
+ * phrases, not Google's idea of a related topic.
+ *
+ * Endpoints: POST /v3/keywords_data/google_ads/search_volume/live
+ *            POST /v3/dataforseo_labs/google/bulk_keyword_difficulty/live
+ * Both accept up to 1000 keywords per call; intent/serpFeatures are not
+ * returned by either endpoint and come back null (honest gap, not guessed).
+ */
+export async function bulkKeywordMetrics(
+  creds: DfsCreds,
+  keywords: string[],
+  locationName = "United States",
+  languageName = "English",
+): Promise<KeywordIdea[]> {
+  const list = [...new Set(keywords.map((k) => k.trim()).filter(Boolean))];
+  if (!list.length) return [];
+
+  const [volResp, kdResp] = await Promise.all([
+    post(creds, "/keywords_data/google_ads/search_volume/live", [
+      { keywords: list, location_name: locationName, language_name: languageName },
+    ]),
+    post(creds, "/dataforseo_labs/google/bulk_keyword_difficulty/live", [
+      { keywords: list, location_name: locationName, language_name: languageName },
+    ]),
+  ]);
+
+  const volTask = Array.isArray(volResp?.tasks) ? volResp.tasks[0] : null;
+  if (!volTask || volTask.status_code !== 20000) {
+    throw new Error(volTask?.status_message || "DataForSEO returned no search volume result");
+  }
+  const volItems: any[] = Array.isArray(volTask.result) ? volTask.result : [];
+
+  const kdTask = Array.isArray(kdResp?.tasks) ? kdResp.tasks[0] : null;
+  const kdResult = kdTask?.status_code === 20000 && Array.isArray(kdTask.result) ? kdTask.result[0] : null;
+  const kdItems: any[] = Array.isArray(kdResult?.items) ? kdResult.items : [];
+  const kdByKeyword = new Map<string, number | null>(kdItems.map((it) => [normKw(it?.keyword ?? ""), num(it?.keyword_difficulty)]));
+
+  return volItems
+    .filter((it) => it && typeof it.keyword === "string")
+    .map((it) => ({
+      keyword: it.keyword,
+      volume: num(it.search_volume),
+      cpc: num(it.cpc),
+      competition: num(it.competition),
+      difficulty: kdByKeyword.get(normKw(it.keyword)) ?? null,
+      intent: null,
+      serpFeatures: null,
+    }));
+}
+
 // ── Domain authority / backlinks (Backlinks + Labs) ─────────────────────────
 
 /** Aggregate authority signals for a domain — the SEMrush overview replacement. */
