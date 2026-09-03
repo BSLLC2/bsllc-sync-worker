@@ -25,13 +25,14 @@ const SLA: Record<string, number> = {
   google_ads: 36, ga4: 36, gsc: 36, hubspot: 36, d365: 36, seo: 192, aeo: 192,
   email_import: 3, db_backup: 36, mrr_snapshot: 840, review_email: 2, comment_notify: 2, d365_import: 36, incremental_ads: 36, seo_import: 192, aeo_import: 192, webops_import: 36,
   import_d365: 36, import_ga4: 36, import_gsc: 36, import_hubspot: 36, import_och: 36,
-  incremental_sync: 36, snapshot_plans: 2, offline_conversions: 36,
+  incremental_sync: 36, snapshot_plans: 2, offline_conversions: 36, publish_och_web_leads: 36,
 };
 const LABEL: Record<string, string> = {
   google_ads: "Google Ads", ga4: "GA4", gsc: "Search Console", hubspot: "HubSpot", d365: "Dynamics 365", seo: "SEO ranks", aeo: "AI visibility",
   email_import: "Email import", db_backup: "DB backup", mrr_snapshot: "MRR snapshot", review_email: "Review emails", comment_notify: "Comment alerts", d365_import: "D365 import", incremental_ads: "Ads sync", seo_import: "SEO import", aeo_import: "AEO import", webops_import: "WebOps import",
   import_d365: "D365 import", import_ga4: "GA4 import", import_gsc: "Search Console import", import_hubspot: "HubSpot import", import_och: "OCH admissions import",
   incremental_sync: "Google Ads sync", snapshot_plans: "Plan snapshots", offline_conversions: "Offline conversions (close-the-loop)",
+  publish_och_web_leads: "OCH web-leads tab",
 };
 const label = (s: string) => LABEL[s] ?? s;
 

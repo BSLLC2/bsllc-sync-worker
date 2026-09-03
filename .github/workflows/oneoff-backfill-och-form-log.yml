@@ -1,0 +1,30 @@
+name: One-off — backfill OCH form log into web_inquiries
+
+# Lands the hand-exported OCH form log (Jul 1 – Aug 24 2026) in web_inquiries.
+# Idempotent; dry-run first.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, write nothing (true/false)."
+        required: false
+        default: "true"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Backfill
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run oneoff-backfill-och-form-log -- --dry-run
+          else
+            npm run oneoff-backfill-och-form-log
+          fi

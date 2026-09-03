@@ -1,0 +1,43 @@
+name: Publish OCH web leads to intake sheet
+
+# Rewrites the "BS LLC — Web Leads" tab (ours) in OCH's intake sheet with every
+# website lead on our side and whether it's on their Admission Board yet. Never
+# touches their tabs. Runs after the admissions import; safe to re-run.
+on:
+  schedule:
+    - cron: "45 7 * * *" # 07:45 UTC daily, after import-och (07:30)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: publish-och-web-leads
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Publish
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run publish-och-web-leads -- --dry-run
+          else
+            npm run publish-och-web-leads
+          fi
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=publish_och_web_leads --status=${{ job.status }}

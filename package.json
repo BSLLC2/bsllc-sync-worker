@@ -110,7 +110,9 @@
     "check-och-status": "tsx src/check-och-status.ts",
     "och-revenue-levers": "tsx src/och-revenue-levers.ts",
     "reconcile-och-leads": "tsx src/reconcile-och-leads.ts",
-    "dump-pcc-keywords": "tsx src/dump-pcc-keywords.ts"
+    "dump-pcc-keywords": "tsx src/dump-pcc-keywords.ts",
+    "publish-och-web-leads": "tsx src/publish-och-web-leads.ts",
+    "oneoff-backfill-och-form-log": "tsx src/oneoff-backfill-och-form-log.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
