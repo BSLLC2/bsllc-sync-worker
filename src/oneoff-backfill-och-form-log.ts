@@ -35,6 +35,12 @@ async function main() {
     if (!dryRun) {
       await c.query(`ALTER TABLE web_inquiries ADD COLUMN IF NOT EXISTS form_name TEXT`);
       await c.query(`ALTER TABLE web_inquiries ADD COLUMN IF NOT EXISTS page_url TEXT`);
+      // The (email, dob, gclid) identity index is what silently discarded every
+      // phone-only organic lead after the first — it rejects this backfill for
+      // the same reason. Dropping it is the dashboard's v117 change verbatim;
+      // the deployed app's schema fast-path never re-runs the block that created
+      // it, so this is safe before that deploy and a no-op after.
+      await c.query(`DROP INDEX IF EXISTS uq_web_inquiries_identity`);
     }
     const { rows: existing } = await c.query<{ phone: string | null; submitted_at: Date }>(
       `SELECT phone, submitted_at FROM web_inquiries WHERE client_slug = $1`, [CLIENT],
