@@ -13,6 +13,10 @@ on:
         description: "Parse + print only, write nothing (true/false)."
         required: false
         default: "false"
+      debug_month:
+        description: "Optional YYYY-MM to print that month's referent breakdown (diagnostic only)."
+        required: false
+        default: ""
 
 concurrency:
   group: och-import
@@ -54,12 +58,17 @@ jobs:
           OCH_VALUE_PER_ADMISSION_CENTS: ${{ secrets.OCH_VALUE_PER_ADMISSION_CENTS }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+          DEBUG_MONTH: ${{ inputs.debug_month }}
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run import-och -- --dry-run
-          else
-            npm run import-och
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ -n "$DEBUG_MONTH" ]; then
+            if ! echo "$DEBUG_MONTH" | grep -qE '^[0-9]{4}-[0-9]{2}$'; then
+              echo "debug_month must be YYYY-MM"; exit 1
+            fi
+            ARGS="$ARGS --debug-month=$DEBUG_MONTH"
           fi
+          npm run import-och -- $ARGS
 
       - name: Heartbeat
         if: always()
