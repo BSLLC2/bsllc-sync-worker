@@ -68,5 +68,45 @@ export function parseSheetDate(v: unknown): Date | null {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 }
 
+// ── Admission status classification ─────────────────────────────────────
+// Shared by import-och and import-offline-conversions so both agree on
+// which sheet rows count as an admission. Whole-word tokens, not substring
+// matches: the old regexes turned "Admitted (no insurance)" into a denial
+// via the "no" inside the parenthetical and treated "Discharged" (an
+// admission that already ended) as not admitted. OCH's live vocabulary —
+// "Admitted", "Did Not Admit", "Not Qualified", "Referred Out", "Potential"
+// — all classify correctly here.
+const STATUS_DENY = new Set(["not", "no", "denied", "lost", "inactive", "potential", "referred", "qualified", "tbd"]);
+const STATUS_DENY_PREFIXES = ["declin", "reject"];
+const STATUS_ALLOW = new Set(["admitted", "enrolled", "accepted", "active", "discharged", "won", "y", "yes", "1"]);
+const STATUS_ALLOW_PREFIXES = ["admit", "complete"];
+
+/** True only when the status carries an ALLOW word and no DENY word.
+ *  Parenthetical qualifiers ("Admitted (no insurance)") are dropped before
+ *  tokenizing so a note never negates the disposition. Anything with
+ *  neither kind of word is NOT admitted, and is collected into
+ *  `unrecognized` (when given) so the run can print it once at the end —
+ *  a new label appearing on the sheet should be visible, not silently
+ *  dropped. */
+export function isAdmittedStatus(cell: unknown, unrecognized?: Set<string>): boolean {
+  const raw = String(cell ?? "").trim();
+  const tokens = raw.toLowerCase().replace(/\([^)]*\)/g, " ").split(/[^a-z0-9]+/).filter(Boolean);
+  const deny = tokens.some((t) => STATUS_DENY.has(t) || STATUS_DENY_PREFIXES.some((p) => t.startsWith(p)));
+  const allow = tokens.some((t) => STATUS_ALLOW.has(t) || STATUS_ALLOW_PREFIXES.some((p) => t.startsWith(p)));
+  if (allow && !deny) return true;
+  if (!deny && !allow) unrecognized?.add(raw || "(blank)");
+  return false;
+}
+
+/** Print the statuses isAdmittedStatus couldn't classify — once, at the end
+ *  of a run — so a new sheet label gets added to the lists above instead of
+ *  quietly zeroing out admissions. */
+export function reportUnrecognizedStatuses(unrecognized: Set<string>): void {
+  if (!unrecognized.size) return;
+  console.warn(
+    `Unrecognized status value(s) treated as NOT admitted — add to lead-keys.ts if any is a real admission: ${Array.from(unrecognized).map((s) => `"${s}"`).join(", ")}`,
+  );
+}
+
 export const ymd = (d: Date): string => d.toISOString().slice(0, 10);
 export const ym = (d: Date): string => d.toISOString().slice(0, 7);

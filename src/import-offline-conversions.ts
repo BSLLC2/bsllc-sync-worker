@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { JWT } from "google-auth-library";
 import { GoogleAdsApi } from "google-ads-api";
 import pg from "pg";
-import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd } from "./lead-keys.js";
+import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -113,11 +113,10 @@ function findHeaderRow(rows: string[][]): number {
   }
   return 0;
 }
+/** Statuses isAdmittedStatus couldn't classify this run — printed once after the scan. */
+const unrecognizedStatuses = new Set<string>();
 function isAdmitted(cell: string | undefined): boolean {
-  const s = (cell ?? "").toString().trim().toLowerCase();
-  if (!s) return false;
-  if (/(not|no|declin|deni|reject|lost|inactive)/.test(s)) return false;
-  return /(admit|yes|enroll|accept|active|complete|won)/.test(s) || s === "y" || s === "1";
+  return isAdmittedStatus(cell, unrecognizedStatuses); // shared with import-och
 }
 
 interface Inquiry { gclid: string; phone10: string | null; lastDob: string | null; firstName: string | null; submittedAt: Date; }
@@ -221,6 +220,7 @@ async function main() {
       });
     }
     console.log(`Admissions in the last ${args.lookbackDays}d: ${admissions.length}${admittedNoDate ? ` (${admittedNoDate} admitted row(s) skipped — no admission date filled in)` : ""}`);
+    reportUnrecognizedStatuses(unrecognizedStatuses);
 
     // 3. Match.
     interface Match { gclid: string; date: Date; matchedBy: "phone" | "name_dob"; name: string; }

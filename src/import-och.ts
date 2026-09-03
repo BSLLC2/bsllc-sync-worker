@@ -3,7 +3,7 @@ import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
-import { phone10, lastDobKey, lastNameOf, parseSheetDate, ym as ymOf } from "./lead-keys.js";
+import { phone10, lastDobKey, lastNameOf, parseSheetDate, ym as ymOf, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
  *  header — the source of truth. Matched to the client by slugified name. */
@@ -208,12 +208,11 @@ function findHeaderRow(rows: string[][]): number {
   return 0;
 }
 
+/** Statuses isAdmittedStatus couldn't classify this run — printed once at the end. */
+const unrecognizedStatuses = new Set<string>();
 function isAdmitted(statusCell: string | undefined, hasStatusCol: boolean): boolean {
   if (!hasStatusCol) return true; // sheet lists admissions only
-  const s = (statusCell ?? "").toString().trim().toLowerCase();
-  if (!s) return false;
-  if (/(not|no|declin|deni|reject|lost|inactive)/.test(s)) return false;
-  return /(admit|yes|enroll|accept|active|complete|won)/.test(s) || s === "y" || s === "1";
+  return isAdmittedStatus(statusCell, unrecognizedStatuses); // shared with import-offline-conversions
 }
 
 function isAttributable(referent: string | undefined): boolean {
@@ -355,6 +354,7 @@ async function main() {
   const months = [...byMonth.keys()].sort();
   if (!months.length) throw new Error("Parsed 0 admissions — check the date/status columns.");
   if (skippedFuture) console.log(`Skipped ${skippedFuture} future-dated row(s) (likely a year typo).`);
+  reportUnrecognizedStatuses(unrecognizedStatuses);
   console.log(`Attributable via Referent text: ${attributedByReferent} · via web_inquiries phone/DOB match only (Referent said no/blank): ${attributedByWebInquiryOnly}`);
 
   // Debug aid: print the referent breakdown for a specific month (set via
