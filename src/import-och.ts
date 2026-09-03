@@ -21,6 +21,55 @@ async function customerValueFromDb(databaseUrl: string, slug: string): Promise<n
   }
 }
 
+const digits = (s: string) => (s ?? "").toString().replace(/[^0-9]/g, "");
+// Same "is this a marketing channel" word-set as isAttributable below, applied
+// to a web_inquiries row's own utm_source/utm_medium instead of the sheet's
+// hand-typed Referent -- a gclid alone already implies paid search, so any
+// gclid counts regardless of utm text.
+const ATTRIBUTABLE_UTM_WORDS = new Set([
+  "google", "adwords", "ads", "ppc", "sem", "cpc", "search",
+  "web", "webform", "website", "online", "form", "organic",
+  "facebook", "fb", "meta", "instagram", "ig", "social", "paid", "gbp", "gmb",
+]);
+
+interface WebInquiryMatch { source: string }
+
+/** Every web_inquiries row for this client that carries a gclid OR a
+ *  recognizable marketing utm_source, indexed by phone (last 10 digits) and
+ *  by lastname|dob -- the same two keys import-offline-conversions.ts
+ *  already trusts to tie a Google Ads click to a real admission. Used here
+ *  to grow "attributable" beyond whatever the intake team happened to type
+ *  in the sheet's free-text Referent column: a patient who really came from
+ *  a tracked ad/form/call still counts even if intake logged the CLINICAL
+ *  referral partner that processed their case instead of how they first
+ *  found OCH. */
+async function loadWebInquiryMatchIndex(databaseUrl: string, clientSlug: string): Promise<{ byPhone: Map<string, WebInquiryMatch>; byLastDob: Map<string, WebInquiryMatch> }> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null }>(
+      `SELECT phone, dob, last_name, gclid, utm_source, utm_medium FROM web_inquiries WHERE client_slug = $1`,
+      [clientSlug],
+    );
+    const byPhone = new Map<string, WebInquiryMatch>();
+    const byLastDob = new Map<string, WebInquiryMatch>();
+    for (const r of rows) {
+      const hasGclid = !!(r.gclid && r.gclid.trim());
+      const utmWords = `${r.utm_source ?? ""} ${r.utm_medium ?? ""}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      const utmAttributable = utmWords.some((w) => ATTRIBUTABLE_UTM_WORDS.has(w));
+      if (!hasGclid && !utmAttributable) continue; // not a marketing-tracked lead
+      const source = hasGclid ? "gclid" : `utm:${r.utm_source ?? r.utm_medium}`;
+      const phone10 = r.phone ? digits(r.phone).slice(-10) : "";
+      if (phone10.length === 10) byPhone.set(phone10, { source });
+      const dobDigits = r.dob ? digits(r.dob) : "";
+      if (r.last_name && dobDigits) byLastDob.set(`${r.last_name.trim().toLowerCase()}|${dobDigits}`, { source });
+    }
+    return { byPhone, byLastDob };
+  } finally {
+    await client.end();
+  }
+}
+
 /**
  * Ohio Community Health (OCH) admissions → dashboard revenue tracker.
  *
@@ -231,6 +280,19 @@ async function main() {
   const refCol = findCol(header, ["referent", "referral", "source", "origin", "channel", "how did", "lead"]);
   const statusCol = findCol(header, ["status", "disposition", "outcome", "admitted"]);
   const hasStatusCol = statusCol >= 0 && !dateCols.includes(statusCol);
+  const phoneCol = findCol(header, ["phone"]);
+  const dobCol = findCol(header, ["dob", "birth"]);
+  const nameCol = findCol(header, ["name"]);
+
+  // Cross-check against web_inquiries (real form/gclid captures) so a row can
+  // count as attributable even when intake typed the CLINICAL referral
+  // partner into Referent instead of how the patient actually found OCH —
+  // see loadWebInquiryMatchIndex's comment.
+  const webInquiryIndex = dbUrlForValue ? await loadWebInquiryMatchIndex(dbUrlForValue, args.client).catch((e) => {
+    console.warn(`Could not load web_inquiries for cross-check: ${e instanceof Error ? e.message : e}`);
+    return { byPhone: new Map<string, WebInquiryMatch>(), byLastDob: new Map<string, WebInquiryMatch>() };
+  }) : { byPhone: new Map<string, WebInquiryMatch>(), byLastDob: new Map<string, WebInquiryMatch>() };
+  console.log(`Web-inquiry cross-check index: ${webInquiryIndex.byPhone.size} phone(s), ${webInquiryIndex.byLastDob.size} lastname|dob key(s).`);
 
   console.log(
     `Columns → date:${dateCols.map((c) => header[c]).join(" / ") || "?"} · referent:${refCol >= 0 ? header[refCol] : "?"} · status:${hasStatusCol ? header[statusCol] : "(none — counting all rows)"}`,
@@ -251,6 +313,8 @@ async function main() {
   // doesn't recognize). See DEBUG_MONTH below.
   const referentTallyByMonth = new Map<string, Map<string, number>>();
   let skippedFuture = 0;
+  let attributedByReferent = 0;
+  let attributedByWebInquiryOnly = 0;
   for (let r = hIdx + 1; r < rows.length; r++) {
     const row = rows[r] ?? [];
     if (!row.some((c) => c && c.toString().trim())) continue; // blank row
@@ -272,13 +336,25 @@ async function main() {
     const monthTally = referentTallyByMonth.get(ym) ?? new Map<string, number>();
     monthTally.set(ref, (monthTally.get(ref) ?? 0) + 1);
     referentTallyByMonth.set(ym, monthTally);
-    if (isAttributable(row[refCol])) bucket.attributable += 1;
+    const referentSaysYes = isAttributable(row[refCol]);
+    let webInquiryMatch = false;
+    if (!referentSaysYes) {
+      const phone10 = phoneCol >= 0 ? digits(row[phoneCol] ?? "").slice(-10) : "";
+      const name = nameCol >= 0 ? (row[nameCol] ?? "").toString().trim() : "";
+      const last = name.split(/\s+/).pop()?.toLowerCase() ?? "";
+      const dobDigits = dobCol >= 0 ? digits(row[dobCol] ?? "") : "";
+      if (phone10.length === 10 && webInquiryIndex.byPhone.has(phone10)) webInquiryMatch = true;
+      else if (last && dobDigits && webInquiryIndex.byLastDob.has(`${last}|${dobDigits}`)) webInquiryMatch = true;
+    }
+    if (referentSaysYes) { attributedByReferent++; bucket.attributable += 1; }
+    else if (webInquiryMatch) { attributedByWebInquiryOnly++; bucket.attributable += 1; }
     byMonth.set(ym, bucket);
   }
 
   const months = [...byMonth.keys()].sort();
   if (!months.length) throw new Error("Parsed 0 admissions — check the date/status columns.");
   if (skippedFuture) console.log(`Skipped ${skippedFuture} future-dated row(s) (likely a year typo).`);
+  console.log(`Attributable via Referent text: ${attributedByReferent} · via web_inquiries phone/DOB match only (Referent said no/blank): ${attributedByWebInquiryOnly}`);
 
   // Debug aid: print the referent breakdown for a specific month (set via
   // --debug-month=YYYY-MM) so a month whose attributable count looks wrong
