@@ -1,0 +1,28 @@
+name: Pink Cash Cow keyword audit (READ ONLY)
+
+# Read-only current-data pull from DataForSEO Labs for pinkcashcow.com — the
+# fallback SEO API while Semrush is out of account-wide units. Domain
+# standing, current organic rankings, and owner/investor-intent keyword ideas
+# for Cincinnati and (unconfirmed) Louisville. No writes.
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run keyword audit
+        env:
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run dump-pcc-keywords 2>&1 | tee pcc-keywords.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pcc-keywords
+          path: pcc-keywords.txt

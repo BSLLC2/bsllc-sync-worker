@@ -108,7 +108,8 @@
     "dump-gsc-ohc": "tsx src/dump-gsc-ohc.ts",
     "check-och-status": "tsx src/check-och-status.ts",
     "och-revenue-levers": "tsx src/och-revenue-levers.ts",
-    "reconcile-och-leads": "tsx src/reconcile-och-leads.ts"
+    "reconcile-och-leads": "tsx src/reconcile-och-leads.ts",
+    "dump-pcc-keywords": "tsx src/dump-pcc-keywords.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
