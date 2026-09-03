@@ -1,0 +1,21 @@
+name: Debug — OCH form submissions gap (read-only)
+
+# Reconciles OCH's website form log (36 known submissions) against
+# web_inquiries and the Admission Board sheet. Writes nothing.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Debug
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: npm run debug-och-form-submissions-gap

@@ -66,6 +66,7 @@
     "debug-hubspot-won-deals-missing-schedule": "tsx src/debug-hubspot-won-deals-missing-schedule.ts",
     "debug-gsg-lifetime-value": "tsx src/debug-gsg-lifetime-value.ts",
     "oneoff-backfill-qbo-customer-children": "tsx src/oneoff-backfill-qbo-customer-children.ts",
+    "debug-och-form-submissions-gap": "tsx src/debug-och-form-submissions-gap.ts",
     "import-qbo-invoices-sync": "tsx src/import-qbo-invoices-sync.ts",
     "send-qbo-invoice": "tsx src/send-qbo-invoice.ts",
     "import-qbo-financials": "tsx src/import-qbo-financials.ts",
