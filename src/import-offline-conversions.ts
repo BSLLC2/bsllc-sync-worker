@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { JWT } from "google-auth-library";
 import { GoogleAdsApi } from "google-ads-api";
 import pg from "pg";
+import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd } from "./lead-keys.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -27,7 +28,11 @@ import pg from "pg";
  *     the MCC by account name.
  *   - Conversion action: found by name, else CREATED automatically.
  *   - No inquiries yet (gclids not flowing): logs and exits 0 — nothing to do.
- *   - Idempotent: uq_offline_conv_identity means an admission is uploaded once.
+ *   - Idempotent: one upload per (client, gclid) — a click converts once,
+ *     whichever admission-date column intake happened to fill in first.
+ *   - Only conversions Google actually ACCEPTED are recorded; a rejected row
+ *     (click outside the window, unknown gclid, time before the click) is
+ *     logged and retried on the next run instead of being marked done.
  *
  * Usage:
  *   npm run import-offline-conversions
@@ -38,8 +43,24 @@ import pg from "pg";
 const DEFAULT_SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
 const DEFAULT_CLIENT_SLUG = "ohio-community-health-och";
 const CONVERSION_ACTION_NAME = "Admission (offline)";
-const DEFAULT_LOOKBACK_DAYS = 90; // Ads rejects click conversions older than ~63d; keep a margin.
+// Google only accepts a click conversion inside the conversion action's own
+// click-through window — its default for a new action is 30 days, which is
+// shorter than the inquiry→admission lag we routinely see. The action is
+// created with (and raised to) this window so a 6-week-old click still counts.
+const CLICK_LOOKBACK_DAYS = 90;
+const DEFAULT_LOOKBACK_DAYS = 90;
 const DEFAULT_VALUE_CENTS = 800000; // fallback if the client's Customer value is unset
+// The account's reporting timezone. Conversion times are stamped end-of-day
+// here so they can never land before the click that produced them.
+const ACCOUNT_TZ = "America/New_York";
+
+/** "+HH:MM"/"-HH:MM" UTC offset of ACCOUNT_TZ on a given day (DST-aware). */
+function tzOffsetOn(day: Date): string {
+  const name = new Intl.DateTimeFormat("en-US", { timeZone: ACCOUNT_TZ, timeZoneName: "shortOffset" })
+    .formatToParts(day).find((p) => p.type === "timeZoneName")?.value ?? "GMT-5";
+  const m = name.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+  return m ? `${m[1]}${m[2]!.padStart(2, "0")}:${m[3] ?? "00"}` : "-05:00";
+}
 
 interface Args { dryRun: boolean; customerId: string | null; lookbackDays: number; sheetId: string; clientSlug: string; }
 function parseArgs(argv: string[]): Args {
@@ -92,15 +113,6 @@ function findHeaderRow(rows: string[][]): number {
   }
   return 0;
 }
-function parseDate(v: string | undefined): Date | null {
-  const s = (v ?? "").toString().trim();
-  if (!s) return null;
-  const d = new Date(s);
-  if (!isNaN(d.getTime())) return d;
-  const m = s.match(/(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})/);
-  if (m) { let y = Number(m[3]); if (y < 100) y += 2000; return new Date(Date.UTC(y, Number(m[1]) - 1, Number(m[2]))); }
-  return null;
-}
 function isAdmitted(cell: string | undefined): boolean {
   const s = (cell ?? "").toString().trim().toLowerCase();
   if (!s) return false;
@@ -108,7 +120,7 @@ function isAdmitted(cell: string | undefined): boolean {
   return /(admit|yes|enroll|accept|active|complete|won)/.test(s) || s === "y" || s === "1";
 }
 
-interface Inquiry { gclid: string; phone10: string | null; lastDob: string | null; firstName: string | null; }
+interface Inquiry { gclid: string; phone10: string | null; lastDob: string | null; firstName: string | null; submittedAt: Date; }
 interface Admission { name: string; phone10: string | null; lastDob: string | null; date: Date; }
 
 async function main() {
@@ -130,28 +142,38 @@ async function main() {
     console.log(`Per-admission value: $${valueDollars.toLocaleString()} (${matchClient?.customer_value_cents != null ? "dashboard Customer value" : "default"})`);
 
     // 1. Web inquiries with a gclid.
-    const { rows: inqRows } = await pgc.query<{ gclid: string | null; phone: string | null; dob: string | null; last_name: string | null; first_name: string | null }>(
-      `SELECT gclid, phone, dob, last_name, first_name FROM web_inquiries
-        WHERE client_slug = $1 AND gclid IS NOT NULL AND gclid <> ''`,
+    const { rows: inqRows } = await pgc.query<{ gclid: string | null; phone: string | null; dob: string | null; last_name: string | null; first_name: string | null; submitted_at: Date }>(
+      `SELECT gclid, phone, dob, last_name, first_name, submitted_at FROM web_inquiries
+        WHERE client_slug = $1 AND gclid IS NOT NULL AND gclid <> ''
+        ORDER BY submitted_at DESC`,
       [args.clientSlug],
     );
     const inquiries: Inquiry[] = inqRows.map((r) => ({
       gclid: r.gclid!.trim(),
-      phone10: r.phone ? digits(r.phone).slice(-10) || null : null,
-      lastDob: r.last_name && r.dob ? `${r.last_name.trim().toLowerCase()}|${digits(r.dob)}` : null,
+      phone10: phone10(r.phone),
+      lastDob: lastDobKey(r.last_name, r.dob),
       firstName: r.first_name,
+      submittedAt: new Date(r.submitted_at),
     }));
     console.log(`Web inquiries with a gclid: ${inquiries.length}`);
     if (inquiries.length === 0) {
       console.log("No gclids captured yet — nothing to match. (Confirm the website form is feeding Web Inquiries.) Exiting cleanly.");
       return;
     }
-    const byPhone = new Map<string, Inquiry>();
-    const byNameDob = new Map<string, Inquiry>();
+    // Newest-first lists per key (the query is ordered), so a person who
+    // clicked twice resolves deterministically: the latest click that
+    // happened BEFORE the admission, else the newest overall.
+    const byPhone = new Map<string, Inquiry[]>();
+    const byNameDob = new Map<string, Inquiry[]>();
     for (const i of inquiries) {
-      if (i.phone10) byPhone.set(i.phone10, i);
-      if (i.lastDob) byNameDob.set(i.lastDob, i);
+      if (i.phone10) byPhone.set(i.phone10, [...(byPhone.get(i.phone10) ?? []), i]);
+      if (i.lastDob) byNameDob.set(i.lastDob, [...(byNameDob.get(i.lastDob) ?? []), i]);
     }
+    const pickFor = (list: Inquiry[] | undefined, admitted: Date): Inquiry | undefined => {
+      if (!list?.length) return undefined;
+      const dayAfter = admitted.getTime() + 86_400_000;
+      return list.find((i) => i.submittedAt.getTime() <= dayAfter) ?? list[0];
+    };
 
     // 2. Admissions from the sheet (Admission Board tab).
     const token = await sheetsToken();
@@ -167,27 +189,38 @@ async function main() {
     const phoneCol = findCol(header, ["phone"]);
     const dobCol = findCol(header, ["dob", "birth"]);
     const statusCol = findCol(header, ["status", "admitted", "disposition"]);
-    const dateCol = [
+    // Admission-date columns only, per row (intake fills whichever they have).
+    // Never the inquiry-received date: that can precede the ad click, and
+    // Google rejects a conversion timed before its click.
+    const dateCols = [
       findCol(header, ["scheduled admission"]),
-      findCol(header, ["projected admission", "admission date"]),
-      findCol(header, ["inquiry received", "inquiry"]),
-    ].find((c) => c >= 0) ?? -1;
+      findCol(header, ["projected admission"]),
+      findCol(header, ["admission date", "admit date"]),
+    ].filter((c) => c >= 0).filter((v, i, a) => a.indexOf(v) === i);
+    if (!dateCols.length || nameCol < 0 || (phoneCol < 0 && dobCol < 0)) {
+      throw new Error(`Admission Board header not recognized (header row ${hIdx + 1}: ${header.join(" | ").slice(0, 200)}). Need an admission-date column, a name column and a phone or DOB column.`);
+    }
+    console.log(`Columns → date:${dateCols.map((c) => header[c]).join(" / ")} · name:${header[nameCol]} · phone:${phoneCol >= 0 ? header[phoneCol] : "-"} · dob:${dobCol >= 0 ? header[dobCol] : "-"} · status:${statusCol >= 0 ? header[statusCol] : "(none)"}`);
 
     const cutoff = Date.now() - args.lookbackDays * 86_400_000;
     const admissions: Admission[] = [];
+    let admittedNoDate = 0;
     for (let r = hIdx + 1; r < rows.length; r++) {
       const row = rows[r] ?? [];
       if (statusCol >= 0 && !isAdmitted(row[statusCol])) continue;
-      const date = parseDate(dateCol >= 0 ? row[dateCol] : undefined);
-      if (!date || date.getTime() < cutoff || date.getTime() > Date.now()) continue; // recent, non-future only
+      let date: Date | null = null;
+      for (const dc of dateCols) { date = parseSheetDate(row[dc]); if (date) break; }
+      if (!date) { admittedNoDate++; continue; }
+      if (date.getTime() < cutoff || date.getTime() > Date.now()) continue; // recent, non-future only
       const name = (row[nameCol] ?? "").toString().trim();
-      const phone10 = phoneCol >= 0 ? digits(row[phoneCol] ?? "").slice(-10) || null : null;
-      const last = name.split(/\s+/).pop()?.toLowerCase() ?? "";
-      const dob = dobCol >= 0 ? digits(row[dobCol] ?? "") : "";
-      const lastDob = last && dob ? `${last}|${dob}` : null;
-      admissions.push({ name, phone10, lastDob, date });
+      admissions.push({
+        name,
+        phone10: phoneCol >= 0 ? phone10(row[phoneCol]) : null,
+        lastDob: dobCol >= 0 ? lastDobKey(lastNameOf(name), row[dobCol]) : null,
+        date,
+      });
     }
-    console.log(`Admissions in the last ${args.lookbackDays}d: ${admissions.length}`);
+    console.log(`Admissions in the last ${args.lookbackDays}d: ${admissions.length}${admittedNoDate ? ` (${admittedNoDate} admitted row(s) skipped — no admission date filled in)` : ""}`);
 
     // 3. Match.
     interface Match { gclid: string; date: Date; matchedBy: "phone" | "name_dob"; name: string; }
@@ -195,8 +228,8 @@ async function main() {
     for (const a of admissions) {
       let inq: Inquiry | undefined;
       let by: "phone" | "name_dob" | null = null;
-      if (a.phone10 && byPhone.has(a.phone10)) { inq = byPhone.get(a.phone10); by = "phone"; }
-      else if (a.lastDob && byNameDob.has(a.lastDob)) { inq = byNameDob.get(a.lastDob); by = "name_dob"; }
+      if (a.phone10 && byPhone.has(a.phone10)) { inq = pickFor(byPhone.get(a.phone10), a.date); by = "phone"; }
+      else if (a.lastDob && byNameDob.has(a.lastDob)) { inq = pickFor(byNameDob.get(a.lastDob), a.date); by = "name_dob"; }
       if (inq && by) matches.push({ gclid: inq.gclid, date: a.date, matchedBy: by, name: a.name });
     }
     console.log(`Matched admissions ↔ ad clicks: ${matches.length}`);
@@ -205,13 +238,13 @@ async function main() {
       return;
     }
 
-    // 4. Drop ones we've already uploaded (idempotent).
+    // 4. Drop clicks we've already converted (idempotent): one admission per
+    // click, regardless of which admission-date column intake filled in when.
     const fresh: Match[] = [];
     for (const m of matches) {
-      const ymd = m.date.toISOString().slice(0, 10);
       const { rows: seen } = await pgc.query(
-        "SELECT 1 FROM offline_conversion_uploads WHERE client_slug=$1 AND gclid=$2 AND admission_date=$3",
-        [args.clientSlug, m.gclid, ymd],
+        "SELECT 1 FROM offline_conversion_uploads WHERE client_slug=$1 AND gclid=$2",
+        [args.clientSlug, m.gclid],
       );
       if (seen.length === 0) fresh.push(m);
     }
@@ -219,7 +252,7 @@ async function main() {
     if (fresh.length === 0) { console.log("All matches already uploaded. Exiting cleanly."); return; }
 
     if (args.dryRun) {
-      for (const m of fresh.slice(0, 25)) console.log(`  ${m.date.toISOString().slice(0, 10)} · ${m.name} · gclid=${m.gclid.slice(0, 12)}… · via ${m.matchedBy} · $${valueDollars.toLocaleString()}`);
+      for (const m of fresh.slice(0, 25)) console.log(`  ${ymd(m.date)} · ${m.name} · gclid=${m.gclid.slice(0, 12)}… · via ${m.matchedBy} · $${valueDollars.toLocaleString()}`);
       console.log("Dry run — no upload, nothing recorded.");
       return;
     }
@@ -264,11 +297,22 @@ async function main() {
     // Find or create the "Admission (offline)" conversion action.
     let actionResource: string | null = null;
     const existing = await customer.query(
-      `SELECT conversion_action.resource_name, conversion_action.name FROM conversion_action WHERE conversion_action.name = '${CONVERSION_ACTION_NAME}'`,
+      `SELECT conversion_action.resource_name, conversion_action.name, conversion_action.click_through_lookback_window_days FROM conversion_action WHERE conversion_action.name = '${CONVERSION_ACTION_NAME}'`,
     );
     if (existing.length > 0) {
       actionResource = (existing[0] as any)?.conversion_action?.resource_name ?? null;
-      console.log(`Using existing conversion action: ${actionResource}`);
+      const windowDays = Number((existing[0] as any)?.conversion_action?.click_through_lookback_window_days ?? 0);
+      console.log(`Using existing conversion action: ${actionResource} (click-through window ${windowDays || "default/unknown"}d)`);
+      // A window shorter than our lookback silently rejects every conversion
+      // whose click is older than it — raise it, or say loudly that we couldn't.
+      if (actionResource && windowDays > 0 && windowDays < CLICK_LOOKBACK_DAYS) {
+        try {
+          await customer.conversionActions.update([{ resource_name: actionResource, click_through_lookback_window_days: CLICK_LOOKBACK_DAYS } as any]);
+          console.log(`Raised click-through window ${windowDays}d → ${CLICK_LOOKBACK_DAYS}d.`);
+        } catch (e: any) {
+          console.warn(`Could not raise the click-through window (${windowDays}d < ${CLICK_LOOKBACK_DAYS}d): ${e?.errors?.map((x: any) => x.message).join("; ") || e?.message || e}. Raise it by hand in Google Ads → Conversions → "${CONVERSION_ACTION_NAME}" or clicks older than ${windowDays}d will keep being rejected.`);
+        }
+      }
     } else {
       console.log(`Creating conversion action "${CONVERSION_ACTION_NAME}"…`);
       const created = await customer.conversionActions.create([
@@ -279,6 +323,7 @@ async function main() {
           status: "ENABLED" as any,
           value_settings: { default_value: valueDollars, always_use_default_value: false },
           counting_type: "ONE_PER_CLICK" as any,
+          click_through_lookback_window_days: CLICK_LOOKBACK_DAYS,
         } as any,
       ]);
       actionResource = (created as any).results?.[0]?.resource_name ?? null;
@@ -286,14 +331,16 @@ async function main() {
       console.log(`Created conversion action: ${actionResource}`);
     }
 
-    // Build + upload click conversions.
+    // Build + upload click conversions. Timed end-of-day in the account's
+    // timezone on the admission date, so the conversion is always after the
+    // click that produced it.
     const conversions = fresh.map((m) => ({
       gclid: m.gclid,
       conversion_action: actionResource!,
-      conversion_date_time: `${m.date.toISOString().slice(0, 10)} 12:00:00+00:00`,
+      conversion_date_time: `${ymd(m.date)} 23:59:59${tzOffsetOn(new Date(`${ymd(m.date)}T12:00:00Z`))}`,
       conversion_value: valueDollars,
       currency_code: "USD",
-      order_id: `och-${m.gclid.slice(0, 20)}-${m.date.toISOString().slice(0, 10)}`,
+      order_id: `och-${m.gclid.slice(0, 20)}-${ymd(m.date)}`,
     }));
 
     const resp: any = await customer.conversionUploads.uploadClickConversions({
@@ -303,20 +350,41 @@ async function main() {
       validate_only: false,
     } as any);
 
-    // Record successes (partial_failure means some may have been rejected).
-    const failureMsg = resp?.partial_failure_error?.message;
-    if (failureMsg) console.warn(`Partial failures from Google Ads: ${failureMsg}`);
+    // Record ONLY what Google accepted. With partial_failure, results[] is
+    // index-aligned with the request and a rejected row comes back empty; the
+    // error details name the rejected indexes too. Anything rejected stays
+    // unrecorded so the next run retries it (and the log says why).
+    const failureMsg: string | undefined = resp?.partial_failure_error?.message;
+    const results: any[] = Array.isArray(resp?.results) ? resp.results : [];
+    const rejected = new Map<number, string>();
+    for (const d of resp?.partial_failure_error?.details ?? []) {
+      for (const err of d?.errors ?? []) {
+        for (const p of err?.location?.field_path_elements ?? []) {
+          if (p?.field_name === "conversions" && typeof p?.index === "number") rejected.set(p.index, err?.message ?? "rejected");
+        }
+      }
+    }
+    const accepted = (i: number): boolean => {
+      if (rejected.has(i)) return false;
+      if (results.length) return Boolean(results[i]?.gclid || results[i]?.conversion_action);
+      return !failureMsg;
+    };
+    if (failureMsg) console.warn(`Google Ads reported partial failures: ${failureMsg}`);
     let recorded = 0;
-    for (const m of fresh) {
-      const ymd = m.date.toISOString().slice(0, 10);
+    fresh.forEach((m, i) => {
+      if (!accepted(i)) { console.warn(`  ✗ ${ymd(m.date)} · ${m.name} · gclid=${m.gclid.slice(0, 12)}… — ${rejected.get(i) ?? "not accepted"} (will retry next run)`); return; }
+      recorded++;
+    });
+    for (let i = 0; i < fresh.length; i++) {
+      if (!accepted(i)) continue;
+      const m = fresh[i]!;
       await pgc.query(
         `INSERT INTO offline_conversion_uploads (id, client_slug, gclid, conversion_action, admission_date, value_cents, matched_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
-        [randomUUID(), args.clientSlug, m.gclid, actionResource, ymd, valueCents, m.matchedBy],
+        [randomUUID(), args.clientSlug, m.gclid, actionResource, ymd(m.date), valueCents, m.matchedBy],
       );
-      recorded++;
     }
-    console.log(`Uploaded ${conversions.length} conversion(s) to Google Ads (${customerId}); recorded ${recorded}. The loop is closed — Google now optimizes toward admissions.`);
+    console.log(`Sent ${conversions.length} conversion(s) to Google Ads (${customerId}); accepted + recorded ${recorded}, rejected ${conversions.length - recorded}.${recorded ? " The loop is closed — Google now optimizes toward admissions." : ""}`);
   } finally {
     await pgc.end();
   }

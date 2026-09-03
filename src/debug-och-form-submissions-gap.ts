@@ -111,7 +111,8 @@ async function sheetRows(): Promise<string[][]> {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) throw new Error(`Sheets ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return ((await res.json()).values ?? []) as string[][];
+  const body = (await res.json()) as { values?: string[][] };
+  return body.values ?? [];
 }
 const findCol = (header: string[], needles: string[]) => {
   const norm = header.map((h) => String(h ?? "").trim().toLowerCase());

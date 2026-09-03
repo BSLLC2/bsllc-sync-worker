@@ -3,6 +3,7 @@ import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
+import { phone10, lastDobKey, lastNameOf, parseSheetDate, ym as ymOf } from "./lead-keys.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
  *  header — the source of truth. Matched to the client by slugified name. */
@@ -21,7 +22,6 @@ async function customerValueFromDb(databaseUrl: string, slug: string): Promise<n
   }
 }
 
-const digits = (s: string) => (s ?? "").toString().replace(/[^0-9]/g, "");
 // Same "is this a marketing channel" word-set as isAttributable below, applied
 // to a web_inquiries row's own utm_source/utm_medium instead of the sheet's
 // hand-typed Referent -- a gclid alone already implies paid search, so any
@@ -32,7 +32,18 @@ const ATTRIBUTABLE_UTM_WORDS = new Set([
   "facebook", "fb", "meta", "instagram", "ig", "social", "paid", "gbp", "gmb",
 ]);
 
-interface WebInquiryMatch { source: string }
+interface WebInquiryMatch { source: string; submittedAt: Date }
+type WebInquiryIndex = { byPhone: Map<string, WebInquiryMatch[]>; byLastDob: Map<string, WebInquiryMatch[]> };
+
+// A web lead only explains an admission that came AFTER it and reasonably
+// soon after it — an inquiry from a year earlier doesn't make this month's
+// professional referral "ours".
+const MATCH_WINDOW_DAYS = 180;
+function inquiryExplains(list: WebInquiryMatch[] | undefined, admitted: Date): boolean {
+  if (!list?.length) return false;
+  const t = admitted.getTime();
+  return list.some((m) => m.submittedAt.getTime() <= t + 86_400_000 && m.submittedAt.getTime() >= t - MATCH_WINDOW_DAYS * 86_400_000);
+}
 
 /** Every web_inquiries row for this client that carries a gclid OR a
  *  recognizable marketing utm_source, indexed by phone (last 10 digits) and
@@ -43,26 +54,26 @@ interface WebInquiryMatch { source: string }
  *  a tracked ad/form/call still counts even if intake logged the CLINICAL
  *  referral partner that processed their case instead of how they first
  *  found OCH. */
-async function loadWebInquiryMatchIndex(databaseUrl: string, clientSlug: string): Promise<{ byPhone: Map<string, WebInquiryMatch>; byLastDob: Map<string, WebInquiryMatch> }> {
+async function loadWebInquiryMatchIndex(databaseUrl: string, clientSlug: string): Promise<WebInquiryIndex> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null }>(
-      `SELECT phone, dob, last_name, gclid, utm_source, utm_medium FROM web_inquiries WHERE client_slug = $1`,
+    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null; submitted_at: Date }>(
+      `SELECT phone, dob, last_name, gclid, utm_source, utm_medium, submitted_at FROM web_inquiries WHERE client_slug = $1`,
       [clientSlug],
     );
-    const byPhone = new Map<string, WebInquiryMatch>();
-    const byLastDob = new Map<string, WebInquiryMatch>();
+    const byPhone = new Map<string, WebInquiryMatch[]>();
+    const byLastDob = new Map<string, WebInquiryMatch[]>();
     for (const r of rows) {
       const hasGclid = !!(r.gclid && r.gclid.trim());
       const utmWords = `${r.utm_source ?? ""} ${r.utm_medium ?? ""}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
       const utmAttributable = utmWords.some((w) => ATTRIBUTABLE_UTM_WORDS.has(w));
       if (!hasGclid && !utmAttributable) continue; // not a marketing-tracked lead
-      const source = hasGclid ? "gclid" : `utm:${r.utm_source ?? r.utm_medium}`;
-      const phone10 = r.phone ? digits(r.phone).slice(-10) : "";
-      if (phone10.length === 10) byPhone.set(phone10, { source });
-      const dobDigits = r.dob ? digits(r.dob) : "";
-      if (r.last_name && dobDigits) byLastDob.set(`${r.last_name.trim().toLowerCase()}|${dobDigits}`, { source });
+      const match: WebInquiryMatch = { source: hasGclid ? "gclid" : `utm:${r.utm_source ?? r.utm_medium}`, submittedAt: new Date(r.submitted_at) };
+      const p = phone10(r.phone);
+      if (p) byPhone.set(p, [...(byPhone.get(p) ?? []), match]);
+      const ld = lastDobKey(r.last_name, r.dob);
+      if (ld) byLastDob.set(ld, [...(byLastDob.get(ld) ?? []), match]);
     }
     return { byPhone, byLastDob };
   } finally {
@@ -197,22 +208,6 @@ function findHeaderRow(rows: string[][]): number {
   return 0;
 }
 
-function parseDateToMonth(v: string): string | null {
-  const s = (v ?? "").toString().trim();
-  if (!s) return null;
-  // Handles "2025-06-14", "6/14/2025", "June 14, 2025", "14-Jun-25", etc.
-  const d = new Date(s);
-  if (!isNaN(d.getTime())) return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-  // Fallback: MM/DD/YYYY or M/D/YY
-  const m = s.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (m) {
-    let yr = Number(m[3]);
-    if (yr < 100) yr += 2000;
-    return `${yr}-${String(Number(m[1])).padStart(2, "0")}`;
-  }
-  return null;
-}
-
 function isAdmitted(statusCell: string | undefined, hasStatusCol: boolean): boolean {
   if (!hasStatusCol) return true; // sheet lists admissions only
   const s = (statusCell ?? "").toString().trim().toLowerCase();
@@ -244,8 +239,12 @@ async function main() {
   // the UI. Override anytime with OCH_VALUE_PER_ADMISSION_CENTS (a real figure).
   const DEFAULT_VALUE_PER_ADMISSION_CENTS = 800000;
   // Priority: the editable dashboard "Customer value" field → env override → default.
+  // Deliberately NOT caught: a transient DB failure here used to fall back to
+  // the default value and an empty cross-check index, then write LOWER numbers
+  // with a fresh synced_at (which wins "latest") and exit 0. Failing loudly
+  // trips the heartbeat and the freshness alert instead.
   const dbUrlForValue = process.env.DATABASE_URL?.trim();
-  const dbValue = dbUrlForValue ? await customerValueFromDb(dbUrlForValue, args.client).catch(() => null) : null;
+  const dbValue = dbUrlForValue ? await customerValueFromDb(dbUrlForValue, args.client) : null;
   const valueCents = dbValue
     ?? (process.env.OCH_VALUE_PER_ADMISSION_CENTS ? Math.round(Number(process.env.OCH_VALUE_PER_ADMISSION_CENTS)) : DEFAULT_VALUE_PER_ADMISSION_CENTS);
   console.log(`Value per admission: $${(valueCents / 100).toLocaleString()} (${dbValue != null ? "from dashboard Customer value" : "default/env"})`);
@@ -253,10 +252,12 @@ async function main() {
   console.log(`OCH admissions import — sheet ${args.sheetId}${args.dryRun ? " (dry-run)" : ""}`);
   const token = await sheetsToken();
 
-  // Resolve the tab to read (first tab unless --tab given).
+  // Resolve the tab to read: --tab, else the tab NAMED for admissions, else
+  // the first tab. By name, not position — someone dragging "Web Inquiries"
+  // to the front would otherwise turn every form fill into an admission.
   const meta = await sheetsGet(token, `${args.sheetId}?fields=sheets.properties.title`);
   const tabs: string[] = (meta.sheets ?? []).map((s: any) => s.properties?.title).filter(Boolean);
-  const tab = args.tab ?? tabs[0];
+  const tab = args.tab ?? tabs.find((t) => /admission/i.test(t)) ?? tabs[0];
   if (!tab) throw new Error("No sheets found in the spreadsheet.");
   console.log(`Reading tab "${tab}" (available: ${tabs.join(", ") || "none"})`);
 
@@ -288,10 +289,11 @@ async function main() {
   // count as attributable even when intake typed the CLINICAL referral
   // partner into Referent instead of how the patient actually found OCH —
   // see loadWebInquiryMatchIndex's comment.
-  const webInquiryIndex = dbUrlForValue ? await loadWebInquiryMatchIndex(dbUrlForValue, args.client).catch((e) => {
-    console.warn(`Could not load web_inquiries for cross-check: ${e instanceof Error ? e.message : e}`);
-    return { byPhone: new Map<string, WebInquiryMatch>(), byLastDob: new Map<string, WebInquiryMatch>() };
-  }) : { byPhone: new Map<string, WebInquiryMatch>(), byLastDob: new Map<string, WebInquiryMatch>() };
+  // Not caught either (see customerValueFromDb above): an empty index would
+  // silently drop every web-inquiry-only attribution for the month.
+  const webInquiryIndex: WebInquiryIndex = dbUrlForValue
+    ? await loadWebInquiryMatchIndex(dbUrlForValue, args.client)
+    : { byPhone: new Map(), byLastDob: new Map() };
   console.log(`Web-inquiry cross-check index: ${webInquiryIndex.byPhone.size} phone(s), ${webInquiryIndex.byLastDob.size} lastname|dob key(s).`);
 
   console.log(
@@ -319,12 +321,13 @@ async function main() {
     const row = rows[r] ?? [];
     if (!row.some((c) => c && c.toString().trim())) continue; // blank row
     if (!isAdmitted(row[statusCol], hasStatusCol)) continue;
-    let ym: string | null = null;
+    let admittedOn: Date | null = null;
     for (const dc of dateCols) {
-      ym = parseDateToMonth(row[dc] ?? "");
-      if (ym) break;
+      admittedOn = parseSheetDate(row[dc]);
+      if (admittedOn) break;
     }
-    if (!ym) continue;
+    if (!admittedOn) continue;
+    const ym = ymOf(admittedOn);
     // Skip the CURRENT (incomplete) month and anything future: the board reads
     // the last complete month, so a partial August or a "2027" typo would only
     // add a future-dated row that gets filtered out anyway.
@@ -339,12 +342,10 @@ async function main() {
     const referentSaysYes = isAttributable(row[refCol]);
     let webInquiryMatch = false;
     if (!referentSaysYes) {
-      const phone10 = phoneCol >= 0 ? digits(row[phoneCol] ?? "").slice(-10) : "";
-      const name = nameCol >= 0 ? (row[nameCol] ?? "").toString().trim() : "";
-      const last = name.split(/\s+/).pop()?.toLowerCase() ?? "";
-      const dobDigits = dobCol >= 0 ? digits(row[dobCol] ?? "") : "";
-      if (phone10.length === 10 && webInquiryIndex.byPhone.has(phone10)) webInquiryMatch = true;
-      else if (last && dobDigits && webInquiryIndex.byLastDob.has(`${last}|${dobDigits}`)) webInquiryMatch = true;
+      const p = phoneCol >= 0 ? phone10(row[phoneCol]) : null;
+      const ld = nameCol >= 0 && dobCol >= 0 ? lastDobKey(lastNameOf(row[nameCol]), row[dobCol]) : null;
+      if (p && inquiryExplains(webInquiryIndex.byPhone.get(p), admittedOn)) webInquiryMatch = true;
+      else if (ld && inquiryExplains(webInquiryIndex.byLastDob.get(ld), admittedOn)) webInquiryMatch = true;
     }
     if (referentSaysYes) { attributedByReferent++; bucket.attributable += 1; }
     else if (webInquiryMatch) { attributedByWebInquiryOnly++; bucket.attributable += 1; }

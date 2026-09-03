@@ -3,6 +3,7 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { JWT } from "google-auth-library";
 import pg from "pg";
+import { normalizeDob, phone10 } from "./lead-keys.js";
 
 /**
  * Web inquiries (paid/organic form fills) → dashboard `web_inquiries` table.
@@ -17,9 +18,12 @@ import pg from "pg";
  *
  * Architecture note: the worker owns the write (CLAUDE.md — the deployed app
  * only reads Postgres; a separate sync process writes). Ingestion is idempotent
- * via uq_web_inquiries_identity, so this is safe to run on a daily schedule and
- * safe to run alongside the live /api/webform webhook — a person captured by
- * both paths is stored once.
+ * — a person already captured by the live /api/webform webhook (same email, or
+ * same phone when there's no email, with the same gclid) is not inserted again
+ * — so this is safe to re-run and safe to run alongside the webhook. (The old
+ * uq_web_inquiries_identity index this used to lean on was dropped in the
+ * dashboard's schema v117: it keyed on email+dob+gclid and collapsed every
+ * phone-only organic lead into one row.)
  *
  * Prereqs (one-time):
  *   1. Share the sheet (Viewer) with the service account's client_email.
@@ -190,7 +194,7 @@ async function main() {
       lastName: cell(row, cols.lastName),
       email,
       phone: cell(row, cols.phone),
-      dob: cell(row, cols.dob),
+      dob: normalizeDob(cell(row, cols.dob)),
       gclid,
       utmSource: cell(row, cols.utmSource),
       utmMedium: cell(row, cols.utmMedium),
@@ -219,16 +223,30 @@ async function main() {
   let skipped = 0;
   try {
     for (const p of parsed) {
+      // Skip anyone the webhook (or an earlier run) already stored: same
+      // email — or same phone when the row has no email — with the same gclid.
+      const emailKey = p.email?.trim().toLowerCase() || null;
+      const phoneKey = phone10(p.phone);
       const res = await client.query(
         `INSERT INTO web_inquiries
            (id, client_slug, first_name, last_name, email, phone, dob, gclid,
             utm_source, utm_medium, utm_campaign, utm_content, utm_term, raw_json, submitted_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, COALESCE($15, now()))
-         ON CONFLICT DO NOTHING`,
+         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, COALESCE($15, now())
+          WHERE NOT EXISTS (
+            SELECT 1 FROM web_inquiries w
+             WHERE w.client_slug = $2
+               AND coalesce(w.gclid, '') = coalesce($8, '')
+               AND (
+                 ($16::text IS NOT NULL AND lower(coalesce(w.email, '')) = $16::text)
+                 OR ($16::text IS NULL AND $17::text IS NOT NULL
+                     AND right(regexp_replace(coalesce(w.phone, ''), '[^0-9]', '', 'g'), 10) = $17::text)
+               )
+          )`,
         [
           randomUUID(), args.client, p.firstName, p.lastName, p.email, p.phone, p.dob, p.gclid,
           p.utmSource, p.utmMedium, p.utmCampaign, p.utmContent, p.utmTerm,
           JSON.stringify({ source: "sheet:Web Inquiries" }), p.submittedAt,
+          emailKey, phoneKey,
         ],
       );
       if (res.rowCount && res.rowCount > 0) inserted++;

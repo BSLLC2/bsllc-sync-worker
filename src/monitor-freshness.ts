@@ -75,6 +75,42 @@ async function main() {
     );
     const beats = await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats WHERE job <> 'freshness_monitor'`);
 
+    // Website leads per client. Every importer above reports "ok" on an empty
+    // input, so a client's form losing its webhook action (or a rotated
+    // WEBFORM_SECRET) never showed up anywhere — OCH ran that way for weeks.
+    // A client that has had leads in the last 90 days and none inside its
+    // SLA is "not flowing"; the same for ad-click leads that stop turning
+    // into offline-conversion uploads. Internal test submissions excluded.
+    const LEAD_SLA_H: Record<string, number> = { "ohio-community-health-och": 7 * 24 };
+    const LEAD_DEFAULT_SLA_H = 14 * 24;
+    const UPLOAD_SLA_H = 45 * 24;
+    let leadRows: { client_slug: string; last_lead: Date; n90: string; gclid30: string }[] = [];
+    try {
+      leadRows = (await c.query<{ client_slug: string; last_lead: Date; n90: string; gclid30: string }>(
+        `SELECT client_slug, MAX(submitted_at) AS last_lead,
+                COUNT(*) FILTER (WHERE submitted_at > now() - interval '90 days') AS n90,
+                COUNT(*) FILTER (WHERE gclid IS NOT NULL AND gclid <> '' AND submitted_at > now() - interval '30 days') AS gclid30
+           FROM web_inquiries
+          WHERE email IS NULL OR (email NOT ILIKE '%@bsllc.biz' AND email NOT IN ('sebastienhue@gmail.com', 'test-inquiry@bsllc.biz'))
+          GROUP BY client_slug`,
+      )).rows;
+    } catch { /* table not present yet */ }
+    const lastUpload = new Map<string, Date>();
+    try {
+      const col = (await c.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'offline_conversion_uploads' AND column_name IN ('uploaded_at', 'created_at') ORDER BY column_name DESC LIMIT 1`,
+      )).rows[0]?.column_name;
+      if (col) {
+        for (const r of (await c.query<{ client_slug: string; last: Date }>(`SELECT client_slug, MAX(${col}) AS last FROM offline_conversion_uploads GROUP BY client_slug`)).rows) lastUpload.set(r.client_slug, r.last);
+      }
+    } catch { /* table not present yet */ }
+    const clientNames = new Map<string, string>();
+    try {
+      const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      for (const r of (await c.query<{ name: string }>(`SELECT name FROM clients`)).rows) clientNames.set(slugify(r.name), r.name);
+    } catch { /* ignore */ }
+    const clientLabel = (slug: string) => clientNames.get(slug) ?? slug;
+
     // Subcontractor insurance (COI) expiring within 30 days or already lapsed —
     // so a sub never works uninsured. Table may not exist yet on older DBs.
     let coiRows: { name: string; expires_at: string; days: number }[] = [];
@@ -109,6 +145,21 @@ async function main() {
       const ageH = b.ran_at ? (now - b.ran_at.getTime()) / 3_600_000 : Infinity;
       if (!b.ok || ageH < -FUTURE_SKEW_H || ageH > (SLA[b.job] ?? 36)) down.push(b.job);
     }
+    const noLeads: { slug: string; ageH: number }[] = [];
+    const noUploads: { slug: string; gclid30: number; lastUpload: Date | null }[] = [];
+    for (const r of leadRows) {
+      if (Number(r.n90) === 0) continue; // never had leads recently — nothing to expect
+      const ageH = (now - new Date(r.last_lead).getTime()) / 3_600_000;
+      if (ageH < -FUTURE_SKEW_H || ageH > (LEAD_SLA_H[r.client_slug] ?? LEAD_DEFAULT_SLA_H)) noLeads.push({ slug: r.client_slug, ageH });
+      const gclid30 = Number(r.gclid30);
+      if (gclid30 > 0) {
+        const lu = lastUpload.get(r.client_slug) ?? null;
+        const upAgeH = lu ? (now - new Date(lu).getTime()) / 3_600_000 : Infinity;
+        if (upAgeH > UPLOAD_SLA_H) noUploads.push({ slug: r.client_slug, gclid30, lastUpload: lu });
+      }
+    }
+    if (noLeads.length) console.log(`No new website leads: ${noLeads.map((l) => `${clientLabel(l.slug)} (${Math.round(l.ageH / 24)}d)`).join(", ")}`);
+    if (noUploads.length) console.log(`Ad-click leads without offline-conversion uploads: ${noUploads.map((u) => `${clientLabel(u.slug)} (${u.gclid30} gclid leads/30d, last upload ${u.lastUpload ? `${Math.round((now - new Date(u.lastUpload).getTime()) / 86_400_000)}d ago` : "never"})`).join(", ")}`);
 
     if (errDetail.rows.length) {
       console.log("Erroring client readings (latest per client/metric):");
@@ -125,6 +176,8 @@ async function main() {
       ...down.map((s) => `D:${s}`),
       ...erroring.map((e) => `E:${e.src}`),
       ...coiAlerts.map((r) => `C:${r.name}:${r.days < 0 ? "exp" : r.days <= 7 ? "7" : "30"}`),
+      ...noLeads.map((l) => `L:${l.slug}`),
+      ...noUploads.map((u) => `U:${u.slug}`),
     ].sort().join(",");
     const prevRow = (await c.query<{ note: string | null; ran_at: Date }>(`SELECT note, ran_at FROM job_heartbeats WHERE job = 'freshness_monitor'`)).rows[0];
     const prev = prevRow?.note ?? "";
@@ -138,7 +191,7 @@ async function main() {
     const REMIND_AFTER_H = 24;
     const prevAgeH = prevRow?.ran_at ? (now - new Date(prevRow.ran_at).getTime()) / 3_600_000 : Infinity;
     const unchanged = signature === prev;
-    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0;
+    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0 || noLeads.length > 0 || noUploads.length > 0;
     const dueForReminder = unchanged && stillDown && prevAgeH >= REMIND_AFTER_H;
     if (unchanged && !dueForReminder) { console.log("No change — no alert."); return; }
 
@@ -147,10 +200,12 @@ async function main() {
       : "";
 
     let text: string | null = null;
-    if (down.length || erroring.length || coiAlerts.length) {
+    if (down.length || erroring.length || coiAlerts.length || noLeads.length || noUploads.length) {
       const parts: string[] = [];
       if (down.length) parts.push(`:red_circle: *Not flowing:* ${down.map(label).join(", ")}`);
       if (erroring.length) parts.push(`:large_orange_circle: *Account errors:* ${erroring.map((e) => `${label(e.src)} (${e.n}/${e.m})`).join(", ")}`);
+      if (noLeads.length) parts.push(`:mailbox_with_no_mail: *No new website leads:* ${noLeads.map((l) => `${clientLabel(l.slug)} (last ${Math.round(l.ageH / 24)}d ago — check every form on the site still posts to the webhook)`).join(", ")}`);
+      if (noUploads.length) parts.push(`:repeat: *Ad-click leads not reaching Google as admissions:* ${noUploads.map((u) => `${clientLabel(u.slug)} (${u.gclid30} gclid leads in 30d, last upload ${u.lastUpload ? `${Math.round((now - new Date(u.lastUpload).getTime()) / 86_400_000)}d ago` : "never"})`).join(", ")}`);
       if (coiLine) parts.push(coiLine);
       const headline = dueForReminder ? ":satellite: *Data health — still unresolved*" : ":satellite: *Data health changed*";
       text = `${headline}\n${parts.join("\n")}\n<${DASH}/#/admin/data-health|Open Data health →>`;
