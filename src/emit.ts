@@ -18,6 +18,20 @@ export interface SyncEntry {
   metrics: Record<string, number | string | boolean | null>;
 }
 
+/** One per-admission record behind a monthly admissions rollup — an explicit
+ *  dashboard drill-down click reads these; see admissions in the dashboard's
+ *  shared/schema.ts. Optional and additive: omitting it changes nothing. */
+export interface AdmissionRecord {
+  client_id: string;
+  admitted_on: string;
+  name: string | null;
+  phone: string | null;
+  dob: string | null;
+  referent: string | null;
+  attributable: boolean;
+  attribution_source: string | null;
+}
+
 /**
  * Write the payload to a temp file and hand it to the dashboard's `npm run sync`.
  * The worker owns zero database writes — sync.ts validates and inserts. Returns
@@ -27,11 +41,12 @@ export function runDashboardSync(
   cfg: Pick<Config, "dashboardDir" | "databaseUrl">,
   syncs: SyncEntry[],
   opts: { dryRun: boolean },
+  admissions?: AdmissionRecord[],
 ): number {
   const dir = mkdtempSync(join(tmpdir(), "adsync-"));
   const file = join(dir, "sync.json");
-  writeFileSync(file, JSON.stringify({ syncs }, null, 2));
-  console.log(`\n→ Wrote ${syncs.length} sync entr${syncs.length === 1 ? "y" : "ies"} to ${file}`);
+  writeFileSync(file, JSON.stringify(admissions?.length ? { syncs, admissions } : { syncs }, null, 2));
+  console.log(`\n→ Wrote ${syncs.length} sync entr${syncs.length === 1 ? "y" : "ies"}${admissions?.length ? ` + ${admissions.length} admission record(s)` : ""} to ${file}`);
 
   const args = ["run", "sync", "--", `--input=${file}`];
   if (opts.dryRun) args.push("--dry-run");

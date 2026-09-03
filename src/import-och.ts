@@ -2,7 +2,7 @@
 import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
-import { runDashboardSync, type SyncEntry } from "./emit.js";
+import { runDashboardSync, type SyncEntry, type AdmissionRecord } from "./emit.js";
 import { phone10, lastDobKey, lastNameOf, parseSheetDate, ym as ymOf, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
@@ -306,7 +306,16 @@ async function main() {
   const now = new Date();
   const currentYm = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 
+  // Per-admission records behind the monthly rollup below — an explicit
+  // dashboard drill-down click reads these, nothing else does. Only what
+  // identifies a row: name/phone/dob/referent, no clinical detail.
+  const admissionRecords: AdmissionRecord[] = [];
+
   const byMonth = new Map<string, { total: number; attributable: number }>();
+  // The current, still-open month's count — provisional, shown separately
+  // from byMonth so the board's trusted month-over-month history never
+  // includes a partial month.
+  const currentMonthBucket = { total: 0, attributable: 0 };
   const referentTally = new Map<string, number>();
   // Per-month breakdown too -- an all-months tally can hide a month where
   // attribution silently collapsed to 0 even though every other month has
@@ -327,11 +336,15 @@ async function main() {
     }
     if (!admittedOn) continue;
     const ym = ymOf(admittedOn);
-    // Skip the CURRENT (incomplete) month and anything future: the board reads
-    // the last complete month, so a partial August or a "2027" typo would only
-    // add a future-dated row that gets filtered out anyway.
-    if (ym >= currentYm) { skippedFuture++; continue; }
-    const bucket = byMonth.get(ym) ?? { total: 0, attributable: 0 };
+    // A real future date (a "2027" typo, say) never belongs to any bucket.
+    // The CURRENT month is different: it's incomplete, not invalid, so it's
+    // tallied separately (currentMonthBucket) instead of the historical
+    // byMonth map the board's trend reads — a provisional count the UI can
+    // show as explicitly "not final", without the partial month polluting
+    // the trusted month-over-month history.
+    if (ym > currentYm) { skippedFuture++; continue; }
+    const isCurrentMonth = ym === currentYm;
+    const bucket = isCurrentMonth ? currentMonthBucket : (byMonth.get(ym) ?? { total: 0, attributable: 0 });
     bucket.total += 1;
     const ref = (row[refCol] ?? "").toString().trim() || "(blank)";
     referentTally.set(ref, (referentTally.get(ref) ?? 0) + 1);
@@ -340,15 +353,30 @@ async function main() {
     referentTallyByMonth.set(ym, monthTally);
     const referentSaysYes = isAttributable(row[refCol]);
     let webInquiryMatch = false;
+    let webInquiryMatchVia: "web_inquiry_phone" | "web_inquiry_dob" | null = null;
     if (!referentSaysYes) {
       const p = phoneCol >= 0 ? phone10(row[phoneCol]) : null;
       const ld = nameCol >= 0 && dobCol >= 0 ? lastDobKey(lastNameOf(row[nameCol]), row[dobCol]) : null;
-      if (p && inquiryExplains(webInquiryIndex.byPhone.get(p), admittedOn)) webInquiryMatch = true;
-      else if (ld && inquiryExplains(webInquiryIndex.byLastDob.get(ld), admittedOn)) webInquiryMatch = true;
+      if (p && inquiryExplains(webInquiryIndex.byPhone.get(p), admittedOn)) { webInquiryMatch = true; webInquiryMatchVia = "web_inquiry_phone"; }
+      else if (ld && inquiryExplains(webInquiryIndex.byLastDob.get(ld), admittedOn)) { webInquiryMatch = true; webInquiryMatchVia = "web_inquiry_dob"; }
     }
-    if (referentSaysYes) { attributedByReferent++; bucket.attributable += 1; }
-    else if (webInquiryMatch) { attributedByWebInquiryOnly++; bucket.attributable += 1; }
-    byMonth.set(ym, bucket);
+    const attributable = referentSaysYes || webInquiryMatch;
+    if (!isCurrentMonth) {
+      if (referentSaysYes) attributedByReferent++;
+      else if (webInquiryMatch) attributedByWebInquiryOnly++;
+    }
+    if (attributable) bucket.attributable += 1;
+    if (!isCurrentMonth) byMonth.set(ym, bucket);
+    admissionRecords.push({
+      client_id: args.client,
+      admitted_on: admittedOn.toISOString().slice(0, 10),
+      name: nameCol >= 0 ? (row[nameCol] ?? "").toString().trim() || null : null,
+      phone: phoneCol >= 0 ? (row[phoneCol] ?? "").toString().trim() || null : null,
+      dob: dobCol >= 0 ? (row[dobCol] ?? "").toString().trim() || null : null,
+      referent: ref === "(blank)" ? null : ref,
+      attributable,
+      attribution_source: referentSaysYes ? "referent" : webInquiryMatchVia,
+    });
   }
 
   const months = [...byMonth.keys()].sort();
@@ -404,6 +432,27 @@ async function main() {
     });
   }
 
+  // Provisional current-month figures, kept out of `syncs`' month-by-month
+  // series above (separate metric keys) so the trusted historical trend is
+  // never touched by a month that can still change before it closes.
+  {
+    const { start, end } = monthBounds(currentYm);
+    console.log(`  ${currentYm} (in progress): ${currentMonthBucket.total} admissions (${currentMonthBucket.attributable} ours) so far — provisional, not final`);
+    syncs.push({
+      client_id: args.client,
+      source: "manual",
+      external_id: `och-admissions-current-${currentYm}`,
+      period_start: start,
+      period_end: end,
+      data_state: "live",
+      error_message: null,
+      metrics: {
+        "manual.admissions_current": currentMonthBucket.total,
+        "manual.admissions_marketing_current": currentMonthBucket.attributable,
+      },
+    });
+  }
+
   const totalAdm = months.reduce((s, m) => s + byMonth.get(m)!.total, 0);
   const totalAttr = months.reduce((s, m) => s + byMonth.get(m)!.attributable, 0);
   console.log(
@@ -427,14 +476,17 @@ async function main() {
     if (purged > 0) console.log(`Purged ${purged} stale future-dated manual snapshot row(s).`);
   }
 
-  const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun: args.dryRun });
+  const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun: args.dryRun }, admissionRecords);
   process.exit(code);
 }
 
 /** Housekeeping for this client's manual snapshots: (1) delete any row whose
- *  period has NOT completed yet (period_end in the future) — an incomplete
- *  current month or a "2027" typo, both of which are excluded from the board
- *  anyway and only add noise; (2) dedupe, keeping the newest write per
+ *  period has NOT completed yet (period_end in the future) — a "2027" typo or
+ *  a stale row from before the current-month guard existed, excluded from the
+ *  board and only adding noise -- EXCEPT the two current-month provisional
+ *  keys below, whose period_end is legitimately always in the future until
+ *  the month actually closes; those are meant to persist and get overwritten
+ *  in place, not purged every run; (2) dedupe, keeping the newest write per
  *  (metric_key, period) so repeated imports don't pile up copies. Matches the
  *  client by slugified name (the sheet speaks slugs; the table keys on id). */
 async function purgeFutureManualRows(databaseUrl: string, slug: string): Promise<number> {
@@ -448,6 +500,7 @@ async function purgeFutureManualRows(databaseUrl: string, slug: string): Promise
     const future = await client.query(
       `DELETE FROM metric_snapshots
         WHERE client_id = $1 AND source = 'manual' AND metric_key LIKE 'manual.%'
+          AND metric_key NOT IN ('manual.admissions_current', 'manual.admissions_marketing_current')
           AND period_end > now()`,
       [match.id],
     );
