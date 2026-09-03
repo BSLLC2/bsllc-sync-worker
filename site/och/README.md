@@ -13,8 +13,10 @@ Forwards every Elementor Pro form submission to
 `https://work.bsllc.biz/api/webform/och` with first-touch ad attribution from
 the `bs_attrib` cookie (gclid/UTMs, 90 days). Replaces the two WPCode snippets
 "OCH — Elementor form → BS LLC pipeline" and "OCH — gclid capture" (9250),
-which had the secret hardcoded, pointed at the old vercel.app host, and — as
-of 2026-09-03 — showed no evidence of ever delivering a row.
+deployed 2026-08-27 and verified working (the Contact page's native webhook
+was removed the same day). Same logic; this version keeps the secret out of
+the source, uses the canonical host, and lives in git. Swap it in at a
+maintenance window, not as an emergency.
 
 ### Deploy (5 minutes, from any machine with the SSH key)
 
@@ -38,10 +40,9 @@ ssh $SITE "cd $ROOT && wp post update 9250 --post_status=draft"
 ssh $SITE "cd $ROOT && wp breeze purge --cache=all" 2>/dev/null || true
 ```
 
-Then, in Elementor, remove the native **Webhook** action from the
-"Contact Us - Contact Page" form (Actions After Submit) — the forwarder covers
-it, and until the dashboard's dedupe is deployed the two together store every
-Contact-page lead twice.
+The Contact page's native **Webhook** action was already removed on
+2026-08-27; if it ever comes back, remove it again (the forwarder covers every
+form, and the dashboard dedupes a double post within 10 minutes anyway).
 
 ### Verify (2 minutes)
 
