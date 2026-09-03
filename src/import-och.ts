@@ -245,6 +245,11 @@ async function main() {
 
   const byMonth = new Map<string, { total: number; attributable: number }>();
   const referentTally = new Map<string, number>();
+  // Per-month breakdown too -- an all-months tally can hide a month where
+  // attribution silently collapsed to 0 even though every other month has
+  // some (e.g. a new Referent label started appearing that ATTRIBUTABLE_WORDS
+  // doesn't recognize). See DEBUG_MONTH below.
+  const referentTallyByMonth = new Map<string, Map<string, number>>();
   let skippedFuture = 0;
   for (let r = hIdx + 1; r < rows.length; r++) {
     const row = rows[r] ?? [];
@@ -264,6 +269,9 @@ async function main() {
     bucket.total += 1;
     const ref = (row[refCol] ?? "").toString().trim() || "(blank)";
     referentTally.set(ref, (referentTally.get(ref) ?? 0) + 1);
+    const monthTally = referentTallyByMonth.get(ym) ?? new Map<string, number>();
+    monthTally.set(ref, (monthTally.get(ref) ?? 0) + 1);
+    referentTallyByMonth.set(ym, monthTally);
     if (isAttributable(row[refCol])) bucket.attributable += 1;
     byMonth.set(ym, bucket);
   }
@@ -271,6 +279,19 @@ async function main() {
   const months = [...byMonth.keys()].sort();
   if (!months.length) throw new Error("Parsed 0 admissions — check the date/status columns.");
   if (skippedFuture) console.log(`Skipped ${skippedFuture} future-dated row(s) (likely a year typo).`);
+
+  // Debug aid: print the referent breakdown for a specific month (set via
+  // --debug-month=YYYY-MM) so a month whose attributable count looks wrong
+  // can be diagnosed without guessing from the all-months tally.
+  const debugMonth = process.argv.find((a) => a.startsWith("--debug-month="))?.slice("--debug-month=".length);
+  if (debugMonth) {
+    const monthTally = referentTallyByMonth.get(debugMonth);
+    console.log(`\nReferent breakdown for ${debugMonth}:`);
+    if (!monthTally) console.log(`  (no admitted rows found for this month)`);
+    else for (const [ref, n] of [...monthTally.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`  ${isAttributable(ref) ? "✓" : " "} ${ref}: ${n}`);
+    }
+  }
 
   console.log(`\nAdmissions by referent (admitted rows):`);
   for (const [ref, n] of [...referentTally.entries()].sort((a, b) => b[1] - a[1])) {
