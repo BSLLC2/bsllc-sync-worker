@@ -1,0 +1,32 @@
+name: OHC revenue audit (READ ONLY)
+
+# Revenue-focused audit of the two live OHC campaigns: search terms, keyword
+# CPL and cost-per-admission, hour x day, device, location, ad policy status,
+# bidding goals, and DB admissions. Queries only; performs no mutates.
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run diagnostic
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+        run: npm run och-revenue-audit 2>&1 | tee diagnostic.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: och-revenue-audit
+          path: diagnostic.txt
