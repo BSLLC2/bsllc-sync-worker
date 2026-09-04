@@ -52,11 +52,22 @@ interface DialpadResp {
   message_id?: string;
 }
 
+/** Dialpad's SMS API requires strict E.164 ("+15551234567") and rejects a
+ *  bare 10-digit number outright — the dashboard's phone fields are entered
+ *  in every shape. Assumes US/Canada when no country code is present, which
+ *  covers every number this app has ever stored. */
+function toE164(phone: string): string {
+  if (phone.startsWith("+")) return phone;
+  const digits = phone.replace(/\D/g, "");
+  const ten = digits.length >= 10 ? digits.slice(-10) : "";
+  return ten ? `+1${ten}` : phone;
+}
+
 async function sendViaDialpad(apiKey: string, userId: string, to: string, text: string): Promise<string> {
   const res = await fetch("https://dialpad.com/api/v2/sms", {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ to_numbers: [to], text, user_id: userId }),
+    body: JSON.stringify({ to_numbers: [toE164(to)], text, user_id: userId }),
   });
   const responseText = await res.text();
   if (!res.ok) throw new Error(`Dialpad → ${res.status} ${responseText.slice(0, 300)}`);
