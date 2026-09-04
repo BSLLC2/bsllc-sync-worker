@@ -115,7 +115,8 @@
     "oneoff-backfill-och-form-log": "tsx src/oneoff-backfill-och-form-log.ts",
     "audit-och-ads-followup": "tsx src/audit-och-ads-followup.ts",
     "verify-brand-awareness-live": "tsx src/verify-brand-awareness-live.ts",
-    "list-accessible-accounts": "tsx src/list-accessible-accounts.ts"
+    "list-accessible-accounts": "tsx src/list-accessible-accounts.ts",
+    "check-brand-awareness-pmax-assets": "tsx src/check-brand-awareness-pmax-assets.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
