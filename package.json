@@ -113,7 +113,8 @@
     "dump-pcc-keywords": "tsx src/dump-pcc-keywords.ts",
     "publish-och-web-leads": "tsx src/publish-och-web-leads.ts",
     "oneoff-backfill-och-form-log": "tsx src/oneoff-backfill-och-form-log.ts",
-    "audit-och-ads-followup": "tsx src/audit-och-ads-followup.ts"
+    "audit-och-ads-followup": "tsx src/audit-och-ads-followup.ts",
+    "verify-brand-awareness-live": "tsx src/verify-brand-awareness-live.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
