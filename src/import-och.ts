@@ -39,10 +39,10 @@ type WebInquiryIndex = { byPhone: Map<string, WebInquiryMatch[]>; byLastDob: Map
 // soon after it — an inquiry from a year earlier doesn't make this month's
 // professional referral "ours".
 const MATCH_WINDOW_DAYS = 180;
-function inquiryExplains(list: WebInquiryMatch[] | undefined, admitted: Date): boolean {
-  if (!list?.length) return false;
+function inquiryExplains(list: WebInquiryMatch[] | undefined, admitted: Date): WebInquiryMatch | null {
+  if (!list?.length) return null;
   const t = admitted.getTime();
-  return list.some((m) => m.submittedAt.getTime() <= t + 86_400_000 && m.submittedAt.getTime() >= t - MATCH_WINDOW_DAYS * 86_400_000);
+  return list.find((m) => m.submittedAt.getTime() <= t + 86_400_000 && m.submittedAt.getTime() >= t - MATCH_WINDOW_DAYS * 86_400_000) ?? null;
 }
 
 /** Every web_inquiries row for this client that carries a gclid OR a
@@ -354,11 +354,22 @@ async function main() {
     const referentSaysYes = isAttributable(row[refCol]);
     let webInquiryMatch = false;
     let webInquiryMatchVia: "web_inquiry_phone" | "web_inquiry_dob" | null = null;
+    // A gclid match means this specific admission came from an actual Google
+    // Ads click, not just some marketing-tracked form fill (utm text) — kept
+    // as its own attribution_source value so the dashboard's Google Ads
+    // "See who" only ever shows people who really clicked an ad.
+    let webInquiryMatchedGclid = false;
     if (!referentSaysYes) {
       const p = phoneCol >= 0 ? phone10(row[phoneCol]) : null;
       const ld = nameCol >= 0 && dobCol >= 0 ? lastDobKey(lastNameOf(row[nameCol]), row[dobCol]) : null;
-      if (p && inquiryExplains(webInquiryIndex.byPhone.get(p), admittedOn)) { webInquiryMatch = true; webInquiryMatchVia = "web_inquiry_phone"; }
-      else if (ld && inquiryExplains(webInquiryIndex.byLastDob.get(ld), admittedOn)) { webInquiryMatch = true; webInquiryMatchVia = "web_inquiry_dob"; }
+      const byPhone = p ? inquiryExplains(webInquiryIndex.byPhone.get(p), admittedOn) : null;
+      const byDob = !byPhone && ld ? inquiryExplains(webInquiryIndex.byLastDob.get(ld), admittedOn) : null;
+      const matched = byPhone ?? byDob;
+      if (matched) {
+        webInquiryMatch = true;
+        webInquiryMatchVia = byPhone ? "web_inquiry_phone" : "web_inquiry_dob";
+        webInquiryMatchedGclid = matched.source === "gclid";
+      }
     }
     const attributable = referentSaysYes || webInquiryMatch;
     if (!isCurrentMonth) {
@@ -375,7 +386,7 @@ async function main() {
       dob: dobCol >= 0 ? (row[dobCol] ?? "").toString().trim() || null : null,
       referent: ref === "(blank)" ? null : ref,
       attributable,
-      attribution_source: referentSaysYes ? "referent" : webInquiryMatchVia,
+      attribution_source: referentSaysYes ? "referent" : webInquiryMatchedGclid ? "web_inquiry_gclid" : webInquiryMatchVia,
     });
   }
 
