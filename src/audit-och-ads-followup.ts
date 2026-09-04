@@ -20,7 +20,7 @@ const AWARE = "23174695410"; // OCH Brand Awareness
 
 const CUR = { from: "2026-08-05", to: "2026-09-03" };   // trailing 30d, ending yesterday
 const PRIOR = { from: "2026-07-06", to: "2026-08-04" }; // prior 30d
-const CHANGE_FROM = "2026-08-05"; // covers the branded rollback + anything since the brief
+const CHANGE_FROM = "2026-08-06"; // change_event rejects exactly-30-day-old starts; one day of headroom
 
 const usd = (m: unknown) => Number(m ?? 0) / 1_000_000;
 const $ = (n: number) => `$${n.toFixed(2)}`;
@@ -86,7 +86,11 @@ async function main() {
 
   // ── C. Branded campaign — the piece the user says "was not successful" ──
   hr("C. OHC - BRANDED SEARCH — did the rollback help, and was there a separate 'branded keyword' change?");
-  for (const [label, w] of [["PRIOR 30d", PRIOR], ["CURRENT 30d", CUR]] as const) {
+  // POST_ROLLBACK isolates ONLY the days after the 8/26 CPC/budget rollback,
+  // so it isn't averaged together with the still-elevated 8/5-8/25 period.
+  const POST_ROLLBACK = { from: "2026-08-26", to: CUR.to };
+  const PRE_ROLLBACK_RAISE = { from: "2026-08-05", to: "2026-08-25" }; // after the 8/19 raise, before the rollback
+  for (const [label, w] of [["PRIOR 30d (pre-raise)", PRIOR], ["8/5-8/25 (post-raise, pre-rollback)", PRE_ROLLBACK_RAISE], ["8/26-9/3 (POST-ROLLBACK ONLY)", POST_ROLLBACK], ["CURRENT 30d (blended)", CUR]] as const) {
     const rows = await q(`SELECT campaign_budget.amount_micros, metrics.cost_micros, metrics.clicks,
         metrics.all_conversions, metrics.search_impression_share
         FROM campaign WHERE campaign.id = ${BRAND} AND segments.date BETWEEN '${w.from}' AND '${w.to}'`);
