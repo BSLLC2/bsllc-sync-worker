@@ -114,7 +114,8 @@
     "publish-och-web-leads": "tsx src/publish-och-web-leads.ts",
     "oneoff-backfill-och-form-log": "tsx src/oneoff-backfill-och-form-log.ts",
     "audit-och-ads-followup": "tsx src/audit-och-ads-followup.ts",
-    "verify-brand-awareness-live": "tsx src/verify-brand-awareness-live.ts"
+    "verify-brand-awareness-live": "tsx src/verify-brand-awareness-live.ts",
+    "list-accessible-accounts": "tsx src/list-accessible-accounts.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
