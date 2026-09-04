@@ -53,7 +53,11 @@ async function main() {
         [n.user_email],
       );
       const u = urows[0];
-      if (!u) { await c.query(`UPDATE team_notifications SET status='sent', sent_at=now() WHERE id=$1`, [n.id]); continue; }
+      if (!u) {
+        await c.query(`UPDATE team_notifications SET status='failed', sent_at=now() WHERE id=$1`, [n.id]);
+        console.log(`  ✗ ${n.user_email} · ${n.kind} → no such user`);
+        continue;
+      }
       const link = n.url ? (n.url.startsWith("http") ? n.url : `${DASH}${n.url}`) : DASH;
       const channels: string[] = [];
 
@@ -95,9 +99,14 @@ async function main() {
         } catch (e) { console.log(`  sms error for ${n.user_email}: ${e instanceof Error ? e.message : e}`); }
       }
 
-      await c.query(`UPDATE team_notifications SET status='sent', sent_at=now() WHERE id=$1`, [n.id]);
-      console.log(`  ✓ ${n.user_email} · ${n.kind} → ${channels.join(", ") || "no active channel"}`);
-      delivered++;
+      // Only mark 'sent' if something was actually delivered — previously this
+      // always marked 'sent' even when every enabled channel failed (or the
+      // user had none configured), silently losing the notification instead
+      // of surfacing it as a delivery failure worth investigating.
+      const delivered_ = channels.length > 0;
+      await c.query(`UPDATE team_notifications SET status=$2, sent_at=now() WHERE id=$1`, [n.id, delivered_ ? "sent" : "failed"]);
+      console.log(`  ${delivered_ ? "✓" : "✗"} ${n.user_email} · ${n.kind} → ${channels.join(", ") || "no active channel"}`);
+      if (delivered_) delivered++;
     }
     console.log(`Done: ${delivered} delivered.`);
   } finally {
