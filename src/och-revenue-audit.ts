@@ -125,7 +125,7 @@ async function main() {
   console.log(`  Negatives in place: ${negRows?.length ?? 0} campaign-level + ${shared?.length ?? 0} in shared lists`);
   if (negRows?.length) console.log(`    campaign-level: ${negRows.map((r: any) => `"${r.campaign_criterion?.keyword?.text}"`).join(", ")}`);
 
-  const st = await q(`SELECT search_term_view.search_term, campaign.id, ad_group.name, ad_group_criterion.keyword.text,
+  const st = await q(`SELECT search_term_view.search_term, campaign.id, ad_group.name, segments.keyword.info.text,
       metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.all_conversions, metrics.all_conversions_value
       FROM search_term_view WHERE ${inLive} AND segments.date BETWEEN '${D90.from}' AND '${D90.to}' LIMIT 20000`);
   const stAct = await q(`SELECT search_term_view.search_term, campaign.id, segments.conversion_action_name, metrics.all_conversions
@@ -133,7 +133,7 @@ async function main() {
   const terms = new Map<string, Agg & { camp: string; kw: string }>();
   for (const r of st ?? []) {
     const k = `${r.campaign?.id}|${String(r.search_term_view?.search_term).toLowerCase()}`;
-    const t = terms.get(k) ?? { ...newAgg(), camp: String(r.campaign?.id), kw: String(r.ad_group_criterion?.keyword?.text ?? "") };
+    const t = terms.get(k) ?? { ...newAgg(), camp: String(r.campaign?.id), kw: String(r.segments?.keyword?.info?.text ?? "") };
     t.cost += usd(r.metrics?.cost_micros); t.clicks += Number(r.metrics?.clicks ?? 0); t.impr += Number(r.metrics?.impressions ?? 0);
     t.conv += Number(r.metrics?.all_conversions ?? 0); t.value += Number(r.metrics?.all_conversions_value ?? 0);
     terms.set(k, t);
@@ -168,7 +168,7 @@ async function main() {
       ad_group_criterion.status, ad_group_criterion.quality_info.quality_score, ad_group_criterion.quality_info.creative_quality_score,
       ad_group_criterion.quality_info.post_click_quality_score, ad_group_criterion.quality_info.search_predicted_ctr,
       metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.all_conversions, metrics.all_conversions_value,
-      metrics.search_impression_share, metrics.search_budget_lost_impression_share, metrics.search_rank_lost_impression_share
+      metrics.search_impression_share, metrics.search_rank_lost_impression_share
       FROM keyword_view WHERE ${inLive} AND segments.date BETWEEN '${D90.from}' AND '${D90.to}'`);
   const kwAct = await q(`SELECT campaign.id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, segments.conversion_action_name, metrics.all_conversions
       FROM keyword_view WHERE ${inLive} AND segments.date BETWEEN '${D90.from}' AND '${D90.to}'`);
