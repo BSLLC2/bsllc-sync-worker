@@ -11,6 +11,9 @@ const VERIFIED_CONVERSION_ACTION_NAME = "Admission (offline)";
 interface Args {
   mode: "backfill" | "incremental";
   weeks: number;
+  /** Backfill from this date instead of a fixed --weeks count — e.g. a
+   *  client's contract start. Overrides --weeks when both are given. */
+  since?: string;
   dryRun: boolean;
   accountsFile?: string;
   onlyClient: string;
@@ -19,6 +22,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
   let mode: Args["mode"] = "incremental";
   let weeks = 52;
+  let since: string | undefined;
   let dryRun = false;
   let accountsFile: string | undefined;
   let onlyClient = "";
@@ -28,6 +32,8 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--mode") mode = argv[++i] as Args["mode"];
     else if (a.startsWith("--weeks=")) weeks = Number(a.slice(8));
     else if (a === "--weeks") weeks = Number(argv[++i]);
+    else if (a.startsWith("--since=")) since = a.slice("--since=".length).trim();
+    else if (a === "--since") since = argv[++i]?.trim();
     else if (a === "--dry-run") dryRun = true;
     else if (a.startsWith("--accounts=")) accountsFile = a.slice(11);
     else if (a === "--accounts") accountsFile = argv[++i];
@@ -36,10 +42,13 @@ function parseArgs(argv: string[]): Args {
   if (mode !== "backfill" && mode !== "incremental") {
     throw new Error(`--mode must be "backfill" or "incremental" (got "${mode}")`);
   }
-  if (!Number.isFinite(weeks) || weeks < 1) {
+  if (since && !/^\d{4}-\d{2}-\d{2}$/.test(since)) {
+    throw new Error(`--since must be YYYY-MM-DD (got "${since}")`);
+  }
+  if (!since && (!Number.isFinite(weeks) || weeks < 1)) {
     throw new Error(`--weeks must be a positive integer (got "${weeks}")`);
   }
-  return { mode, weeks, dryRun, accountsFile, onlyClient };
+  return { mode, weeks, since, dryRun, accountsFile, onlyClient };
 }
 
 /** A (target, as-of date) unit of work. */
@@ -50,11 +59,19 @@ interface Job {
   backdate: boolean;
 }
 
+/** How many weekly as-of points cover `since` → `now`, rounded up so the
+ *  earliest point falls on or before `since` itself. */
+function weeksSince(since: string, now: Date): number {
+  const ms = now.getTime() - Date.parse(`${since}T00:00:00.000Z`);
+  return Math.max(1, Math.ceil(ms / (7 * 86_400_000)));
+}
+
 function buildJobs(args: Args, targets: Target[], now: Date): Job[] {
   if (args.mode === "incremental") {
     return targets.map((target) => ({ target, asOf: now, backdate: false }));
   }
-  const dates = weeklyAsOfDates(args.weeks, now);
+  const weeks = args.since ? weeksSince(args.since, now) : args.weeks;
+  const dates = weeklyAsOfDates(weeks, now);
   const jobs: Job[] = [];
   for (const target of targets) {
     for (const asOf of dates) jobs.push({ target, asOf, backdate: true });
@@ -76,15 +93,16 @@ async function main() {
     );
     process.exit(1);
   }
+  // Date.now() is fine here — this is the real worker on the VPS, not a
+  // deterministic-replay context.
+  const now = new Date();
+  const backfillSpan = args.since ? `since ${args.since} = ${weeksSince(args.since, now)} weeks` : `${args.weeks} weeks`;
   console.log(
-    `Mode: ${args.mode}${args.mode === "backfill" ? ` (${args.weeks} weeks)` : ""} · ` +
+    `Mode: ${args.mode}${args.mode === "backfill" ? ` (${backfillSpan})` : ""} · ` +
       `${targets.length} account(s) from ${from === "db" ? "connector_mappings" : "accounts.json"}` +
       `${args.dryRun ? " · DRY RUN" : ""}`,
   );
 
-  // Date.now() is fine here — this is the real worker on the VPS, not a
-  // deterministic-replay context.
-  const now = new Date();
   const jobs = buildJobs(args, targets, now);
   console.log(`Planned ${jobs.length} account-window pull(s).\n`);
 

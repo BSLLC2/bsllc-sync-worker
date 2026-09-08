@@ -1,0 +1,121 @@
+name: Backfill one client since a date (contract start)
+
+# Fired by the dashboard the moment a client's contract start date is set or
+# changed (PATCH /api/clients/:id, via GitHub's API — same dispatch mechanism
+# as the per-client "Refresh" button in sync-client-now.yml), so "conversions
+# and results" cover the WHOLE open-contract period from day one instead of
+# only ever accumulating forward from whenever a connector happened to get
+# switched on.
+#
+# GA4 and HubSpot metrics already pull full history (--since=2023-01-01,
+# by default) on every normal sync, so they self-heal on their own next cron
+# without any special handling here. GSC and Google Ads do NOT — GSC only
+# ever pulls a trailing 30-day window, and Ads' normal sync is a single
+# current-period pull — so those two are the ones that actually need a
+# one-time historical catch-up scoped to this client and this date.
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id)"
+        required: true
+      since:
+        description: "Contract start date, YYYY-MM-DD"
+        required: true
+      dry_run:
+        description: "Validate only, write nothing"
+        type: boolean
+        required: true
+        default: false
+
+concurrency:
+  group: backfill-client-since-${{ inputs.client_id }}
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      # continue-on-error per step: a client with no GSC property (or no
+      # Ads account) connected must not block the other from backfilling.
+      - name: Search Console — historical, month by month since contract start
+        working-directory: worker
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-gsc-api -- --client="${{ inputs.client_id }}" --since="${{ inputs.since }}" --dry-run
+          else
+            npm run import-gsc-api -- --client="${{ inputs.client_id }}" --since="${{ inputs.since }}"
+          fi
+
+      - name: Google Ads — historical, weekly since contract start
+        working-directory: worker
+        continue-on-error: true
+        env:
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run backfill -- --client="${{ inputs.client_id }}" --since="${{ inputs.since }}" --dry-run
+          else
+            npm run backfill -- --client="${{ inputs.client_id }}" --since="${{ inputs.since }}"
+          fi
+
+      # GA4 already pulls full history on every call (see import-ga4.ts's
+      # --since=2023-01-01 default) — run it here too, explicitly since=, so a
+      # contract that predates 2023 still gets its real start date rather
+      # than silently truncating to the default.
+      - name: GA4 — explicit since, for immediacy and any pre-2023 contract
+        working-directory: worker
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GA4_PROPERTY_MAP: ${{ secrets.GA4_PROPERTY_MAP }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run import-ga4 -- --client="${{ inputs.client_id }}" --since="${{ inputs.since }}" --dry-run
+          else
+            npm run import-ga4 -- --client="${{ inputs.client_id }}" --since="${{ inputs.since }}"
+          fi
+
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=backfill_client_since --status=${{ job.status }}

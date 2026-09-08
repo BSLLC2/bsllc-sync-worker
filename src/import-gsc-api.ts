@@ -18,7 +18,14 @@ import { runDashboardSync, type SyncEntry } from "./emit.js";
  *      is the GSC property: "sc-domain:example.com" (domain) or
  *      "https://example.com/" (URL-prefix).
  *
- * Usage:  npm run import-gsc-api [-- --dry-run] [--days=30] [--client=<clientId>]
+ * Usage:  npm run import-gsc-api [-- --dry-run] [--days=30] [--client=<clientId>] [--since=2023-01-01]
+ *
+ * --since switches from the normal trailing-window pull to a one-time
+ * historical catch-up: one gsc.* snapshot per CALENDAR MONTH from that date
+ * to today (mirroring import-ga4.ts's --since), so a client's search-position
+ * trend has real history the moment their property is connected instead of
+ * only ever accumulating forward from whenever that happened. Used by
+ * backfill-client-since.yml when a contract start date is set.
  */
 
 const SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
@@ -88,11 +95,67 @@ async function queryTotals(token: string, siteUrl: string, startDate: string, en
   return { clicks: Number(row.clicks ?? 0), impressions: Number(row.impressions ?? 0), ctr: Number(row.ctr ?? 0), position: Number(row.position ?? 0) };
 }
 
+interface DayRow { date: string; clicks: number; impressions: number; position: number }
+
+/** Same query as queryTotals but dimensioned by day, for bucketing into
+ *  monthly snapshots. rowLimit covers years of daily rows without pagination
+ *  — plenty for any real contract length. */
+async function queryDaily(token: string, siteUrl: string, startDate: string, endDate: string): Promise<DayRow[]> {
+  const res = await fetch(`${API}/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ startDate, endDate, dimensions: [{ name: "date" }], dataState: "final", rowLimit: 25000 }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    if (res.status === 403 && /has not been used in project|is disabled/i.test(body)) {
+      throw new Error(`GSC API is DISABLED on the Google Cloud project — this is not a property permission. ${body.slice(0, 300)}`);
+    }
+    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl}: ${body.slice(0, 300)}`);
+    throw new Error(`GSC query ${siteUrl} → ${res.status} ${body.slice(0, 200)}`);
+  }
+  const j: any = await res.json();
+  return (j.rows ?? []).map((r: any) => ({
+    date: String(r.keys?.[0] ?? ""),
+    clicks: Number(r.clicks ?? 0),
+    impressions: Number(r.impressions ?? 0),
+    position: Number(r.position ?? 0),
+  })).filter((r: DayRow) => /^\d{4}-\d{2}-\d{2}$/.test(r.date));
+}
+
+/** Calendar-month bounds for a "YYYY-MM" key, matching import-ga4.ts's
+ *  monthBounds so a client's GA4 and GSC monthly snapshots line up. */
+function monthBoundsYm(ym: string): { start: string; end: string } {
+  const y = Number(ym.slice(0, 4));
+  const m = Number(ym.slice(5, 7));
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return { start: `${ym}-01`, end: `${ym}-${String(last).padStart(2, "0")}` };
+}
+
+/** Sums daily rows into calendar months. Clicks/impressions add directly;
+ *  position is impressions-weighted (not a naive average of daily averages)
+ *  so a high-traffic day's ranking counts more than a near-zero-traffic one —
+ *  the same principle CTR already gets by being recomputed from the summed
+ *  totals rather than averaged. */
+function bucketMonthly(rows: DayRow[]): Map<string, { clicks: number; impressions: number; posWeighted: number }> {
+  const m = new Map<string, { clicks: number; impressions: number; posWeighted: number }>();
+  for (const r of rows) {
+    const ym = r.date.slice(0, 7);
+    const cur = m.get(ym) ?? { clicks: 0, impressions: 0, posWeighted: 0 };
+    cur.clicks += r.clicks;
+    cur.impressions += r.impressions;
+    cur.posWeighted += r.position * r.impressions;
+    m.set(ym, cur);
+  }
+  return m;
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const dryRun = argv.includes("--dry-run");
   const days = Number(argv.find((a) => a.startsWith("--days="))?.slice(7) || 30);
   const onlyClient = (argv.find((a) => a.startsWith("--client="))?.slice(9) || "").trim();
+  const since = (argv.find((a) => a.startsWith("--since="))?.slice(8) || "").trim();
   const databaseUrl = process.env.DATABASE_URL?.trim();
   const dashboardDir = process.env.DASHBOARD_DIR?.trim();
   if (!databaseUrl || !dashboardDir) throw new Error("Missing DATABASE_URL / DASHBOARD_DIR.");
@@ -101,33 +164,71 @@ async function main() {
   if (onlyClient) map = Object.fromEntries(Object.entries(map).filter(([clientId]) => clientId === onlyClient));
   if (!Object.keys(map).length) { console.log("No GSC properties in Admin → Connectors — nothing to import."); return; }
 
-  // GSC data lags ~2 days; end the window there and go back `days`.
-  const end = new Date(Date.now() - 2 * 86_400_000);
-  const start = new Date(end.getTime() - (days - 1) * 86_400_000);
   const token = await gscToken();
-  console.log(`GSC import — ${Object.keys(map).length} propert(ies), ${iso(start)}…${iso(end)}${dryRun ? " (dry-run)" : ""}`);
-
   const syncs: SyncEntry[] = [];
-  for (const [slug, siteUrl] of Object.entries(map)) {
-    const base = {
-      client_id: slug, source: "gsc" as const, external_id: siteUrl,
-      period_start: iso(start), period_end: iso(end), synced_at: new Date().toISOString(),
-    };
-    try {
-      const t = await queryTotals(token, siteUrl, iso(start), iso(end));
-      if (!t || t.impressions === 0) {
-        syncs.push({ ...base, data_state: "no_data", error_message: null, metrics: {} });
-        console.log(`  ${slug} (${siteUrl}) — no data`);
-        continue;
+
+  if (since) {
+    // Historical catch-up: one snapshot per calendar month from `since` to
+    // today, same shape as import-ga4.ts's --since path.
+    const end = iso(new Date(Date.now() - 2 * 86_400_000)); // GSC lags ~2 days
+    console.log(`GSC historical import — ${Object.keys(map).length} propert(ies), ${since}…${end}${dryRun ? " (dry-run)" : ""}`);
+    for (const [slug, siteUrl] of Object.entries(map)) {
+      try {
+        const daily = await queryDaily(token, siteUrl, since, end);
+        const monthly = bucketMonthly(daily);
+        let planted = 0;
+        for (const [ym, agg] of monthly) {
+          const { start, end: monthEnd } = monthBoundsYm(ym);
+          if (agg.impressions === 0) continue;
+          syncs.push({
+            client_id: slug, source: "gsc", external_id: siteUrl,
+            period_start: start, period_end: monthEnd, synced_at: `${monthEnd}T12:00:00.000Z`,
+            data_state: "live", error_message: null,
+            metrics: {
+              "gsc.clicks": agg.clicks, "gsc.impressions": agg.impressions,
+              "gsc.ctr": agg.impressions > 0 ? agg.clicks / agg.impressions : 0,
+              "gsc.avg_position": agg.impressions > 0 ? agg.posWeighted / agg.impressions : 0,
+            },
+          });
+          planted++;
+        }
+        console.log(`  ${slug} (${siteUrl}) — ${planted} month(s) from ${daily.length} daily row(s)`);
+      } catch (e) {
+        syncs.push({
+          client_id: slug, source: "gsc", external_id: siteUrl,
+          period_start: since, period_end: end, synced_at: new Date().toISOString(),
+          data_state: "error", error_message: (e instanceof Error ? e.message : String(e)).slice(0, 300), metrics: {},
+        });
+        console.log(`  ✗ ${slug} (${siteUrl}) — ${e instanceof Error ? e.message : e}`);
       }
-      syncs.push({
-        ...base, data_state: "live", error_message: null,
-        metrics: { "gsc.clicks": t.clicks, "gsc.impressions": t.impressions, "gsc.ctr": t.ctr, "gsc.avg_position": t.position },
-      });
-      console.log(`  ${slug} (${siteUrl}) — ${t.clicks} clicks · ${t.impressions} impr · pos ${t.position.toFixed(1)}`);
-    } catch (e) {
-      syncs.push({ ...base, data_state: "error", error_message: (e instanceof Error ? e.message : String(e)).slice(0, 300), metrics: {} });
-      console.log(`  ✗ ${slug} (${siteUrl}) — ${e instanceof Error ? e.message : e}`);
+    }
+  } else {
+    // Normal trailing-window pull (daily cron + the on-demand Refresh
+    // button) — unchanged from before --since existed.
+    const end = new Date(Date.now() - 2 * 86_400_000);
+    const start = new Date(end.getTime() - (days - 1) * 86_400_000);
+    console.log(`GSC import — ${Object.keys(map).length} propert(ies), ${iso(start)}…${iso(end)}${dryRun ? " (dry-run)" : ""}`);
+    for (const [slug, siteUrl] of Object.entries(map)) {
+      const base = {
+        client_id: slug, source: "gsc" as const, external_id: siteUrl,
+        period_start: iso(start), period_end: iso(end), synced_at: new Date().toISOString(),
+      };
+      try {
+        const t = await queryTotals(token, siteUrl, iso(start), iso(end));
+        if (!t || t.impressions === 0) {
+          syncs.push({ ...base, data_state: "no_data", error_message: null, metrics: {} });
+          console.log(`  ${slug} (${siteUrl}) — no data`);
+          continue;
+        }
+        syncs.push({
+          ...base, data_state: "live", error_message: null,
+          metrics: { "gsc.clicks": t.clicks, "gsc.impressions": t.impressions, "gsc.ctr": t.ctr, "gsc.avg_position": t.position },
+        });
+        console.log(`  ${slug} (${siteUrl}) — ${t.clicks} clicks · ${t.impressions} impr · pos ${t.position.toFixed(1)}`);
+      } catch (e) {
+        syncs.push({ ...base, data_state: "error", error_message: (e instanceof Error ? e.message : String(e)).slice(0, 300), metrics: {} });
+        console.log(`  ✗ ${slug} (${siteUrl}) — ${e instanceof Error ? e.message : e}`);
+      }
     }
   }
 
