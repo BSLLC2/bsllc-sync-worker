@@ -126,6 +126,7 @@ export interface OppRow {
   actualclosedate: string | null;
   parentcontactid?: {
     contactid: string;
+    fullname: string | null;
     createdon: string | null;
     new_firsttouchsource: number | null;
   } | null;
@@ -138,7 +139,7 @@ export interface OppRow {
  */
 export async function fetchClosedWon(cfg: D365Config): Promise<OppRow[]> {
   const select = "opportunityid,name,actualvalue,actualclosedate";
-  const expand = "parentcontactid($select=contactid,createdon,new_firsttouchsource)";
+  const expand = "parentcontactid($select=contactid,fullname,createdon,new_firsttouchsource)";
   const filter = `statecode eq 1 and actualvalue ne null and actualclosedate ge ${BILLABLE_CLOSED_WON_SINCE}T00:00:00Z`;
   let url =
     `${cfg.resourceUrl}/api/data/v9.2/opportunities` +
