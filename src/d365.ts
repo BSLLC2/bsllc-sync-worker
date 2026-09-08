@@ -49,21 +49,30 @@ export const FTS = {
   OTHER: 100000012,
 } as const;
 
-// Report grouping (option B): only channels BS LLC actually runs count as
-// BS-LLC-driven. Referral / Truck Paper / Word of Mouth / Other are real
-// sources but not BS LLC. Manual Sales Outreach is excluded from billing.
+// Report grouping, confirmed with Sebastien 2026-09-08: DPG has no referral
+// program today, but if one is built it would run through BS LLC, so it
+// counts as BS-LLC-driven — not "other." Truck Paper / Word of Mouth / Other
+// are real sources but not BS LLC. Manual Sales Outreach is excluded from
+// billing entirely.
 const BSLLC_DRIVEN = new Set<number>([
   FTS.PAID_SEARCH, FTS.ORGANIC_SEARCH, FTS.GOOGLE_BUSINESS_PROFILE,
   FTS.WEBSITE_FORM, FTS.WEBSITE_PHONE_CALL, FTS.SOCIAL_MEDIA, FTS.EMAIL_CAMPAIGN,
+  FTS.REFERRAL_PROGRAM,
 ]);
 const OTHER_TRACKED = new Set<number>([
-  FTS.REFERRAL_PROGRAM, FTS.TRUCK_PAPER, FTS.WORD_OF_MOUTH, FTS.OTHER,
+  FTS.TRUCK_PAPER, FTS.WORD_OF_MOUTH, FTS.OTHER,
 ]);
 
 // The field went live on this date with no historical backfill. A blank on a
 // Contact created before then is "unknown (pre-field)", NOT manual — reported
 // separately so early numbers read honestly rather than as "BS LLC drove none".
 export const FIRST_TOUCH_GOLIVE = "2026-08-13";
+
+// Locked billing rule, confirmed 2026-09-02 — do not change without checking
+// with Sebastien/Katy first: only deals closed Won on or after this date
+// count. Anything closed before it is the client's pre-existing pipeline,
+// frozen out of scope at kickoff — never backfilled.
+export const BILLABLE_CLOSED_WON_SINCE = "2026-09-03";
 
 export type Bucket = "bsllc" | "other" | "manual" | "unknown";
 
@@ -130,7 +139,7 @@ export interface OppRow {
 export async function fetchClosedWon(cfg: D365Config): Promise<OppRow[]> {
   const select = "opportunityid,name,actualvalue,actualclosedate";
   const expand = "parentcontactid($select=contactid,createdon,new_firsttouchsource)";
-  const filter = "statecode eq 1 and actualvalue ne null";
+  const filter = `statecode eq 1 and actualvalue ne null and actualclosedate ge ${BILLABLE_CLOSED_WON_SINCE}T00:00:00Z`;
   let url =
     `${cfg.resourceUrl}/api/data/v9.2/opportunities` +
     `?$select=${select}&$expand=${expand}&$filter=${encodeURIComponent(filter)}`;
