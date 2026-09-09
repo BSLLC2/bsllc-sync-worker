@@ -9,6 +9,14 @@ import { loadD365Config, fetchClosedWon, classify, type Bucket } from "./d365.js
  * unknown) plus manual (excluded) so totals reconcile, and a billable
  * convenience = bsllc + other. See docs/D365_CLOSED_WON_BRIEF.md.
  *
+ * ALSO emits one entry per deal (metric "d365.deal_won_cents" + a text label
+ * and bucket), tagged with the opportunity id as `item_id` so a case study
+ * can show named, dollar-valued wins instead of only a monthly total. Safe
+ * to re-run daily even though fetchClosedWon() re-pulls every deal since the
+ * 9/3 floor each time -- metric_snapshots dedupes on (client, source,
+ * metricKey, item_id), so already-recorded deals are silently skipped
+ * instead of piling up as duplicates.
+ *
  * Usage:
  *   npm run import-d365 -- [--slug=diesel-power-group] [--dry-run]
  */
@@ -46,6 +54,7 @@ async function main() {
   console.log(`  fetched ${opps.length} Closed Won opportunit${opps.length === 1 ? "y" : "ies"}.`);
 
   const byMonth = new Map<string, Agg>();
+  const dealSyncs: SyncEntry[] = [];
   let noCloseDate = 0, noContact = 0;
   const bucketTotals: Record<Bucket, number> = { bsllc: 0, other: 0, manual: 0, unknown: 0 };
 
@@ -61,6 +70,26 @@ async function main() {
     agg.deals[bucket] += 1;
     byMonth.set(ym, agg);
     bucketTotals[bucket] += 1;
+
+    // One row per deal, named and dollar-valued, so a case study can list
+    // real wins instead of only a monthly total. item_id dedupes re-runs.
+    const closeDate = o.actualclosedate.slice(0, 10);
+    const label = [contact?.fullname?.trim() || null, o.name?.trim() || null].filter(Boolean).join(" — ") || "(unnamed)";
+    dealSyncs.push({
+      client_id: slug,
+      source: "d365",
+      item_id: o.opportunityid,
+      period_start: closeDate,
+      period_end: closeDate,
+      synced_at: `${closeDate}T12:00:00.000Z`,
+      data_state: "live",
+      error_message: null,
+      metrics: {
+        "d365.deal_won_cents": cents,
+        "d365.deal_won_label": label,
+        "d365.deal_won_bucket": bucket,
+      },
+    });
   }
 
   console.log(
@@ -95,12 +124,13 @@ async function main() {
     });
   }
 
-  if (!syncs.length) {
+  const allSyncs = syncs.concat(dealSyncs);
+  if (!allSyncs.length) {
     console.log("No Closed Won opportunities with a close date — nothing to plant.");
     process.exit(0);
   }
-  console.log(`\nPlanting ${syncs.length} monthly snapshot(s).`);
-  const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun });
+  console.log(`\nPlanting ${syncs.length} monthly snapshot(s) + ${dealSyncs.length} per-deal row(s).`);
+  const code = runDashboardSync({ databaseUrl, dashboardDir }, allSyncs, { dryRun });
   process.exit(code);
 }
 

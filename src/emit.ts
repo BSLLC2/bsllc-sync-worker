@@ -9,6 +9,13 @@ export interface SyncEntry {
   client_id: string;
   source: "google_ads" | "gsc" | "ga4" | "d365" | "hubspot" | "seo" | "aeo" | "authority" | "manual";
   external_id?: string;
+  /** Identity of ONE upstream record (e.g. a D365 opportunity id) for a
+   *  per-item row, as opposed to an aggregate. Separate from `external_id`
+   *  above, which is the connector's ACCOUNT identifier written back to
+   *  connector_mappings -- conflating the two would corrupt that mapping.
+   *  Dashboard-side dedup key: (client, source, metricKey, item_id), so a
+   *  daily re-run of the same items is a harmless no-op. */
+  item_id?: string;
   period_start: string;
   period_end: string;
   /** Omitted for incremental (defaults to now()); set for backfill (backdated). */
