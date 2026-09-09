@@ -62,6 +62,7 @@
     "oneoff-backfill-company-qbo-links": "tsx src/oneoff-backfill-company-qbo-links.ts",
     "oneoff-enrich-contacts": "tsx src/oneoff-enrich-contacts.ts",
     "debug-contact-cleanup-scope": "tsx src/debug-contact-cleanup-scope.ts",
+    "debug-fathom-webhook-status": "tsx src/debug-fathom-webhook-status.ts",
     "oneoff-delete-junk-contacts": "tsx src/oneoff-delete-junk-contacts.ts",
     "debug-scheduled-revenue-gaps": "tsx src/debug-scheduled-revenue-gaps.ts",
     "debug-lbl-scheduled-gap": "tsx src/debug-lbl-scheduled-gap.ts",
