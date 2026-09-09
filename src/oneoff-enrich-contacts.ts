@@ -167,7 +167,34 @@ async function main() {
     }
     if (plan.length > 25) console.log(`  ... and ${plan.length - 25} more`);
 
-    if (dryRun) { console.log("\n(dry-run — no changes written)"); return; }
+    // Diagnose the "prospect" rule before trusting it at scale: is a
+    // non-null original_source actually specific to prospects, or does
+    // HubSpot's import populate it broadly regardless of contact_type
+    // (which would make the rule mislabel vendors/solicitors/past clients
+    // that just happen to carry some source string)?
+    if (dryRun) {
+      const byIdCandidate = new Map(candidates.map((r) => [r.id, r]));
+      const prospectIds = plan.filter((p) => p.patch.contactType === "prospect").map((p) => p.id);
+      const sourceCounts = new Map<string, number>();
+      for (const id of prospectIds) {
+        const src = byIdCandidate.get(id)?.original_source ?? "(none)";
+        sourceCounts.set(src, (sourceCounts.get(src) ?? 0) + 1);
+      }
+      const topSources = Array.from(sourceCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 15);
+      console.log(`\nTop original_source values driving the ${prospectIds.length} "prospect" fills:`);
+      for (const [src, n] of topSources) console.log(`  ${n}\t${src}`);
+
+      const { rows: typeSourceRows } = await c.query<{ contact_type: string | null; total: string; with_source: string }>(
+        `SELECT contact_type, COUNT(*) AS total, COUNT(original_source) AS with_source
+           FROM contacts GROUP BY contact_type ORDER BY total DESC`,
+      );
+      console.log(`\noriginal_source coverage by EXISTING contact_type (sanity check — is original_source prospect-specific?):`);
+      for (const r of typeSourceRows) {
+        console.log(`  ${r.contact_type ?? "(null)"}\t${r.with_source}/${r.total} have original_source`);
+      }
+      console.log("\n(dry-run — no changes written)");
+      return;
+    }
 
     for (const p of plan) {
       const sets: string[] = [];
