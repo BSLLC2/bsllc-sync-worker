@@ -137,7 +137,15 @@ async function main() {
         if (dealInfo?.won) contactType = "client";
         else if (companyId && clientCompanyIds.has(companyId)) contactType = "client";
         else if (row.account_role) contactType = "client";
-        else if (row.original_source) contactType = "prospect";
+        // NOT "else if (row.original_source)" -- confirmed live that
+        // original_source is populated on nearly every imported HubSpot
+        // contact regardless of type (534/534 existing solicitors, 112/112
+        // existing clients), mostly raw HubSpot codes like OFFLINE from the
+        // bulk import, not evidence of a real inbound lead. Only the exact
+        // format the app's createWebInquiryContact stamps ("Website form —
+        // …") means this contact genuinely came through our own verified
+        // web-form capture.
+        else if (row.original_source?.startsWith("Website form")) contactType = "prospect";
         if (contactType) patch.contactType = contactType;
       }
 
