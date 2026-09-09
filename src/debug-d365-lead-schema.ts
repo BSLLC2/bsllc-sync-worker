@@ -26,16 +26,43 @@ async function main() {
     "OData-Version": "4.0",
   };
 
-  console.log("-- 3 raw Lead records (no $select, so all standard + custom fields come through) --");
-  const leadsRes = await fetch(`${cfg.resourceUrl}/api/data/v9.2/leads?$top=3`, { headers });
+  console.log("-- 10 most RECENT Lead records (sorted by createdon desc) --");
+  const recentSelect = "leadid,firstname,lastname,emailaddress1,telephone1,createdon,leadsourcecode,subject,statuscode,companyname";
+  const leadsRes = await fetch(
+    `${cfg.resourceUrl}/api/data/v9.2/leads?$select=${recentSelect}&$orderby=createdon desc&$top=10`,
+    { headers },
+  );
   if (!leadsRes.ok) {
     console.error(`leads query failed (${leadsRes.status}): ${await leadsRes.text()}`);
   } else {
     const j = (await leadsRes.json()) as { value?: Record<string, unknown>[] };
-    for (const lead of j.value ?? []) {
-      console.log(JSON.stringify(lead, null, 2));
-      console.log("---");
+    for (const lead of j.value ?? []) console.log(JSON.stringify(lead));
+  }
+
+  console.log("\n-- leadsourcecode distribution across ALL leads (GROUP BY isn't supported by this API, so pull id+code and tally client-side) --");
+  const codeUrl = `${cfg.resourceUrl}/api/data/v9.2/leads?$select=leadid,leadsourcecode&$top=1000`;
+  const codeRes = await fetch(codeUrl, { headers });
+  if (!codeRes.ok) {
+    console.error(`leadsourcecode tally query failed (${codeRes.status}): ${await codeRes.text()}`);
+  } else {
+    const j = (await codeRes.json()) as { value?: Array<{ leadsourcecode: number | null }> };
+    const counts = new Map<string, number>();
+    for (const r of j.value ?? []) {
+      const k = String(r.leadsourcecode);
+      counts.set(k, (counts.get(k) ?? 0) + 1);
     }
+    for (const [k, n] of Array.from(counts.entries()).sort((a, b) => b[1] - a[1])) console.log(`  leadsourcecode=${k}: ${n}`);
+  }
+
+  console.log("\n-- Global option set values actually defined for leadsourcecode (label -> numeric value) --");
+  const optUrl =
+    `${cfg.resourceUrl}/api/data/v9.2/EntityDefinitions(LogicalName='lead')/Attributes(LogicalName='leadsourcecode')/Microsoft.Dynamics.CRM.PicklistAttributeMetadata` +
+    `?$select=LogicalName&$expand=OptionSet($select=Options),GlobalOptionSet($select=Options)`;
+  const optRes = await fetch(optUrl, { headers });
+  if (!optRes.ok) {
+    console.error(`option set query failed (${optRes.status}): ${await optRes.text()}`);
+  } else {
+    console.log(await optRes.text());
   }
 
   console.log("\n-- Picklist (optionset) attributes on the Lead entity whose name suggests 'source' --");
