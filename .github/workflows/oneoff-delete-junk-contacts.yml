@@ -1,0 +1,28 @@
+name: One-off — delete junk contacts (dead-lead solicitors + empty rows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print what would be deleted only, write nothing (true/false)."
+        required: false
+        default: "true"
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Cleanup
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run oneoff-delete-junk-contacts -- --dry-run
+          else
+            npm run oneoff-delete-junk-contacts
+          fi
