@@ -39,6 +39,15 @@ async function main() {
     for (const lead of j.value ?? []) console.log(JSON.stringify(lead));
   }
 
+  console.log("-- Full raw dump of the single most recent REAL lead (no $select) --");
+  const oneRes = await fetch(`${cfg.resourceUrl}/api/data/v9.2/leads?$orderby=createdon desc&$top=1`, { headers });
+  if (!oneRes.ok) {
+    console.error(`single-lead query failed (${oneRes.status}): ${await oneRes.text()}`);
+  } else {
+    const j = (await oneRes.json()) as { value?: Record<string, unknown>[] };
+    console.log(JSON.stringify(j.value?.[0] ?? {}, null, 2));
+  }
+
   console.log("\n-- leadsourcecode distribution across ALL leads (GROUP BY isn't supported by this API, so pull id+code and tally client-side) --");
   const codeUrl = `${cfg.resourceUrl}/api/data/v9.2/leads?$select=leadid,leadsourcecode&$top=1000`;
   const codeRes = await fetch(codeUrl, { headers });
