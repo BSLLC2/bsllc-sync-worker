@@ -145,7 +145,14 @@ function monthBounds(ym: string): { start: string; end: string } {
   const y = Number(ym.slice(0, 4));
   const m = Number(ym.slice(4, 6));
   const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  return { start: `${ym.slice(0, 4)}-${ym.slice(4, 6)}-01`, end: `${ym.slice(0, 4)}-${ym.slice(4, 6)}-${String(last).padStart(2, "0")}` };
+  const end = `${ym.slice(0, 4)}-${ym.slice(4, 6)}-${String(last).padStart(2, "0")}`;
+  // GA4 reports a row for the CURRENT, still-in-progress month too (partial
+  // data so far) -- capping at the calendar month's last day would then stamp
+  // period_end/synced_at days or weeks in the future. Cap at today instead;
+  // a genuinely finished past month's end date is always <= today already,
+  // so this only changes behavior for the in-progress month.
+  const today = new Date().toISOString().slice(0, 10);
+  return { start: `${ym.slice(0, 4)}-${ym.slice(4, 6)}-01`, end: end > today ? today : end };
 }
 
 async function main() {

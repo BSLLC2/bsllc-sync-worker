@@ -27,7 +27,15 @@ function monthBounds(ym: string): { start: string; end: string } {
   const y = Number(ym.slice(0, 4));
   const m = Number(ym.slice(5, 7));
   const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  return { start: `${ym}-01`, end: `${ym}-${String(last).padStart(2, "0")}` };
+  const end = `${ym}-${String(last).padStart(2, "0")}`;
+  // A deal closed earlier in the CURRENT, still-in-progress month would
+  // otherwise get its month capped at the calendar month's last day --
+  // stamping period_end/synced_at days or weeks in the future (see
+  // import-ga4.ts, which hit this for real). Cap at today; a finished past
+  // month's end date is always <= today already, so this only changes the
+  // in-progress month.
+  const today = new Date().toISOString().slice(0, 10);
+  return { start: `${ym}-01`, end: end > today ? today : end };
 }
 
 interface Agg { revCents: Record<Bucket, number>; deals: Record<Bucket, number> }
