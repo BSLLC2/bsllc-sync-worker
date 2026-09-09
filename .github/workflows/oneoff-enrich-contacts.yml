@@ -1,0 +1,28 @@
+name: One-off — enrich existing contacts (company/type/stage)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the enrichment plan only, write nothing (true/false)."
+        required: false
+        default: "true"
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Enrich
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run oneoff-enrich-contacts -- --dry-run
+          else
+            npm run oneoff-enrich-contacts
+          fi
