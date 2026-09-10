@@ -1,0 +1,26 @@
+name: Debug — DPG won-deal size stats from Dynamics (read-only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Earliest close date to include (YYYY-MM-DD)"
+        required: false
+        default: "2025-09-01"
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Report
+        env:
+          DYNAMICS_TENANT_ID: "ac0f116c-73d5-4a33-92ab-c69f79f06055"
+          DYNAMICS_CLIENT_ID: "8f9c4bee-bcae-4347-80d4-7ee0449ce4de"
+          DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
+          DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
+        run: npm run debug-d365-won-deal-stats -- --since="${{ inputs.since }}"
