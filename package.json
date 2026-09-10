@@ -65,6 +65,7 @@
     "debug-fathom-webhook-status": "tsx src/debug-fathom-webhook-status.ts",
     "debug-dpg-web-leads": "tsx src/debug-dpg-web-leads.ts",
     "debug-d365-lead-schema": "tsx src/debug-d365-lead-schema.ts",
+    "debug-all-clients-gap-status": "tsx src/debug-all-clients-gap-status.ts",
     "oneoff-delete-junk-contacts": "tsx src/oneoff-delete-junk-contacts.ts",
     "debug-scheduled-revenue-gaps": "tsx src/debug-scheduled-revenue-gaps.ts",
     "debug-lbl-scheduled-gap": "tsx src/debug-lbl-scheduled-gap.ts",
