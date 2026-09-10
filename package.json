@@ -84,6 +84,8 @@
     "debug-d365-won-deal-stats": "tsx src/debug-d365-won-deal-stats.ts",
     "seed-data-readiness-project": "tsx src/seed-data-readiness-project.ts",
     "daily-brief": "tsx src/daily-brief.ts",
+    "audit-and-repair": "tsx src/audit-and-repair.ts",
+    "post-note": "tsx src/post-note.ts",
     "oneoff-label-och-ctm-calls": "tsx src/oneoff-label-och-ctm-calls.ts",
     "oneoff-trim-pre-contract-web-inquiries": "tsx src/oneoff-trim-pre-contract-web-inquiries.ts",
     "oneoff-fix-och-gsc-and-junk": "tsx src/oneoff-fix-och-gsc-and-junk.ts",

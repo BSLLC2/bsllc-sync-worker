@@ -77,7 +77,7 @@ async function main() {
 
     const { rows: tasks } = await c.query<{ title: string; status: string; priority: string; due_date: string | null; assignee_name: string | null }>(
       `SELECT title, status, priority, due_date, assignee_name FROM commitments
-        WHERE source = 'data-readiness' AND workstream = $1 AND status <> 'complete' ORDER BY priority, due_date NULLS LAST`, [PROJECT_NAME]);
+        WHERE source IN ('data-readiness', 'data-audit') AND workstream = $1 AND status <> 'complete' ORDER BY priority, due_date NULLS LAST`, [PROJECT_NAME]);
     const today = new Date().toISOString().slice(0, 10);
     const overdue = tasks.filter((t) => t.due_date && t.due_date < today);
     const dueToday = tasks.filter((t) => t.due_date === today);

@@ -1,0 +1,128 @@
+name: Morning audit + repair
+
+# Weekday mornings before the brief: check every importer's heartbeat, re-run
+# only the ones that missed or failed, apply safe auto-fixes, and file every
+# remaining problem as a task in the OS "Data readiness" project (closing it
+# again automatically once it clears). See src/audit-and-repair.ts.
+on:
+  schedule:
+    - cron: "0 11 * * 1-5" # 07:00 ET (11:00 UTC) weekdays; the brief posts at 11:30 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Audit only — no re-runs, no writes (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: morning-audit
+  cancel-in-progress: false
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: worker
+      - uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: worker
+      - run: npm ci
+        working-directory: dashboard
+
+      - name: Plan — which importers missed or failed
+        id: plan
+        working-directory: worker
+        run: npm run audit-and-repair -- --mode=plan
+
+      # ── Re-run only what the plan asked for. Each step is independent. ──
+      - name: Re-run Google Ads
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'ads')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
+        run: npm run incremental && npm run heartbeat -- --job=incremental_sync --status=success
+      - name: Re-run HubSpot metrics
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'hubspot_metrics')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          HUBSPOT_TOKEN_TABLESPOON: ${{ secrets.HUBSPOT_TOKEN_TABLESPOON }}
+        run: npm run import-hubspot-metrics && npm run heartbeat -- --job=import_hubspot_metrics --status=success
+      - name: Re-run OCH admissions
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'och')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          OCH_VALUE_PER_ADMISSION_CENTS: ${{ secrets.OCH_VALUE_PER_ADMISSION_CENTS }}
+        run: npm run import-och && npm run heartbeat -- --job=import_och --status=success
+      - name: Re-run GA4
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'ga4')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GA4_PROPERTY_MAP: ${{ secrets.GA4_PROPERTY_MAP }}
+        run: npm run import-ga4 && npm run heartbeat -- --job=import_ga4 --status=success
+      - name: Re-run Search Console
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'gsc')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: npm run import-gsc-api && npm run heartbeat -- --job=import_gsc --status=success
+      - name: Re-run Dynamics 365
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'd365')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          DYNAMICS_TENANT_ID: "ac0f116c-73d5-4a33-92ab-c69f79f06055"
+          DYNAMICS_CLIENT_ID: "8f9c4bee-bcae-4347-80d4-7ee0449ce4de"
+          DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
+          DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
+        run: npm run import-d365 && npm run heartbeat -- --job=import_d365 --status=success
+      - name: Re-run HubSpot deals
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'hubspot_deals')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          HUBSPOT_TOKEN: ${{ secrets.HUBSPOT_TOKEN }}
+        run: npm run import-hubspot-deals && npm run heartbeat -- --job=hubspot_deals --status=success
+      - name: Re-run QBO invoices
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'qbo')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+        run: npm run import-qbo-invoices-sync && npm run heartbeat -- --job=qbo_invoices_sync --status=success
+
+      - name: Apply — auto-fixes and findings → tasks
+        working-directory: worker
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run audit-and-repair -- --mode=apply --dry-run
+          else
+            npm run audit-and-repair -- --mode=apply
+          fi

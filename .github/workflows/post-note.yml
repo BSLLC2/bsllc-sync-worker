@@ -1,0 +1,23 @@
+name: Post a note to Slack
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "Plain text (Slack mrkdwn allowed)"
+        required: true
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Post
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          NOTE: ${{ inputs.note }}
+        run: npm run post-note
