@@ -104,7 +104,7 @@ async function queryDaily(token: string, siteUrl: string, startDate: string, end
   const res = await fetch(`${API}/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ startDate, endDate, dimensions: [{ name: "date" }], dataState: "final", rowLimit: 25000 }),
+    body: JSON.stringify({ startDate, endDate, dimensions: ["date"], dataState: "final", rowLimit: 25000 }),
   });
   if (!res.ok) {
     const body = await res.text();
