@@ -178,10 +178,18 @@ async function main() {
     // Historical catch-up: one snapshot per calendar month from `since` to
     // today, same shape as import-ga4.ts's --since path.
     const end = iso(new Date(Date.now() - 2 * 86_400_000)); // GSC lags ~2 days
-    console.log(`GSC historical import — ${Object.keys(map).length} propert(ies), ${since}…${end}${dryRun ? " (dry-run)" : ""}`);
+    // Search Console keeps 16 months. A contract start older than that (OCH,
+    // Aug 2024) used to make the whole backfill error out and leave an
+    // "error" row newer than every good one, so the connector read as failing.
+    // Clamp to the retention window and say so.
+    const floor = new Date(); floor.setUTCMonth(floor.getUTCMonth() - 16); floor.setUTCDate(floor.getUTCDate() + 1);
+    const floorIso = iso(floor);
+    let sinceEff = since;
+    if (since < floorIso) { sinceEff = floorIso; console.log(`  --since ${since} is older than Search Console's 16-month retention; starting at ${floorIso} instead.`); }
+    console.log(`GSC historical import — ${Object.keys(map).length} propert(ies), ${sinceEff}…${end}${dryRun ? " (dry-run)" : ""}`);
     for (const [slug, siteUrl] of Object.entries(map)) {
       try {
-        const daily = await queryDaily(token, siteUrl, since, end);
+        const daily = await queryDaily(token, siteUrl, sinceEff, end);
         const monthly = bucketMonthly(daily);
         let planted = 0;
         for (const [ym, agg] of monthly) {
@@ -203,7 +211,7 @@ async function main() {
       } catch (e) {
         syncs.push({
           client_id: slug, source: "gsc", external_id: siteUrl,
-          period_start: since, period_end: end, synced_at: new Date().toISOString(),
+          period_start: sinceEff, period_end: end, synced_at: new Date().toISOString(),
           data_state: "error", error_message: (e instanceof Error ? e.message : String(e)).slice(0, 300), metrics: {},
         });
         console.log(`  ✗ ${slug} (${siteUrl}) — ${e instanceof Error ? e.message : e}`);
