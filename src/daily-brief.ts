@@ -54,15 +54,17 @@ async function main() {
         : SYSTEM.some((k) => keys.has(k)) || Number(wins?.n ?? 0) > 0 ? "client records"
         : MODELED.some((k) => keys.has(k)) || (cl.customer_value_cents && (cl.close_rate_pct != null)) ? "modeled"
         : "none";
-      // Connector state judged on the latest run only (same rule as Admin → Connectors)
+      // A connector is failing only if its newest error is at least as recent
+      // as its newest success (same rule as Admin → Connectors).
       const { rows: errs } = await c.query<{ source: string; error_message: string | null }>(
         `WITH latest AS (
            SELECT DISTINCT ON (source, metric_key) source, metric_key, data_state, error_message, synced_at
              FROM metric_snapshots WHERE client_id = $1 AND (period_end IS NULL OR period_end <= now())
             ORDER BY source, metric_key, synced_at DESC),
-         mx AS (SELECT source, max(synced_at) AS m FROM latest GROUP BY source)
-         SELECT DISTINCT l.source, l.error_message FROM latest l JOIN mx ON mx.source = l.source
-          WHERE l.data_state = 'error' AND l.synced_at >= mx.m - interval '6 hours'`, [cl.id]);
+         live AS (SELECT source, max(synced_at) AS m FROM latest WHERE data_state = 'live' GROUP BY source),
+         err AS (SELECT DISTINCT ON (source) source, error_message, synced_at FROM latest WHERE data_state = 'error' ORDER BY source, synced_at DESC)
+         SELECT e.source, e.error_message FROM err e LEFT JOIN live ON live.source = e.source
+          WHERE live.m IS NULL OR e.synced_at >= live.m`, [cl.id]);
       const parts = [
         `${web?.forms ?? 0} forms · ${web?.calls ?? 0} calls this month${web?.last ? ` (last ${web.last.slice(0, 10)})` : ""}`,
         convHit ? `${Math.round(Number(convHit.v))} conversions (${convHit.metric_key.replace(/^.*\./, "").replace(/_/g, " ")})` : "conversions: none this month",
