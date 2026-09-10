@@ -35,6 +35,13 @@ async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
+    // Same idempotent DDL as the dashboard's ensureSchema v136, so this can run
+    // before the deployed app has cold-started and applied it itself.
+    await c.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS close_rate_pct DOUBLE PRECISION`);
+    await c.query(`CREATE TABLE IF NOT EXISTS client_named_wins (
+      id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id), name TEXT NOT NULL, value_cents INTEGER NOT NULL,
+      won_on TEXT, tier TEXT NOT NULL DEFAULT 'system', source TEXT, notes TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+    await c.query(`CREATE INDEX IF NOT EXISTS idx_client_named_wins_client ON client_named_wins (client_id)`);
     const { rows: [client] } = await c.query<{ id: string; name: string; customer_value_cents: number | null; close_rate_pct: number | null }>(
       `SELECT id, name, customer_value_cents, close_rate_pct FROM clients WHERE name ILIKE 'Franklin Brazing%' LIMIT 1`);
     if (!client) throw new Error("Franklin Brazing not found");
