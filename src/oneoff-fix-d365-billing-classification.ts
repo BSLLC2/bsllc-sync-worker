@@ -33,21 +33,23 @@ async function main() {
     console.log(`Client: ${client[0]!.name} (${clientId})\n`);
 
     const { rows: existing } = await c.query<{
-      id: string; item_id: string | null; metrics: any; period_start: string | null; period_end: string | null;
+      id: string; external_id: string | null; metric_key: string; value_numeric: number | null;
+      value_text: string | null; period_start: string | null; period_end: string | null;
     }>(
-      `SELECT id, item_id, metrics, period_start, period_end FROM metric_snapshots
-        WHERE client_id = $1 AND source = 'd365' ORDER BY period_start`,
+      `SELECT id, external_id, metric_key, value_numeric, value_text, period_start, period_end
+         FROM metric_snapshots WHERE client_id = $1 AND source = 'd365' ORDER BY period_start`,
       [clientId],
     );
     console.log(`${existing.length} existing d365 metric_snapshots row(s) for DPG.\n`);
 
-    const perDeal = existing.filter((r) => r.item_id !== null);
-    const aggregate = existing.filter((r) => r.item_id === null);
+    const perDeal = existing.filter((r) => r.external_id !== null);
+    const aggregate = existing.filter((r) => r.external_id === null);
     console.log(`  ${perDeal.length} per-deal row(s), ${aggregate.length} monthly aggregate row(s).\n`);
 
     const bucketCounts: Record<string, number> = {};
     for (const r of perDeal) {
-      const b = r.metrics?.["d365.deal_won_bucket"] ?? "(none)";
+      if (r.metric_key !== "d365.deal_won_bucket") continue;
+      const b = r.value_text ?? "(none)";
       bucketCounts[b] = (bucketCounts[b] ?? 0) + 1;
     }
     console.log("Current per-deal bucket distribution (from the possibly-stale import):");
