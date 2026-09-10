@@ -78,6 +78,7 @@
     "debug-september-coverage": "tsx src/debug-september-coverage.ts",
     "debug-client-cltv": "tsx src/debug-client-cltv.ts",
     "debug-web-leads-by-month": "tsx src/debug-web-leads-by-month.ts",
+    "debug-och-unnamed-inquiries": "tsx src/debug-och-unnamed-inquiries.ts",
     "oneoff-trim-pre-contract-web-inquiries": "tsx src/oneoff-trim-pre-contract-web-inquiries.ts",
     "oneoff-fix-och-gsc-and-junk": "tsx src/oneoff-fix-och-gsc-and-junk.ts",
     "debug-och-webform-key-rotation-check": "tsx src/debug-och-webform-key-rotation-check.ts",
