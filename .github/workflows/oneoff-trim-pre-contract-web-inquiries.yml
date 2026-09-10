@@ -1,0 +1,31 @@
+name: One-off — set contract_start and drop replayed leads before it
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client slug"
+        required: true
+        default: "franklin-brazing"
+      start:
+        description: "Contract start YYYY-MM-DD"
+        required: true
+        default: "2023-12-15"
+      dry_run:
+        description: "Report only (true/false)"
+        required: false
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run oneoff-trim-pre-contract-web-inquiries -- --client="${{ inputs.client }}" --start="${{ inputs.start }}" --dry-run="${{ inputs.dry_run }}"
