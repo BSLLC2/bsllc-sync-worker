@@ -233,7 +233,11 @@ async function main() {
         external_id: propertyId,
         period_start: start,
         period_end: end,
-        synced_at: `${end}T12:00:00.000Z`,
+        // In-progress month stamped now (same reason as import-gsc-api.ts):
+        // a backdated live row can never clear an error row written by an
+        // earlier failed attempt, so the connector would read "failing" until
+        // the next daily pull even though this run just succeeded.
+        synced_at: end === new Date().toISOString().slice(0, 10) ? new Date().toISOString() : `${end}T12:00:00.000Z`,
         data_state: "live",
         error_message: null,
         // namespaced keys — sync.ts stores them verbatim; dashboard reads ga4.*

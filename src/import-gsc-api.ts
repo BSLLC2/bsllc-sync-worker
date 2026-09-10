@@ -195,9 +195,17 @@ async function main() {
         for (const [ym, agg] of monthly) {
           const { start, end: monthEnd } = monthBoundsYm(ym);
           if (agg.impressions === 0) continue;
+          // Past months are stamped at their month-end so the row reads as
+          // "as of" that month. The in-progress month is stamped NOW: connector
+          // health treats a source as failing while its newest error row is
+          // newer than its newest live row, and a backfill that failed once
+          // (e.g. the 400 on `dimensions`) then succeeded would otherwise leave
+          // the error standing until the next daily pull.
+          const inProgress = monthEnd === new Date().toISOString().slice(0, 10);
           syncs.push({
             client_id: slug, source: "gsc", external_id: siteUrl,
-            period_start: start, period_end: monthEnd, synced_at: `${monthEnd}T12:00:00.000Z`,
+            period_start: start, period_end: monthEnd,
+            synced_at: inProgress ? new Date().toISOString() : `${monthEnd}T12:00:00.000Z`,
             data_state: "live", error_message: null,
             metrics: {
               "gsc.clicks": agg.clicks, "gsc.impressions": agg.impressions,
