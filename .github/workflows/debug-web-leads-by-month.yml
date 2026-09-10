@@ -1,0 +1,24 @@
+name: Debug — one client's Website Leads by month
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client slug (e.g. franklin-brazing)"
+        required: true
+        default: "franklin-brazing"
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLIENT_SLUG: ${{ inputs.client }}
+        run: npm run debug-web-leads-by-month
