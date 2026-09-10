@@ -76,6 +76,7 @@
     "oneoff-backfill-callrail-contacts": "tsx src/oneoff-backfill-callrail-contacts.ts",
     "oneoff-backfill-dpg-web-inquiries": "tsx src/oneoff-backfill-dpg-web-inquiries.ts",
     "debug-september-coverage": "tsx src/debug-september-coverage.ts",
+    "debug-client-cltv": "tsx src/debug-client-cltv.ts",
     "oneoff-fix-och-gsc-and-junk": "tsx src/oneoff-fix-och-gsc-and-junk.ts",
     "debug-och-webform-key-rotation-check": "tsx src/debug-och-webform-key-rotation-check.ts",
     "oneoff-delete-junk-contacts": "tsx src/oneoff-delete-junk-contacts.ts",
