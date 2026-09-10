@@ -97,13 +97,14 @@ async function main() {
       `WITH latest AS (
          SELECT DISTINCT ON (client_id, source, metric_key) client_id, source, metric_key, data_state, error_message, synced_at
            FROM metric_snapshots WHERE (period_end IS NULL OR period_end <= now()) ORDER BY client_id, source, metric_key, synced_at DESC),
-       live AS (SELECT client_id, source, max(synced_at) AS m FROM latest WHERE data_state = 'live' GROUP BY 1, 2),
+       -- a run that answered no_data is a success too: the pipeline worked, the account was empty
+       live AS (SELECT client_id, source, max(synced_at) AS m FROM latest WHERE data_state IN ('live', 'no_data') GROUP BY 1, 2),
        err AS (SELECT DISTINCT ON (client_id, source) client_id, source, error_message, synced_at FROM latest WHERE data_state = 'error' ORDER BY client_id, source, synced_at DESC)
        SELECT c.name, e.source, e.error_message FROM err e
          JOIN connector_mappings m ON m.client_id = e.client_id AND m.source = e.source AND m.enabled
          JOIN clients c ON c.id = e.client_id
          LEFT JOIN live ON live.client_id = e.client_id AND live.source = e.source
-        WHERE (live.m IS NULL OR e.synced_at >= live.m) AND c.status IN ('launch', 'active')`)).rows;
+        WHERE (live.m IS NULL OR e.synced_at > live.m) AND c.status IN ('launch', 'active')`)).rows;
     for (const r of conn) findings.push({
       key: `conn:${slugify(r.name)}:${r.source}`, priority: "P1", status: "blocked",
       title: `${r.name} — ${SOURCE_LABEL[r.source] ?? r.source} is failing`,
@@ -157,7 +158,7 @@ async function main() {
     for (const r of (await c.query<{ client_id: string; n: string }>(`SELECT client_id, count(*)::text AS n FROM connector_mappings WHERE enabled AND external_id IS NOT NULL AND external_id <> '' GROUP BY client_id`)).rows) enabledBy.set(r.client_id, Number(r.n));
     const hasData = new Set((await c.query<{ client_id: string }>(`SELECT DISTINCT client_id FROM metric_snapshots WHERE data_state = 'live'`)).rows.map((r) => r.client_id));
     for (const cl of clients) {
-      if (cl.is_internal) continue;
+      if (cl.is_internal || cl.name === INTERNAL_CLIENT) continue;
       const s = slugify(cl.name);
       const leadFlow = (n30.get(s) ?? 0) > 0 || Number(leads.find((l) => l.client_slug === s)?.n90 ?? 0) > 0;
       if (!cl.contract_start && hasData.has(cl.id)) findings.push({ key: `contract-start:${s}`, priority: "P2", title: `${cl.name} — no contract start date`, description: "Set it on the client page. Lifetime totals, the case-study window and pre-contract lead trimming all key off it." });
