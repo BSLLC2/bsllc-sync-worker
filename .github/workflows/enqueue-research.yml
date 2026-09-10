@@ -7,15 +7,19 @@ on:
   workflow_dispatch:
     inputs:
       kind:
-        description: "ideas | rankings"
+        description: "ideas | rankings | gap | discovery"
         required: true
         default: "ideas"
       query:
-        description: "Seed keyword (ideas) or domain (rankings)"
+        description: "Seed keyword (ideas), domain (rankings), competitor domain (gap), or comma-separated seeds (discovery)"
         required: true
         default: "commercial roofing"
       target:
-        description: "Domain for kind=rankings (bare host)"
+        description: "Client domain for kind=rankings/gap/discovery (bare host)"
+        required: false
+        default: ""
+      competitor:
+        description: "Competitor domain for kind=discovery (optional gap analysis)"
         required: false
         default: ""
       location:
@@ -40,7 +44,8 @@ jobs:
             --kind="${{ inputs.kind }}" \
             --query="${{ inputs.query }}" \
             --location="${{ inputs.location }}" \
-            ${{ inputs.target != '' && format('--target="{0}"', inputs.target) || '' }}
+            ${{ inputs.target != '' && format('--target="{0}"', inputs.target) || '' }} \
+            ${{ inputs.competitor != '' && format('--competitor="{0}"', inputs.competitor) || '' }}
       - name: Run research (drains pending)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
