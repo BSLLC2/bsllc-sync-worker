@@ -89,17 +89,37 @@ async function main() {
     const LEAD_SLA_H: Record<string, number> = { "ohio-community-health-och": 7 * 24 };
     const LEAD_DEFAULT_SLA_H = 14 * 24;
     const UPLOAD_SLA_H = 45 * 24;
-    let leadRows: { client_slug: string; last_lead: Date; n90: string; gclid30: string }[] = [];
+    let leadRows: { client_slug: string; last_lead: Date; n90: string; n30: string; gclid30: string }[] = [];
     try {
-      leadRows = (await c.query<{ client_slug: string; last_lead: Date; n90: string; gclid30: string }>(
+      leadRows = (await c.query<{ client_slug: string; last_lead: Date; n90: string; n30: string; gclid30: string }>(
         `SELECT client_slug, MAX(submitted_at) AS last_lead,
                 COUNT(*) FILTER (WHERE submitted_at > now() - interval '90 days') AS n90,
+                COUNT(*) FILTER (WHERE submitted_at > now() - interval '30 days') AS n30,
                 COUNT(*) FILTER (WHERE gclid IS NOT NULL AND gclid <> '' AND submitted_at > now() - interval '30 days') AS gclid30
            FROM web_inquiries
           WHERE email IS NULL OR (email NOT ILIKE '%@bsllc.biz' AND email NOT IN ('sebastienhue@gmail.com', 'test-inquiry@bsllc.biz'))
           GROUP BY client_slug`,
       )).rows;
     } catch { /* table not present yet */ }
+    // "Connected but empty": an active client whose site has GA4 traffic in
+    // the last 45 days and not one website lead in 30. Either no form on the
+    // site posts to the webhook or the site genuinely produces no inquiries;
+    // both need a human to look, and neither shows up as an error anywhere.
+    // This is the gap 18 of 19 clients sat in for weeks with nothing firing.
+    let trafficNoLeads: string[] = [];
+    try {
+      const withTraffic = (await c.query<{ name: string }>(
+        `SELECT c.name FROM clients c
+          WHERE c.status IN ('launch', 'active') AND NOT c.is_internal
+            AND EXISTS (SELECT 1 FROM metric_snapshots m
+                         WHERE m.client_id = c.id AND m.source = 'ga4' AND m.metric_key = 'ga4.sessions'
+                           AND m.data_state = 'live' AND m.value_numeric > 0
+                           AND COALESCE(m.period_start, m.synced_at) > now() - interval '45 days')`,
+      )).rows;
+      const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const n30 = new Map(leadRows.map((r) => [r.client_slug, Number(r.n30)]));
+      trafficNoLeads = withTraffic.map((r) => slugify(r.name)).filter((slug) => (n30.get(slug) ?? 0) === 0).sort();
+    } catch { /* columns not present yet */ }
     const lastUpload = new Map<string, Date>();
     try {
       const col = (await c.query<{ column_name: string }>(
@@ -164,6 +184,7 @@ async function main() {
       }
     }
     if (noLeads.length) console.log(`No new website leads: ${noLeads.map((l) => `${clientLabel(l.slug)} (${Math.round(l.ageH / 24)}d)`).join(", ")}`);
+    if (trafficNoLeads.length) console.log(`Site traffic but no website leads captured (30d): ${trafficNoLeads.map(clientLabel).join(", ")}`);
     if (noUploads.length) console.log(`Ad-click leads without offline-conversion uploads: ${noUploads.map((u) => `${clientLabel(u.slug)} (${u.gclid30} gclid leads/30d, last upload ${u.lastUpload ? `${Math.round((now - new Date(u.lastUpload).getTime()) / 86_400_000)}d ago` : "never"})`).join(", ")}`);
 
     if (errDetail.rows.length) {
@@ -183,6 +204,7 @@ async function main() {
       ...coiAlerts.map((r) => `C:${r.name}:${r.days < 0 ? "exp" : r.days <= 7 ? "7" : "30"}`),
       ...noLeads.map((l) => `L:${l.slug}`),
       ...noUploads.map((u) => `U:${u.slug}`),
+      ...trafficNoLeads.map((s) => `W:${s}`),
     ].sort().join(",");
     const prevRow = (await c.query<{ note: string | null; ran_at: Date }>(`SELECT note, ran_at FROM job_heartbeats WHERE job = 'freshness_monitor'`)).rows[0];
     const prev = prevRow?.note ?? "";
@@ -196,7 +218,7 @@ async function main() {
     const REMIND_AFTER_H = 24;
     const prevAgeH = prevRow?.ran_at ? (now - new Date(prevRow.ran_at).getTime()) / 3_600_000 : Infinity;
     const unchanged = signature === prev;
-    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0 || noLeads.length > 0 || noUploads.length > 0;
+    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0 || noLeads.length > 0 || noUploads.length > 0 || trafficNoLeads.length > 0;
     const dueForReminder = unchanged && stillDown && prevAgeH >= REMIND_AFTER_H;
     if (unchanged && !dueForReminder) { console.log("No change — no alert."); return; }
 
@@ -205,12 +227,13 @@ async function main() {
       : "";
 
     let text: string | null = null;
-    if (down.length || erroring.length || coiAlerts.length || noLeads.length || noUploads.length) {
+    if (down.length || erroring.length || coiAlerts.length || noLeads.length || noUploads.length || trafficNoLeads.length) {
       const parts: string[] = [];
       if (down.length) parts.push(`:red_circle: *Not flowing:* ${down.map(label).join(", ")}`);
       if (erroring.length) parts.push(`:large_orange_circle: *Account errors:* ${erroring.map((e) => `${label(e.src)} (${e.n}/${e.m})`).join(", ")}`);
       if (noLeads.length) parts.push(`:mailbox_with_no_mail: *No new website leads:* ${noLeads.map((l) => `${clientLabel(l.slug)} (last ${Math.round(l.ageH / 24)}d ago — check every form on the site still posts to the webhook)`).join(", ")}`);
       if (noUploads.length) parts.push(`:repeat: *Ad-click leads not reaching Google as admissions:* ${noUploads.map((u) => `${clientLabel(u.slug)} (${u.gclid30} gclid leads in 30d, last upload ${u.lastUpload ? `${Math.round((now - new Date(u.lastUpload).getTime()) / 86_400_000)}d ago` : "never"})`).join(", ")}`);
+      if (trafficNoLeads.length) parts.push(`:mag: *Site traffic, zero leads captured (30d):* ${trafficNoLeads.map(clientLabel).join(", ")} — no form on the site is posting to the webhook, or one needs wiring`);
       if (coiLine) parts.push(coiLine);
       const headline = dueForReminder ? ":satellite: *Data health — still unresolved*" : ":satellite: *Data health changed*";
       text = `${headline}\n${parts.join("\n")}\n<${DASH}/#/admin/data-health|Open Data health →>`;
