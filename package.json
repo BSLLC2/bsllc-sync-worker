@@ -71,6 +71,7 @@
     "debug-d365-field-security": "tsx src/debug-d365-field-security.ts",
     "debug-dpg-leadsourcecode-since-sep3": "tsx src/debug-dpg-leadsourcecode-since-sep3.ts",
     "debug-dpg-callrail-number": "tsx src/debug-dpg-callrail-number.ts",
+    "oneoff-fix-d365-billing-classification": "tsx src/oneoff-fix-d365-billing-classification.ts",
     "oneoff-delete-junk-contacts": "tsx src/oneoff-delete-junk-contacts.ts",
     "debug-scheduled-revenue-gaps": "tsx src/debug-scheduled-revenue-gaps.ts",
     "debug-lbl-scheduled-gap": "tsx src/debug-lbl-scheduled-gap.ts",
