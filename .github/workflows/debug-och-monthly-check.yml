@@ -1,0 +1,24 @@
+name: Debug — OCH month-by-month as the dashboard sees it
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "First month to show (YYYY-MM-DD)"
+        required: false
+        default: "2024-08-01"
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SINCE: ${{ inputs.since }}
+        run: npm run debug-och-monthly-check

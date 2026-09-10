@@ -132,7 +132,7 @@ async function runReport(token: string, propertyId: string, since: string, metri
   });
   if (!res.ok) {
     const body = await res.text();
-    if (res.status === 403) throw new Error(`GA4 403 for property ${propertyId} — add the service account as a Viewer.`);
+    if (res.status === 403) throw new Error(`GA4 403 for property ${propertyId} — in GA4 Admin → Property access, add ${serviceAccount().client_email} as a Viewer.`);
     const err = new Error(`GA4 runReport ${propertyId} (${metrics.join(",")}) → ${res.status} ${body}`);
     (err as any).status = res.status;
     (err as any).body = body;

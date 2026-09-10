@@ -86,7 +86,7 @@ async function queryTotals(token: string, siteUrl: string, startDate: string, en
     if (res.status === 403 && /has not been used in project|is disabled/i.test(body)) {
       throw new Error(`GSC API is DISABLED on the Google Cloud project — this is not a property permission. ${body.slice(0, 300)}`);
     }
-    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl}: ${body.slice(0, 300)}`);
+    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl} — in Search Console, add ${serviceAccount().client_email} as a user (Full) on this property. ${body.slice(0, 200)}`);
     throw new Error(`GSC query ${siteUrl} → ${res.status} ${body.slice(0, 200)}`);
   }
   const json: any = await res.json();
@@ -111,7 +111,7 @@ async function queryDaily(token: string, siteUrl: string, startDate: string, end
     if (res.status === 403 && /has not been used in project|is disabled/i.test(body)) {
       throw new Error(`GSC API is DISABLED on the Google Cloud project — this is not a property permission. ${body.slice(0, 300)}`);
     }
-    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl}: ${body.slice(0, 300)}`);
+    if (res.status === 403) throw new Error(`GSC 403 for ${siteUrl} — in Search Console, add ${serviceAccount().client_email} as a user (Full) on this property. ${body.slice(0, 200)}`);
     throw new Error(`GSC query ${siteUrl} → ${res.status} ${body.slice(0, 200)}`);
   }
   const j: any = await res.json();
