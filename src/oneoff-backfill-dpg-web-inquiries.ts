@@ -101,7 +101,10 @@ async function main() {
   if (!leadsRes.ok) throw new Error(`leads ${leadsRes.status}: ${await leadsRes.text()}`);
   const leads = (await leadsRes.json()) as { value: Array<{ leadid: string; firstname: string | null; lastname: string | null; emailaddress1: string | null; telephone1: string | null; mobilephone: string | null; leadsourcecode: number | null; createdon: string }> };
   console.log(`D365: ${leads.value.length} lead(s) since ${SINCE}\n`);
+  const isTest = (l: { firstname: string | null; lastname: string | null; emailaddress1: string | null }) =>
+    /test/i.test(`${l.firstname ?? ""} ${l.lastname ?? ""}`) || /@test+\.com$|test/i.test(l.emailaddress1 ?? "");
   for (const l of leads.value) {
+    if (isTest(l)) { console.log(`TEST    skipping ${l.firstname} ${l.lastname} <${l.emailaddress1}>`); skipped++; continue; }
     const src = l.leadsourcecode == null ? null : (labels.get(l.leadsourcecode) ?? String(l.leadsourcecode));
     await insert({ first: l.firstname, last: l.lastname, email: l.emailaddress1, phone: l.telephone1 ?? l.mobilephone, utmSource: src, form: "DPG Quote Form", at: l.createdon, raw: { backfill: "d365", leadid: l.leadid, leadsourcecode: l.leadsourcecode } });
   }
