@@ -2,7 +2,7 @@
 /**
  * Plugin Name: BS LLC — lead forwarder
  * Description: Forwards every Elementor Pro form submission on this site to the BS LLC dashboard (Website Leads), with first-touch ad attribution from a first-party cookie. Can also replay the site's stored submission history. Configure under Settings → BS LLC lead forwarder.
- * Version: 2026-09-10.3
+ * Version: 2026-09-10.4
  * Author: BS LLC
  *
  * Installable on any WordPress + Elementor Pro site from Plugins → Add New →
@@ -23,7 +23,7 @@ const BSLLC_LF_REPLAY_OPTION = 'bsllc_lead_forwarder_replay';
 const BSLLC_LF_BASE_URL      = 'https://work.bsllc.biz/api/webform/';
 const BSLLC_LF_ATTRIB_COOKIE = 'bs_attrib';
 const BSLLC_LF_ATTRIB_DAYS   = 90;
-const BSLLC_LF_REPLAY_BATCH  = 100;
+const BSLLC_LF_REPLAY_BATCH  = 20;
 
 function bsllc_lf_settings() {
 	$o = get_option( BSLLC_LF_OPTION, array() );
@@ -235,6 +235,7 @@ function bsllc_lf_replay_batch() {
 	if ( ! $rows ) {
 		return array( 'errors' => 0, 'done' => true, 'message' => 'Nothing left to send.' );
 	}
+	if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 120 ); }
 	$ok = 0; $errors = 0; $skipped = 0; $last_err = '';
 	foreach ( $rows as $row ) {
 		if ( '' !== $s['from'] && substr( (string) $row['created_at'], 0, 10 ) < $s['from'] ) {
@@ -255,6 +256,8 @@ function bsllc_lf_replay_batch() {
 		$r = bsllc_lf_post( array_merge( $norm, $passthru ), 'replay ' . $row['id'] );
 		if ( true === $r ) { $ok++; } else { $errors++; $last_err = $r; }
 		$state['last_id'] = (int) $row['id'];
+		// Persist after every post so a PHP time limit mid-batch never loses progress.
+		update_option( BSLLC_LF_REPLAY_OPTION, array( 'last_id' => $state['last_id'], 'sent' => (int) ( $state['sent'] ?? 0 ) + $ok, 'skipped' => (int) ( $state['skipped'] ?? 0 ) + $skipped ), false );
 	}
 	$state['sent']    = (int) ( $state['sent'] ?? 0 ) + $ok;
 	$state['skipped'] = (int) ( $state['skipped'] ?? 0 ) + $skipped;
