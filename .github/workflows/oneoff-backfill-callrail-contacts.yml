@@ -1,0 +1,31 @@
+name: One-off — backfill CallRail contacts into D365
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only, write nothing to D365 (true/false)."
+        required: false
+        default: "true"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run
+        env:
+          DYNAMICS_TENANT_ID: "ac0f116c-73d5-4a33-92ab-c69f79f06055"
+          DYNAMICS_CLIENT_ID: "8f9c4bee-bcae-4347-80d4-7ee0449ce4de"
+          DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
+          DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "false" ]; then
+            npm run oneoff-backfill-callrail-contacts -- --dry-run=false
+          else
+            npm run oneoff-backfill-callrail-contacts -- --dry-run=true
+          fi
