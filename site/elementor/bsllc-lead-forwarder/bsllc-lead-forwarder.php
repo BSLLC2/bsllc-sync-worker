@@ -2,7 +2,7 @@
 /**
  * Plugin Name: BS LLC — lead forwarder
  * Description: Forwards every Elementor Pro form submission on this site to the BS LLC dashboard (Website Leads), with first-touch ad attribution from a first-party cookie. Can also replay the site's stored submission history. Configure under Settings → BS LLC lead forwarder.
- * Version: 2026-09-10.2
+ * Version: 2026-09-10.3
  * Author: BS LLC
  *
  * Installable on any WordPress + Elementor Pro site from Plugins → Add New →
@@ -30,6 +30,7 @@ function bsllc_lf_settings() {
 	return array(
 		'slug' => defined( 'BSLLC_CLIENT_SLUG' ) ? BSLLC_CLIENT_SLUG : ( isset( $o['slug'] ) ? trim( (string) $o['slug'] ) : '' ),
 		'key'  => defined( 'BSLLC_WEBFORM_KEY' ) ? BSLLC_WEBFORM_KEY : ( isset( $o['key'] ) ? trim( (string) $o['key'] ) : '' ),
+		'from' => isset( $o['from'] ) ? trim( (string) $o['from'] ) : '',
 	);
 }
 
@@ -126,6 +127,7 @@ add_action( 'admin_menu', function () {
 			update_option( BSLLC_LF_OPTION, array(
 				'slug' => sanitize_title( wp_unslash( $_POST['slug'] ?? '' ) ),
 				'key'  => sanitize_text_field( wp_unslash( $_POST['key'] ?? '' ) ),
+				'from' => preg_match( '/^\d{4}-\d{2}-\d{2}$/', (string) ( $_POST['from'] ?? '' ) ) ? (string) $_POST['from'] : '',
 			), false );
 			$notice = '<div class="notice notice-success"><p>Saved.</p></div>';
 		}
@@ -135,8 +137,13 @@ add_action( 'admin_menu', function () {
 				delete_option( BSLLC_LF_REPLAY_OPTION );
 				$notice = '<div class="notice notice-info"><p>Replay progress reset.</p></div>';
 			} else {
-				$r = bsllc_lf_replay_batch();
+				$r      = bsllc_lf_replay_batch();
 				$notice = '<div class="notice notice-' . ( $r['errors'] ? 'warning' : 'success' ) . '"><p>' . esc_html( $r['message'] ) . '</p></div>';
+				if ( isset( $_POST['auto'] ) && ! $r['done'] && ! $r['errors'] ) {
+					$notice .= '<form method="post" id="bsllc-auto"><input type="hidden" name="bsllc_lf_replay_nonce" value="' . esc_attr( wp_create_nonce( 'bsllc_lf_replay' ) ) . '"><input type="hidden" name="auto" value="1"></form>'
+						. '<script>setTimeout(function(){document.getElementById("bsllc-auto").submit()},300)</script>'
+						. '<div class="notice notice-info"><p>Sending the next batch automatically. Leave this page open.</p></div>';
+				}
 			}
 		}
 
@@ -156,6 +163,8 @@ add_action( 'admin_menu', function () {
 						<td><input name="slug" id="slug" class="regular-text" value="<?php echo esc_attr( $s['slug'] ); ?>" <?php disabled( $locked ); ?>> <span class="description">e.g. <code>franklin-brazing</code></span></td></tr>
 					<tr><th><label for="key">Webhook key</label></th>
 						<td><input name="key" id="key" type="password" class="regular-text" value="<?php echo esc_attr( $s['key'] ); ?>" <?php disabled( $locked ); ?>></td></tr>
+					<tr><th><label for="from">Send history from</label></th>
+						<td><input name="from" id="from" type="date" value="<?php echo esc_attr( $s['from'] ); ?>"> <span class="description">Past submissions before this date are skipped (engagement start). Leave empty to send everything.</span></td></tr>
 				</table>
 				<?php if ( ! $locked ) { submit_button( 'Save' ); } ?>
 			</form>
@@ -165,10 +174,15 @@ add_action( 'admin_menu', function () {
 			<?php if ( ! $hist['available'] ) : ?>
 				<p>Elementor's submissions table isn't present on this site, so there is no stored history to send.</p>
 			<?php else : ?>
-				<p>Elementor has <strong><?php echo (int) $hist['total']; ?></strong> stored submission(s)<?php if ( $hist['oldest'] ) { echo ', oldest ' . esc_html( $hist['oldest'] ); } ?>. Sent so far: <strong><?php echo (int) $hist['sent']; ?></strong>. Each click sends the next <?php echo (int) BSLLC_LF_REPLAY_BATCH; ?> with their original dates; already-sent submissions are skipped by the dashboard, so re-running is safe.</p>
+				<p>Elementor has <strong><?php echo (int) $hist['total']; ?></strong> stored submission(s)<?php if ( $hist['oldest'] ) { echo ', oldest ' . esc_html( $hist['oldest'] ); } ?><?php if ( $hist['from'] ) { echo ', <strong>' . (int) $hist['eligible'] . '</strong> on or after ' . esc_html( $hist['from'] ); } ?>. Sent so far: <strong><?php echo (int) $hist['sent']; ?></strong><?php if ( $hist['skipped'] ) { echo ' (' . (int) $hist['skipped'] . ' before the start date skipped)'; } ?>. "Send all" runs batch after batch with their original dates; already-sent submissions are skipped by the dashboard, so re-running is safe.</p>
 				<form method="post" style="display:inline">
 					<?php wp_nonce_field( 'bsllc_lf_replay', 'bsllc_lf_replay_nonce' ); ?>
-					<?php submit_button( $hist['sent'] >= $hist['total'] ? 'All sent' : 'Send next ' . (int) min( BSLLC_LF_REPLAY_BATCH, $hist['total'] - $hist['sent'] ), 'secondary', 'submit', false, $hist['sent'] >= $hist['total'] ? array( 'disabled' => 'disabled' ) : array() ); ?>
+					<input type="hidden" name="auto" value="1">
+					<?php submit_button( $hist['done'] ? 'All sent' : 'Send all', 'primary', 'submit', false, $hist['done'] ? array( 'disabled' => 'disabled' ) : array() ); ?>
+				</form>
+				<form method="post" style="display:inline;margin-left:8px">
+					<?php wp_nonce_field( 'bsllc_lf_replay', 'bsllc_lf_replay_nonce' ); ?>
+					<?php submit_button( 'Send next ' . (int) BSLLC_LF_REPLAY_BATCH, 'secondary', 'submit', false, $hist['done'] ? array( 'disabled' => 'disabled' ) : array() ); ?>
 				</form>
 				<form method="post" style="display:inline;margin-left:8px">
 					<?php wp_nonce_field( 'bsllc_lf_replay', 'bsllc_lf_replay_nonce' ); ?>
@@ -185,13 +199,21 @@ function bsllc_lf_history_status() {
 	global $wpdb;
 	$t = $wpdb->prefix . 'e_submissions';
 	if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $t ) ) !== $t ) {
-		return array( 'available' => false, 'total' => 0, 'sent' => 0, 'oldest' => null );
+		return array( 'available' => false, 'total' => 0, 'sent' => 0, 'oldest' => null, 'from' => '', 'eligible' => 0, 'done' => true, 'skipped' => 0 );
 	}
-	$state = get_option( BSLLC_LF_REPLAY_OPTION, array( 'last_id' => 0, 'sent' => 0 ) );
+	$state = get_option( BSLLC_LF_REPLAY_OPTION, array( 'last_id' => 0, 'sent' => 0, 'skipped' => 0 ) );
+	$from  = bsllc_lf_settings()['from'];
+	$total = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$t}" );
+	$elig  = $from ? (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$t} WHERE created_at >= %s", $from . ' 00:00:00' ) ) : $total;
+	$max   = (int) $wpdb->get_var( "SELECT COALESCE(MAX(id), 0) FROM {$t}" );
 	return array(
 		'available' => true,
-		'total'     => (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$t}" ),
+		'total'     => $total,
+		'eligible'  => $elig,
+		'from'      => $from,
 		'sent'      => (int) ( $state['sent'] ?? 0 ),
+		'skipped'   => (int) ( $state['skipped'] ?? 0 ),
+		'done'      => (int) ( $state['last_id'] ?? 0 ) >= $max,
 		'oldest'    => $wpdb->get_var( "SELECT MIN(created_at) FROM {$t}" ),
 	);
 }
@@ -205,16 +227,21 @@ function bsllc_lf_replay_batch() {
 	}
 	$t     = $wpdb->prefix . 'e_submissions';
 	$tv    = $wpdb->prefix . 'e_submissions_values';
-	$state = get_option( BSLLC_LF_REPLAY_OPTION, array( 'last_id' => 0, 'sent' => 0 ) );
+	$state = get_option( BSLLC_LF_REPLAY_OPTION, array( 'last_id' => 0, 'sent' => 0, 'skipped' => 0 ) );
 	$rows  = $wpdb->get_results( $wpdb->prepare(
 		"SELECT id, form_name, referer, created_at_gmt, created_at FROM {$t} WHERE id > %d ORDER BY id ASC LIMIT %d",
 		(int) $state['last_id'], BSLLC_LF_REPLAY_BATCH
 	), ARRAY_A );
 	if ( ! $rows ) {
-		return array( 'errors' => 0, 'message' => 'Nothing left to send.' );
+		return array( 'errors' => 0, 'done' => true, 'message' => 'Nothing left to send.' );
 	}
-	$ok = 0; $errors = 0; $last_err = '';
+	$ok = 0; $errors = 0; $skipped = 0; $last_err = '';
 	foreach ( $rows as $row ) {
+		if ( '' !== $s['from'] && substr( (string) $row['created_at'], 0, 10 ) < $s['from'] ) {
+			$skipped++;
+			$state['last_id'] = (int) $row['id'];
+			continue;
+		}
 		$vals   = $wpdb->get_results( $wpdb->prepare( "SELECT `key`, `value` FROM {$tv} WHERE submission_id = %d", (int) $row['id'] ), ARRAY_A );
 		$fields = array();
 		foreach ( $vals as $v ) { $fields[ $v['key'] ] = array( 'value' => $v['value'] ); }
@@ -229,10 +256,13 @@ function bsllc_lf_replay_batch() {
 		if ( true === $r ) { $ok++; } else { $errors++; $last_err = $r; }
 		$state['last_id'] = (int) $row['id'];
 	}
-	$state['sent'] = (int) ( $state['sent'] ?? 0 ) + $ok;
+	$state['sent']    = (int) ( $state['sent'] ?? 0 ) + $ok;
+	$state['skipped'] = (int) ( $state['skipped'] ?? 0 ) + $skipped;
 	update_option( BSLLC_LF_REPLAY_OPTION, $state, false );
-	$msg = "Sent {$ok} submission(s)" . ( $errors ? ", {$errors} failed (last: {$last_err})" : '' ) . '. Click again for the next batch.';
-	return array( 'errors' => $errors, 'message' => $msg );
+	$max  = (int) $wpdb->get_var( "SELECT COALESCE(MAX(id), 0) FROM {$t}" );
+	$done = (int) $state['last_id'] >= $max;
+	$msg  = "Sent {$ok} submission(s)" . ( $skipped ? ", skipped {$skipped} before the start date" : '' ) . ( $errors ? ", {$errors} failed (last: {$last_err})" : '' ) . ( $done ? '. All done.' : '. ' . ( $max - (int) $state['last_id'] ) . ' remaining.' );
+	return array( 'errors' => $errors, 'done' => $done, 'message' => $msg );
 }
 
 /* ── 1. First-touch attribution cookie (every page, in <head>) ─────────── */
