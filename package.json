@@ -80,6 +80,7 @@
     "debug-web-leads-by-month": "tsx src/debug-web-leads-by-month.ts",
     "debug-och-unnamed-inquiries": "tsx src/debug-och-unnamed-inquiries.ts",
     "debug-och-monthly-check": "tsx src/debug-och-monthly-check.ts",
+    "oneoff-seed-franklin-revenue": "tsx src/oneoff-seed-franklin-revenue.ts",
     "oneoff-label-och-ctm-calls": "tsx src/oneoff-label-och-ctm-calls.ts",
     "oneoff-trim-pre-contract-web-inquiries": "tsx src/oneoff-trim-pre-contract-web-inquiries.ts",
     "oneoff-fix-och-gsc-and-junk": "tsx src/oneoff-fix-och-gsc-and-junk.ts",
