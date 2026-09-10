@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: BS LLC — lead forwarder
- * Description: Forwards every Elementor Pro form submission on this site to the BS LLC dashboard (Website Leads), with first-touch ad attribution from a first-party cookie. Configure under Settings → BS LLC lead forwarder.
- * Version: 2026-09-10
+ * Description: Forwards every Elementor Pro form submission on this site to the BS LLC dashboard (Website Leads), with first-touch ad attribution from a first-party cookie. Can also replay the site's stored submission history. Configure under Settings → BS LLC lead forwarder.
+ * Version: 2026-09-10.2
  * Author: BS LLC
  *
  * Installable on any WordPress + Elementor Pro site from Plugins → Add New →
@@ -18,10 +18,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-const BSLLC_LF_OPTION       = 'bsllc_lead_forwarder';
-const BSLLC_LF_BASE_URL     = 'https://work.bsllc.biz/api/webform/';
+const BSLLC_LF_OPTION        = 'bsllc_lead_forwarder';
+const BSLLC_LF_REPLAY_OPTION = 'bsllc_lead_forwarder_replay';
+const BSLLC_LF_BASE_URL      = 'https://work.bsllc.biz/api/webform/';
 const BSLLC_LF_ATTRIB_COOKIE = 'bs_attrib';
-const BSLLC_LF_ATTRIB_DAYS  = 90;
+const BSLLC_LF_ATTRIB_DAYS   = 90;
+const BSLLC_LF_REPLAY_BATCH  = 100;
 
 function bsllc_lf_settings() {
 	$o = get_option( BSLLC_LF_OPTION, array() );
@@ -31,75 +33,15 @@ function bsllc_lf_settings() {
 	);
 }
 
-/* ── 0. Settings page ──────────────────────────────────────────────────── */
-add_action( 'admin_menu', function () {
-	add_options_page( 'BS LLC lead forwarder', 'BS LLC lead forwarder', 'manage_options', 'bsllc-lead-forwarder', function () {
-		if ( ! current_user_can( 'manage_options' ) ) { return; }
-		if ( isset( $_POST['bsllc_lf_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['bsllc_lf_nonce'] ) ), 'bsllc_lf_save' ) ) {
-			update_option( BSLLC_LF_OPTION, array(
-				'slug' => sanitize_title( wp_unslash( $_POST['slug'] ?? '' ) ),
-				'key'  => sanitize_text_field( wp_unslash( $_POST['key'] ?? '' ) ),
-			), false );
-			echo '<div class="notice notice-success"><p>Saved.</p></div>';
-		}
-		$s = bsllc_lf_settings();
-		$locked = defined( 'BSLLC_CLIENT_SLUG' ) || defined( 'BSLLC_WEBFORM_KEY' );
-		?>
-		<div class="wrap">
-			<h1>BS LLC lead forwarder</h1>
-			<p>Every Elementor Pro form submission on this site is posted to <code><?php echo esc_html( BSLLC_LF_BASE_URL ); ?>&lt;client slug&gt;</code>.</p>
-			<?php if ( $locked ) : ?><p><em>Values are defined in wp-config.php and cannot be changed here.</em></p><?php endif; ?>
-			<form method="post">
-				<?php wp_nonce_field( 'bsllc_lf_save', 'bsllc_lf_nonce' ); ?>
-				<table class="form-table">
-					<tr><th><label for="slug">Client slug</label></th>
-						<td><input name="slug" id="slug" class="regular-text" value="<?php echo esc_attr( $s['slug'] ); ?>" <?php disabled( $locked ); ?>> <span class="description">e.g. <code>franklin-brazing</code></span></td></tr>
-					<tr><th><label for="key">Webhook key</label></th>
-						<td><input name="key" id="key" type="password" class="regular-text" value="<?php echo esc_attr( $s['key'] ); ?>" <?php disabled( $locked ); ?>></td></tr>
-				</table>
-				<?php if ( ! $locked ) { submit_button( 'Save' ); } ?>
-			</form>
-			<p>Status: <?php echo ( '' !== $s['slug'] && '' !== $s['key'] ) ? '<strong style="color:#1a7f37">configured</strong>' : '<strong style="color:#b42318">not configured — submissions are not being forwarded</strong>'; ?></p>
-		</div>
-		<?php
-	} );
-} );
-
-/* ── 1. First-touch attribution cookie (every page, in <head>) ─────────── */
-add_action( 'wp_head', function () {
-	$cookie = BSLLC_LF_ATTRIB_COOKIE;
-	$days   = BSLLC_LF_ATTRIB_DAYS;
-	?>
-<script>
-(function(){"use strict";
-var COOKIE="<?php echo esc_js( $cookie ); ?>",DAYS=<?php echo (int) $days; ?>,
-KEYS=["gclid","gbraid","wbraid","utm_source","utm_medium","utm_campaign","utm_content","utm_term"];
-function readCookie(){var m=document.cookie.match(new RegExp("(?:^|; )"+COOKIE+"=([^;]*)"));if(!m)return{};try{return JSON.parse(decodeURIComponent(m[1]))||{}}catch(e){return{}}}
-function writeCookie(d){var exp=new Date(Date.now()+DAYS*864e5).toUTCString();document.cookie=COOKIE+"="+encodeURIComponent(JSON.stringify(d))+"; expires="+exp+"; path=/; SameSite=Lax"+(location.protocol==="https:"?"; Secure":"")}
-function capture(){var p=new URLSearchParams(location.search),s=readCookie(),c=false;KEYS.forEach(function(k){var v=p.get(k);if(v&&!s[k]){s[k]=v;c=true}});if(c){s.first_seen=s.first_seen||new Date().toISOString();s.landing_page=s.landing_page||location.href;writeCookie(s)}return s}
-function fill(form,d){if(!form||form.getAttribute("data-bs-attrib")==="1")return;KEYS.concat(["landing_page"]).forEach(function(k){var v=d[k];if(!v)return;var i=form.querySelector('[name="form_fields['+k+']"]')||form.querySelector('[name="'+k+'"]')||form.querySelector("#form-field-"+k);if(i){if(!i.value)i.value=v}else{var h=document.createElement("input");h.type="hidden";h.name="form_fields["+k+"]";h.value=v;form.appendChild(h)}});form.setAttribute("data-bs-attrib","1")}
-function fillAll(){var d=readCookie();if(!Object.keys(d).length)return;document.querySelectorAll("form").forEach(function(f){fill(f,d)})}
-capture();
-if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",fillAll)}else{fillAll()}
-document.addEventListener("submit",function(e){if(e.target&&e.target.tagName==="FORM")fill(e.target,readCookie())},true);
-if(window.jQuery){jQuery(window).on("elementor/frontend/init",function(){if(window.elementorFrontend&&elementorFrontend.hooks){elementorFrontend.hooks.addAction("frontend/element_ready/form.default",function($s){fill($s.find("form")[0],readCookie())})}})}
-})();
-</script>
-	<?php
-}, 1 );
-
-/* ── 2. Forward every Elementor Pro submission ─────────────────────────── */
-add_action( 'elementor_pro/forms/new_record', function ( $record, $handler ) {
-	$s = bsllc_lf_settings();
-	if ( '' === $s['slug'] || '' === $s['key'] ) {
-		error_log( 'BSLLC webform POST skipped: client slug or webhook key not configured (Settings → BS LLC lead forwarder)' );
-		return;
-	}
-
-	$raw_fields = (array) $record->get( 'fields' );
-	$norm       = array();
-	$passthru   = array();
-	$fullname   = '';
+/**
+ * Normalises Elementor field records ([ id => [value, type, title] ]) into the
+ * flat keys the dashboard's parser reads. Shared by the live hook and the
+ * history replay, so both produce identical rows.
+ */
+function bsllc_lf_normalize( array $raw_fields ) {
+	$norm     = array();
+	$passthru = array();
+	$fullname = '';
 
 	foreach ( $raw_fields as $id => $f ) {
 		$val = trim( (string) ( isset( $f['value'] ) ? $f['value'] : '' ) );
@@ -149,6 +91,182 @@ add_action( 'elementor_pro/forms/new_record', function ( $record, $handler ) {
 			$norm['last_name'] = $parts[1];
 		}
 	}
+	return array( $norm, $passthru );
+}
+
+/** POSTs one normalised submission. Returns true on 2xx, else an error string. */
+function bsllc_lf_post( array $data, $label ) {
+	$s   = bsllc_lf_settings();
+	$res = wp_remote_post(
+		BSLLC_LF_BASE_URL . rawurlencode( $s['slug'] ) . '?key=' . rawurlencode( $s['key'] ),
+		array(
+			'timeout' => 5,
+			'headers' => array( 'Content-Type' => 'application/json' ),
+			'body'    => wp_json_encode( $data ),
+		)
+	);
+	if ( is_wp_error( $res ) ) {
+		$err = $res->get_error_message();
+	} elseif ( wp_remote_retrieve_response_code( $res ) >= 300 ) {
+		$err = 'HTTP ' . wp_remote_retrieve_response_code( $res ) . ' ' . substr( (string) wp_remote_retrieve_body( $res ), 0, 200 );
+	} else {
+		return true;
+	}
+	error_log( 'BSLLC webform POST failed [' . $label . ']: ' . $err );
+	return $err;
+}
+
+/* ── 0. Settings page + history replay ─────────────────────────────────── */
+add_action( 'admin_menu', function () {
+	add_options_page( 'BS LLC lead forwarder', 'BS LLC lead forwarder', 'manage_options', 'bsllc-lead-forwarder', function () {
+		if ( ! current_user_can( 'manage_options' ) ) { return; }
+		$notice = '';
+
+		if ( isset( $_POST['bsllc_lf_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['bsllc_lf_nonce'] ) ), 'bsllc_lf_save' ) ) {
+			update_option( BSLLC_LF_OPTION, array(
+				'slug' => sanitize_title( wp_unslash( $_POST['slug'] ?? '' ) ),
+				'key'  => sanitize_text_field( wp_unslash( $_POST['key'] ?? '' ) ),
+			), false );
+			$notice = '<div class="notice notice-success"><p>Saved.</p></div>';
+		}
+
+		if ( isset( $_POST['bsllc_lf_replay_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['bsllc_lf_replay_nonce'] ) ), 'bsllc_lf_replay' ) ) {
+			if ( isset( $_POST['reset'] ) ) {
+				delete_option( BSLLC_LF_REPLAY_OPTION );
+				$notice = '<div class="notice notice-info"><p>Replay progress reset.</p></div>';
+			} else {
+				$r = bsllc_lf_replay_batch();
+				$notice = '<div class="notice notice-' . ( $r['errors'] ? 'warning' : 'success' ) . '"><p>' . esc_html( $r['message'] ) . '</p></div>';
+			}
+		}
+
+		$s      = bsllc_lf_settings();
+		$locked = defined( 'BSLLC_CLIENT_SLUG' ) || defined( 'BSLLC_WEBFORM_KEY' );
+		$hist   = bsllc_lf_history_status();
+		echo $notice; // phpcs:ignore WordPress.Security.EscapeOutput -- built from escaped parts above
+		?>
+		<div class="wrap">
+			<h1>BS LLC lead forwarder</h1>
+			<p>Every Elementor Pro form submission on this site is posted to <code><?php echo esc_html( BSLLC_LF_BASE_URL ); ?>&lt;client slug&gt;</code>.</p>
+			<?php if ( $locked ) : ?><p><em>Values are defined in wp-config.php and cannot be changed here.</em></p><?php endif; ?>
+			<form method="post">
+				<?php wp_nonce_field( 'bsllc_lf_save', 'bsllc_lf_nonce' ); ?>
+				<table class="form-table">
+					<tr><th><label for="slug">Client slug</label></th>
+						<td><input name="slug" id="slug" class="regular-text" value="<?php echo esc_attr( $s['slug'] ); ?>" <?php disabled( $locked ); ?>> <span class="description">e.g. <code>franklin-brazing</code></span></td></tr>
+					<tr><th><label for="key">Webhook key</label></th>
+						<td><input name="key" id="key" type="password" class="regular-text" value="<?php echo esc_attr( $s['key'] ); ?>" <?php disabled( $locked ); ?>></td></tr>
+				</table>
+				<?php if ( ! $locked ) { submit_button( 'Save' ); } ?>
+			</form>
+			<p>Status: <?php echo ( '' !== $s['slug'] && '' !== $s['key'] ) ? '<strong style="color:#1a7f37">configured</strong>' : '<strong style="color:#b42318">not configured — submissions are not being forwarded</strong>'; ?></p>
+
+			<h2>Past submissions</h2>
+			<?php if ( ! $hist['available'] ) : ?>
+				<p>Elementor's submissions table isn't present on this site, so there is no stored history to send.</p>
+			<?php else : ?>
+				<p>Elementor has <strong><?php echo (int) $hist['total']; ?></strong> stored submission(s)<?php if ( $hist['oldest'] ) { echo ', oldest ' . esc_html( $hist['oldest'] ); } ?>. Sent so far: <strong><?php echo (int) $hist['sent']; ?></strong>. Each click sends the next <?php echo (int) BSLLC_LF_REPLAY_BATCH; ?> with their original dates; already-sent submissions are skipped by the dashboard, so re-running is safe.</p>
+				<form method="post" style="display:inline">
+					<?php wp_nonce_field( 'bsllc_lf_replay', 'bsllc_lf_replay_nonce' ); ?>
+					<?php submit_button( $hist['sent'] >= $hist['total'] ? 'All sent' : 'Send next ' . (int) min( BSLLC_LF_REPLAY_BATCH, $hist['total'] - $hist['sent'] ), 'secondary', 'submit', false, $hist['sent'] >= $hist['total'] ? array( 'disabled' => 'disabled' ) : array() ); ?>
+				</form>
+				<form method="post" style="display:inline;margin-left:8px">
+					<?php wp_nonce_field( 'bsllc_lf_replay', 'bsllc_lf_replay_nonce' ); ?>
+					<input type="hidden" name="reset" value="1">
+					<?php submit_button( 'Start over', 'link', 'submit', false ); ?>
+				</form>
+			<?php endif; ?>
+		</div>
+		<?php
+	} );
+} );
+
+function bsllc_lf_history_status() {
+	global $wpdb;
+	$t = $wpdb->prefix . 'e_submissions';
+	if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $t ) ) !== $t ) {
+		return array( 'available' => false, 'total' => 0, 'sent' => 0, 'oldest' => null );
+	}
+	$state = get_option( BSLLC_LF_REPLAY_OPTION, array( 'last_id' => 0, 'sent' => 0 ) );
+	return array(
+		'available' => true,
+		'total'     => (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$t}" ),
+		'sent'      => (int) ( $state['sent'] ?? 0 ),
+		'oldest'    => $wpdb->get_var( "SELECT MIN(created_at) FROM {$t}" ),
+	);
+}
+
+/** Sends the next batch of stored Elementor submissions, oldest first. */
+function bsllc_lf_replay_batch() {
+	global $wpdb;
+	$s = bsllc_lf_settings();
+	if ( '' === $s['slug'] || '' === $s['key'] ) {
+		return array( 'errors' => 1, 'message' => 'Set the client slug and webhook key first.' );
+	}
+	$t     = $wpdb->prefix . 'e_submissions';
+	$tv    = $wpdb->prefix . 'e_submissions_values';
+	$state = get_option( BSLLC_LF_REPLAY_OPTION, array( 'last_id' => 0, 'sent' => 0 ) );
+	$rows  = $wpdb->get_results( $wpdb->prepare(
+		"SELECT id, form_name, referer, created_at_gmt, created_at FROM {$t} WHERE id > %d ORDER BY id ASC LIMIT %d",
+		(int) $state['last_id'], BSLLC_LF_REPLAY_BATCH
+	), ARRAY_A );
+	if ( ! $rows ) {
+		return array( 'errors' => 0, 'message' => 'Nothing left to send.' );
+	}
+	$ok = 0; $errors = 0; $last_err = '';
+	foreach ( $rows as $row ) {
+		$vals   = $wpdb->get_results( $wpdb->prepare( "SELECT `key`, `value` FROM {$tv} WHERE submission_id = %d", (int) $row['id'] ), ARRAY_A );
+		$fields = array();
+		foreach ( $vals as $v ) { $fields[ $v['key'] ] = array( 'value' => $v['value'] ); }
+		list( $norm, $passthru ) = bsllc_lf_normalize( $fields );
+		$when = ! empty( $row['created_at_gmt'] ) ? $row['created_at_gmt'] : $row['created_at'];
+		$norm['form_name']    = (string) $row['form_name'];
+		$norm['page_url']     = (string) $row['referer'];
+		$norm['submitted_at'] = gmdate( 'c', strtotime( $when . ' UTC' ) );
+		$norm['external_id']  = 'elementor-' . (int) $row['id'];
+		$norm['source']       = 'bsllc-lead-forwarder-replay';
+		$r = bsllc_lf_post( array_merge( $norm, $passthru ), 'replay ' . $row['id'] );
+		if ( true === $r ) { $ok++; } else { $errors++; $last_err = $r; }
+		$state['last_id'] = (int) $row['id'];
+	}
+	$state['sent'] = (int) ( $state['sent'] ?? 0 ) + $ok;
+	update_option( BSLLC_LF_REPLAY_OPTION, $state, false );
+	$msg = "Sent {$ok} submission(s)" . ( $errors ? ", {$errors} failed (last: {$last_err})" : '' ) . '. Click again for the next batch.';
+	return array( 'errors' => $errors, 'message' => $msg );
+}
+
+/* ── 1. First-touch attribution cookie (every page, in <head>) ─────────── */
+add_action( 'wp_head', function () {
+	$cookie = BSLLC_LF_ATTRIB_COOKIE;
+	$days   = BSLLC_LF_ATTRIB_DAYS;
+	?>
+<script>
+(function(){"use strict";
+var COOKIE="<?php echo esc_js( $cookie ); ?>",DAYS=<?php echo (int) $days; ?>,
+KEYS=["gclid","gbraid","wbraid","utm_source","utm_medium","utm_campaign","utm_content","utm_term"];
+function readCookie(){var m=document.cookie.match(new RegExp("(?:^|; )"+COOKIE+"=([^;]*)"));if(!m)return{};try{return JSON.parse(decodeURIComponent(m[1]))||{}}catch(e){return{}}}
+function writeCookie(d){var exp=new Date(Date.now()+DAYS*864e5).toUTCString();document.cookie=COOKIE+"="+encodeURIComponent(JSON.stringify(d))+"; expires="+exp+"; path=/; SameSite=Lax"+(location.protocol==="https:"?"; Secure":"")}
+function capture(){var p=new URLSearchParams(location.search),s=readCookie(),c=false;KEYS.forEach(function(k){var v=p.get(k);if(v&&!s[k]){s[k]=v;c=true}});if(c){s.first_seen=s.first_seen||new Date().toISOString();s.landing_page=s.landing_page||location.href;writeCookie(s)}return s}
+function fill(form,d){if(!form||form.getAttribute("data-bs-attrib")==="1")return;KEYS.concat(["landing_page"]).forEach(function(k){var v=d[k];if(!v)return;var i=form.querySelector('[name="form_fields['+k+']"]')||form.querySelector('[name="'+k+'"]')||form.querySelector("#form-field-"+k);if(i){if(!i.value)i.value=v}else{var h=document.createElement("input");h.type="hidden";h.name="form_fields["+k+"]";h.value=v;form.appendChild(h)}});form.setAttribute("data-bs-attrib","1")}
+function fillAll(){var d=readCookie();if(!Object.keys(d).length)return;document.querySelectorAll("form").forEach(function(f){fill(f,d)})}
+capture();
+if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",fillAll)}else{fillAll()}
+document.addEventListener("submit",function(e){if(e.target&&e.target.tagName==="FORM")fill(e.target,readCookie())},true);
+if(window.jQuery){jQuery(window).on("elementor/frontend/init",function(){if(window.elementorFrontend&&elementorFrontend.hooks){elementorFrontend.hooks.addAction("frontend/element_ready/form.default",function($s){fill($s.find("form")[0],readCookie())})}})}
+})();
+</script>
+	<?php
+}, 1 );
+
+/* ── 2. Forward every Elementor Pro submission ─────────────────────────── */
+add_action( 'elementor_pro/forms/new_record', function ( $record, $handler ) {
+	$s = bsllc_lf_settings();
+	if ( '' === $s['slug'] || '' === $s['key'] ) {
+		error_log( 'BSLLC webform POST skipped: client slug or webhook key not configured (Settings → BS LLC lead forwarder)' );
+		return;
+	}
+
+	list( $norm, $passthru ) = bsllc_lf_normalize( (array) $record->get( 'fields' ) );
 
 	if ( ! empty( $_COOKIE[ BSLLC_LF_ATTRIB_COOKIE ] ) ) {
 		$cookie = wp_unslash( $_COOKIE[ BSLLC_LF_ATTRIB_COOKIE ] );
@@ -170,20 +288,5 @@ add_action( 'elementor_pro/forms/new_record', function ( $record, $handler ) {
 	$norm['page_url']  = isset( $_SERVER['HTTP_REFERER'] ) ? esc_url_raw( wp_unslash( $_SERVER['HTTP_REFERER'] ) ) : '';
 	$norm['source']    = 'bsllc-lead-forwarder';
 
-	$data = array_merge( $norm, $passthru );
-
-	$res = wp_remote_post(
-		BSLLC_LF_BASE_URL . rawurlencode( $s['slug'] ) . '?key=' . rawurlencode( $s['key'] ),
-		array(
-			'timeout' => 5,
-			'headers' => array( 'Content-Type' => 'application/json' ),
-			'body'    => wp_json_encode( $data ),
-		)
-	);
-
-	if ( is_wp_error( $res ) ) {
-		error_log( 'BSLLC webform POST failed [' . $norm['form_name'] . ']: ' . $res->get_error_message() );
-	} elseif ( wp_remote_retrieve_response_code( $res ) >= 300 ) {
-		error_log( 'BSLLC webform POST failed [' . $norm['form_name'] . ']: HTTP ' . wp_remote_retrieve_response_code( $res ) . ' ' . substr( (string) wp_remote_retrieve_body( $res ), 0, 200 ) );
-	}
+	bsllc_lf_post( array_merge( $norm, $passthru ), $norm['form_name'] );
 }, 10, 2 );
