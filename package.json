@@ -82,6 +82,8 @@
     "debug-och-monthly-check": "tsx src/debug-och-monthly-check.ts",
     "oneoff-seed-franklin-revenue": "tsx src/oneoff-seed-franklin-revenue.ts",
     "debug-d365-won-deal-stats": "tsx src/debug-d365-won-deal-stats.ts",
+    "seed-data-readiness-project": "tsx src/seed-data-readiness-project.ts",
+    "daily-brief": "tsx src/daily-brief.ts",
     "oneoff-label-och-ctm-calls": "tsx src/oneoff-label-och-ctm-calls.ts",
     "oneoff-trim-pre-contract-web-inquiries": "tsx src/oneoff-trim-pre-contract-web-inquiries.ts",
     "oneoff-fix-och-gsc-and-junk": "tsx src/oneoff-fix-och-gsc-and-junk.ts",

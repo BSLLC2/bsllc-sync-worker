@@ -1,0 +1,38 @@
+name: Morning brief (Slack)
+
+# One message per weekday morning: per priority client what flowed this
+# month, which connectors are failing, and the Data-readiness tasks that are
+# blocked, overdue or due today. Reuses SLACK_WEBHOOK_URL.
+on:
+  schedule:
+    - cron: "30 11 * * 1-5" # 07:30 ET (11:30 UTC) weekdays
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute + print only, post nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: daily-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Brief
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run daily-brief -- --dry-run
+          else
+            npm run daily-brief
+          fi
