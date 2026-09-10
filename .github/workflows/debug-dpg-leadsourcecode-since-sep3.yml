@@ -1,0 +1,21 @@
+name: Debug — DPG leadsourcecode gap since Sep 3
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Report
+        env:
+          DYNAMICS_TENANT_ID: "ac0f116c-73d5-4a33-92ab-c69f79f06055"
+          DYNAMICS_CLIENT_ID: "8f9c4bee-bcae-4347-80d4-7ee0449ce4de"
+          DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
+          DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
+        run: npm run debug-dpg-leadsourcecode-since-sep3
