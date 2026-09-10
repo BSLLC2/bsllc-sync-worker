@@ -74,6 +74,7 @@
     "oneoff-fix-d365-billing-classification": "tsx src/oneoff-fix-d365-billing-classification.ts",
     "oneoff-mark-dpg-callrail-checklist-done": "tsx src/oneoff-mark-dpg-callrail-checklist-done.ts",
     "oneoff-backfill-callrail-contacts": "tsx src/oneoff-backfill-callrail-contacts.ts",
+    "debug-och-webform-key-rotation-check": "tsx src/debug-och-webform-key-rotation-check.ts",
     "oneoff-delete-junk-contacts": "tsx src/oneoff-delete-junk-contacts.ts",
     "debug-scheduled-revenue-gaps": "tsx src/debug-scheduled-revenue-gaps.ts",
     "debug-lbl-scheduled-gap": "tsx src/debug-lbl-scheduled-gap.ts",
