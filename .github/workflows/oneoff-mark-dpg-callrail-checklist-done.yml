@@ -1,0 +1,28 @@
+name: One-off — mark DPG CallRail checklist item done
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only, change nothing (true/false)."
+        required: false
+        default: "true"
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "false" ]; then
+            npm run oneoff-mark-dpg-callrail-checklist-done -- --dry-run=false
+          else
+            npm run oneoff-mark-dpg-callrail-checklist-done -- --dry-run=true
+          fi
