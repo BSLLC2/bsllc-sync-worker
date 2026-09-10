@@ -2,7 +2,7 @@ import { loadConfig } from "./config.js";
 import { resolveTargets, type Target } from "./targets.js";
 import { makeAdsApi, pullWindow, pullVerifiedConversions } from "./google-ads.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
-import { weeklyAsOfDates, windowFor } from "./dates.js";
+import { weeklyAsOfDates, windowFor, calendarWindows, type Window } from "./dates.js";
 
 // Must match CONVERSION_ACTION_NAME in import-offline-conversions.ts — that's
 // the only action fed exclusively by real, sheet-matched admissions.
@@ -57,6 +57,8 @@ interface Job {
   asOf: Date;
   /** Backdate synced_at for backfill; omit for incremental. */
   backdate: boolean;
+  /** Explicit window instead of the trailing 30 days ending at asOf. */
+  window?: Window;
 }
 
 /** How many weekly as-of points cover `since` → `now`, rounded up so the
@@ -68,7 +70,10 @@ function weeksSince(since: string, now: Date): number {
 
 function buildJobs(args: Args, targets: Target[], now: Date): Job[] {
   if (args.mode === "incremental") {
-    return targets.map((target) => ({ target, asOf: now, backdate: false }));
+    return targets.flatMap((target) => [
+      { target, asOf: now, backdate: false },
+      ...calendarWindows(now).map((window) => ({ target, asOf: now, backdate: false, window })),
+    ]);
   }
   const weeks = args.since ? weeksSince(args.since, now) : args.weeks;
   const dates = weeklyAsOfDates(weeks, now);
@@ -112,8 +117,8 @@ async function main() {
 
   for (const [i, job] of jobs.entries()) {
     const { target, asOf, backdate } = job;
-    const w = windowFor(asOf);
-    const label = `${target.clientLabel} [${target.customerId}] ${w.queryStart}..${w.queryEnd}`;
+    const w = job.window ?? windowFor(asOf);
+    const label = `${target.clientLabel} [${target.customerId}] ${w.queryStart}..${w.queryEnd}${job.window ? ` (${job.window.label})` : ""}`;
 
     const base = {
       client_id: target.clientRef,

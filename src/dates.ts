@@ -51,3 +51,26 @@ export function windowFor(asOf: Date): {
     periodEnd: asOf,
   };
 }
+
+export interface Window { queryStart: string; queryEnd: string; periodStart: Date; periodEnd: Date; label: string }
+
+/**
+ * Calendar-month windows the daily pull also records alongside the trailing
+ * 30 days: the month to date (period_start = the 1st, so the dashboard's
+ * month-by-month table gets a real current-month cell instead of the rolling
+ * window's start-month bucket), plus the just-finished month for the first
+ * `finalizeDays` days after it closes so its final figure lands once the
+ * platform has settled.
+ */
+export function calendarWindows(asOf: Date, finalizeDays = 5): Window[] {
+  const y = asOf.getUTCFullYear();
+  const m = asOf.getUTCMonth();
+  const monthStart = new Date(Date.UTC(y, m, 1));
+  const out: Window[] = [{ queryStart: ymd(monthStart), queryEnd: ymd(asOf), periodStart: monthStart, periodEnd: asOf, label: "month-to-date" }];
+  if (asOf.getUTCDate() <= finalizeDays) {
+    const prevStart = new Date(Date.UTC(y, m - 1, 1));
+    const prevEnd = new Date(Date.UTC(y, m, 0));
+    out.push({ queryStart: ymd(prevStart), queryEnd: ymd(prevEnd), periodStart: prevStart, periodEnd: prevEnd, label: "previous month" });
+  }
+  return out;
+}

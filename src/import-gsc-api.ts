@@ -214,27 +214,41 @@ async function main() {
     // button) — unchanged from before --since existed.
     const end = new Date(Date.now() - 2 * 86_400_000);
     const start = new Date(end.getTime() - (days - 1) * 86_400_000);
-    console.log(`GSC import — ${Object.keys(map).length} propert(ies), ${iso(start)}…${iso(end)}${dryRun ? " (dry-run)" : ""}`);
+    // Alongside the trailing window: the calendar month to date (so the
+    // month-by-month table gets a real current-month cell), and the month
+    // that just closed for its first week so its final figure lands.
+    const windows: Array<{ start: string; end: string; label: string }> = [{ start: iso(start), end: iso(end), label: "trailing" }];
+    const monthStart = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+    if (monthStart <= end) windows.push({ start: iso(monthStart), end: iso(end), label: "month-to-date" });
+    if (end.getUTCDate() <= 7) {
+      const prevStart = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - 1, 1));
+      const prevEnd = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 0));
+      windows.push({ start: iso(prevStart), end: iso(prevEnd), label: "previous month" });
+    }
+    console.log(`GSC import — ${Object.keys(map).length} propert(ies), ${iso(start)}…${iso(end)} + ${windows.length - 1} calendar window(s)${dryRun ? " (dry-run)" : ""}`);
     for (const [slug, siteUrl] of Object.entries(map)) {
-      const base = {
-        client_id: slug, source: "gsc" as const, external_id: siteUrl,
-        period_start: iso(start), period_end: iso(end), synced_at: new Date().toISOString(),
-      };
-      try {
-        const t = await queryTotals(token, siteUrl, iso(start), iso(end));
-        if (!t || t.impressions === 0) {
-          syncs.push({ ...base, data_state: "no_data", error_message: null, metrics: {} });
-          console.log(`  ${slug} (${siteUrl}) — no data`);
-          continue;
+      for (const w of windows) {
+        const base = {
+          client_id: slug, source: "gsc" as const, external_id: siteUrl,
+          period_start: w.start, period_end: w.end, synced_at: new Date().toISOString(),
+        };
+        try {
+          const t = await queryTotals(token, siteUrl, w.start, w.end);
+          if (!t || t.impressions === 0) {
+            syncs.push({ ...base, data_state: "no_data", error_message: null, metrics: {} });
+            console.log(`  ${slug} (${siteUrl}) ${w.label} — no data`);
+            continue;
+          }
+          syncs.push({
+            ...base, data_state: "live", error_message: null,
+            metrics: { "gsc.clicks": t.clicks, "gsc.impressions": t.impressions, "gsc.ctr": t.ctr, "gsc.avg_position": t.position },
+          });
+          console.log(`  ${slug} (${siteUrl}) ${w.label} — ${t.clicks} clicks · ${t.impressions} impr · pos ${t.position.toFixed(1)}`);
+        } catch (e) {
+          syncs.push({ ...base, data_state: "error", error_message: (e instanceof Error ? e.message : String(e)).slice(0, 300), metrics: {} });
+          console.log(`  ✗ ${slug} (${siteUrl}) ${w.label} — ${e instanceof Error ? e.message : e}`);
+          break; // a 403 will repeat for every window; record it once
         }
-        syncs.push({
-          ...base, data_state: "live", error_message: null,
-          metrics: { "gsc.clicks": t.clicks, "gsc.impressions": t.impressions, "gsc.ctr": t.ctr, "gsc.avg_position": t.position },
-        });
-        console.log(`  ${slug} (${siteUrl}) — ${t.clicks} clicks · ${t.impressions} impr · pos ${t.position.toFixed(1)}`);
-      } catch (e) {
-        syncs.push({ ...base, data_state: "error", error_message: (e instanceof Error ? e.message : String(e)).slice(0, 300), metrics: {} });
-        console.log(`  ✗ ${slug} (${siteUrl}) — ${e instanceof Error ? e.message : e}`);
       }
     }
   }
