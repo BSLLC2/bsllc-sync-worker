@@ -1,0 +1,52 @@
+name: Ads — apply approved changes
+
+# Drains findings a PERSON approved in the dashboard, and rollbacks a person
+# requested. This is the only job in the repo that writes to a live ad account,
+# and it never decides anything: it acts on a status set by a session-
+# authenticated, role-gated click.
+#
+# Each change re-validates against the live account first, snapshots the before
+# metrics, applies through the same guarded path as the hand-run CLI, and
+# records prior values — no prior values, no change.
+#
+# The dashboard dispatches this right after an Approve (WORKER_DISPATCH_TOKEN),
+# so the cron is a safety net rather than the main path.
+on:
+  schedule:
+    - cron: "15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Validate only, apply nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: ads-apply-approved
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Apply approved changes
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run ads-apply-approved -- --dry-run
+          else
+            npm run ads-apply-approved
+          fi

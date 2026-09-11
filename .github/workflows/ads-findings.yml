@@ -1,0 +1,54 @@
+name: Ads findings audit (read-only)
+
+# The weekly deep audit per active ads client. Pulls evidence through each
+# platform adapter, runs the DETERMINISTIC rules over it, and upserts findings
+# into ads_findings — where a re-detection updates the existing row instead of
+# arriving as a new opinion, and a dismissed finding stays dismissed unless its
+# evidence materially changed.
+#
+# READ-ONLY against every ad platform. Findings that carry a change payload sit
+# at 'proposed' until a person presses Approve in the dashboard.
+on:
+  schedule:
+    # 06:30 UTC Mondays — before the 07:00 ET morning audit, so anything urgent
+    # it files as a task is already there when the brief goes out.
+    - cron: "30 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug (e.g. ohio-community-health). Blank = all mapped accounts."
+        required: false
+        default: ""
+      dry_run:
+        description: "Evaluate and print, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: ads-findings
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run findings audit
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.client }}" ] && ARGS="--client=${{ inputs.client }}"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          npm run ads-findings -- $ARGS
