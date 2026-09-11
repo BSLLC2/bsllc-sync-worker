@@ -17,6 +17,8 @@ name: Agent — read-only run, output to a check run
 # ads-apply-approved validates without applying anything to a live account.
 # ads-verify-outcomes is deliberately NOT allowlisted: it is read-only against
 # the platforms but it writes outcomes onto findings, which is a real write.
+# verify-ads-findings needs no credentials at all — it runs the rules and the
+# guarded apply path against a synthetic fixture and a recording client.
 on:
   workflow_dispatch:
     inputs:
@@ -90,7 +92,7 @@ jobs:
         run: |
           case "$SCRIPT" in
             monitor-freshness|dump-client-metrics|debug-september-coverage|debug-client-cltv|debug-data-health|debug-all-clients-gap-status|sync-slack-users) ;;
-            ads-audit) ;;
+            ads-audit|verify-ads-findings) ;;
             ads-findings|ads-apply-approved|ads-vendor-briefs) EXTRA_ARGS="$EXTRA_ARGS --dry-run" ;;
             import-*|oneoff-*|audit-and-repair) EXTRA_ARGS="$EXTRA_ARGS --dry-run" ;;
             *) echo "script '$SCRIPT' is not on the read-only allowlist"; exit 1 ;;

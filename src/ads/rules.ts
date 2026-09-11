@@ -128,6 +128,33 @@ export interface AdGroupAdRow {
   adStrength: string | null;
 }
 
+/**
+ * Is this search term already blocked by a negative we hold?
+ *
+ * Exact matching is not enough and was a real bug: a PHRASE negative
+ * "service jobs" already blocks the query "service jobs hiring", so proposing
+ * that query as a fresh negative is a duplicate — it clutters the account and,
+ * worse, puts an item in front of a human that does nothing when approved.
+ * `ads-audit.ts` had this problem from the start; the verification harness is
+ * what surfaced it.
+ *
+ * We do not know each negative's match type here (the account-wide negatives
+ * pull is a flat list of texts), so this deliberately uses the CONSERVATIVE
+ * reading: a term is treated as covered when a negative appears in it as a
+ * contiguous run of whole words. Being conservative only ever means proposing
+ * FEWER negatives — it can never cause us to block traffic we wanted, which is
+ * the expensive direction to be wrong in.
+ */
+export function alreadyNegated(term: string, negatives: Set<string>): boolean {
+  const t = ` ${term.toLowerCase().replace(/\s+/g, " ").trim()} `;
+  for (const n of negatives) {
+    const neg = n.toLowerCase().replace(/\s+/g, " ").trim();
+    if (!neg) continue;
+    if (t.includes(` ${neg} `)) return true;
+  }
+  return false;
+}
+
 export interface AuditInput {
   platform: "google_ads" | "meta" | "microsoft";
   accountId: string;
@@ -335,7 +362,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   for (const t of input.searchTerms) {
     if (t.conversions > 0 || t.allConversions > 0) continue;
     if (t.costMicros < THRESHOLDS.searchTermWasteMicros) continue;
-    if (input.existingNegatives.has(t.term.toLowerCase())) continue;
+    if (alreadyNegated(t.term, input.existingNegatives)) continue;
     // A protected term is one the client has told us never to block. Blocking a
     // partner or brand term by accident costs far more than the spend it saves,
     // so it is filtered here AND refused again by the apply path's guard.
