@@ -1,0 +1,29 @@
+name: Dump Fathom webhook log (read-only)
+
+# Prints the most recent fathom_webhook_log rows with their FULL stored
+# bodies — what Fathom actually sent. Read-only; changes nothing.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many recent rows to print (1–50)"
+        required: false
+        default: "8"
+      unmatched_only:
+        description: "Only rows that didn't match a client (true/false)"
+        required: false
+        default: "false"
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Dump
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run dump-fathom-log -- --limit="${{ inputs.limit }}" ${{ inputs.unmatched_only == 'true' && '--unmatched-only' || '' }}

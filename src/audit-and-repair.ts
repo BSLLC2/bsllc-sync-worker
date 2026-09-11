@@ -169,6 +169,30 @@ async function main() {
       if ((enabledBy.get(cl.id) ?? 0) === 0 && !cl.is_internal) findings.push({ key: `no-connectors:${s}`, priority: "P3", title: `${cl.name} — no data connectors enabled`, description: "Decide the scope: GA4 + Search Console at minimum for any site we touch; Ads / CRM where we run them. Admin → Connectors." });
     }
 
+    // ── Fathom intake went quiet? Two tells, both invisible from the app
+    // until someone notices Triage is empty: calls are arriving but none of
+    // their action items reach intake_items (matcher/handler broken), or no
+    // call has arrived in a week while meetings keep being logged by hand
+    // (webhook unhooked on Fathom's side). ──
+    const fathom = (await c.query<{ calls7: string; items7: string; last_call: Date | null; last_item: Date | null; meetings7: string; items_pending: string }>(
+      `SELECT (SELECT count(*)::text FROM fathom_webhook_log WHERE received_at > now() - interval '7 days') AS calls7,
+              (SELECT count(*)::text FROM intake_items WHERE source = 'fathom' AND created_at > now() - interval '7 days') AS items7,
+              (SELECT max(received_at) FROM fathom_webhook_log) AS last_call,
+              (SELECT max(created_at) FROM intake_items WHERE source = 'fathom') AS last_item,
+              (SELECT count(*)::text FROM client_meetings WHERE created_at > now() - interval '7 days') AS meetings7,
+              (SELECT count(*)::text FROM intake_items WHERE source = 'fathom' AND status = 'pending') AS items_pending`)).rows[0]!;
+    const fmt = (d: Date | null) => (d ? new Date(d).toISOString().slice(0, 10) : "never");
+    if (Number(fathom.calls7) > 0 && Number(fathom.items7) === 0) findings.push({
+      key: "fathom:quiet", priority: "P1",
+      title: "Fathom calls arriving but no action items reach Triage",
+      description: `${fathom.calls7} webhook call(s) logged in the last 7 days (last ${fmt(fathom.last_call)}), zero intake_items from Fathom (last ${fmt(fathom.last_item)}). The handler is receiving but not queuing. Fix: open Admin → Fathom log, click "View raw payload" on the newest row and "Replay" — if the replay queues items the live handler is fine and the calls just predate the fix; if it queues nothing, the payload shape changed: compare it with scripts/verify-fathom-intake.ts in the dashboard repo and adjust server/fathom.ts.`,
+    });
+    else if (Number(fathom.calls7) === 0 && Number(fathom.meetings7) > 0) findings.push({
+      key: "fathom:quiet", priority: "P1",
+      title: "No Fathom webhook call in 7 days while meetings are still being logged",
+      description: `Last Fathom call reached /api/fathom-webhook ${fmt(fathom.last_call)}; ${fathom.meetings7} meeting(s) were logged in client_meetings this week without it. The webhook is likely disabled or pointed elsewhere on Fathom's side. Fix: Fathom → Settings → Integrations → Webhooks: confirm the URL is https://work.bsllc.biz/api/fathom-webhook?key=<FATHOM_SECRET> and the subscription is active for the whole team; then record a short test call and check Admin → Fathom log.`,
+    });
+
     // ── Upsert tasks; auto-close resolved ones ──
     const { rows: [internal] } = await c.query<{ id: string }>(`SELECT id FROM clients WHERE name = $1`, [INTERNAL_CLIENT]);
     if (!internal) throw new Error("internal client missing");
