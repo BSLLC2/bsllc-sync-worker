@@ -498,6 +498,145 @@ export async function bulkKeywordMetrics(
     }));
 }
 
+// ── In-client keyword discovery (kind='discovery') ──────────────────────────
+
+/** Inputs stored by the app in research_requests.params_json. */
+export interface DiscoveryParams {
+  seeds: string[];
+  competitor: string | null;
+  limit: number;
+}
+
+/** One result row — matches the app's DiscoveryKeyword type. */
+export interface DiscoveryKeyword extends KeywordIdea {
+  clientRank: number | null;
+  competitorRank: number | null;
+  sources: Array<"seed" | "gap">;
+}
+
+export interface DiscoveryResult {
+  rows: DiscoveryKeyword[];
+  /** Sum of every task's `cost` as returned by DataForSEO (USD). */
+  costUsd: number;
+  /** Non-fatal problems (e.g. the competitor pull failed) — surfaced in the log. */
+  warnings: string[];
+}
+
+/** DataForSEO reports what each task cost in the response; read it defensively. */
+function taskCost(resp: any): number {
+  const t = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  const c = typeof t?.cost === "number" ? t.cost : typeof resp?.cost === "number" ? resp.cost : 0;
+  return Number.isFinite(c) ? c : 0;
+}
+
+/**
+ * The SEO tab's "Keyword research" run. Three Labs calls at most:
+ *   1. keyword_ideas for ALL seeds in one task (the endpoint accepts up to 200
+ *      seed keywords) → volume / CPC / KD / intent / SERP features.
+ *   2. ranked_keywords for the client domain (up to 1000) → each idea's
+ *      "you rank #N today", and the set a gap is diffed against.
+ *   3. ranked_keywords for the competitor (top 700 by volume) when given →
+ *      rows the competitor wins (top 50) that the client doesn't rank for,
+ *      merged in and tagged "gap".
+ * Rows are deduped by keyword; the app sorts by Opportunity. Cost is the sum
+ * of what DataForSEO says each task cost, so the UI can show estimate vs
+ * actual. The client/competitor pulls are best-effort: if one fails the run
+ * still returns the ideas, with the failure recorded in `warnings`.
+ *
+ * Endpoints: POST /v3/dataforseo_labs/google/keyword_ideas/live
+ *            POST /v3/dataforseo_labs/google/ranked_keywords/live (×0–2)
+ */
+export async function keywordDiscovery(
+  creds: DfsCreds,
+  params: DiscoveryParams,
+  clientDomain: string | null,
+  locationName = "United States",
+  languageName = "English",
+): Promise<DiscoveryResult> {
+  const seeds = [...new Set(params.seeds.map((s) => s.trim().replace(/\s+/g, " ")).filter(Boolean))].slice(0, 200);
+  if (!seeds.length) throw new Error("no seed keywords");
+  const limit = Math.max(1, Math.min(1000, Math.round(params.limit || 200)));
+  const clean = (d: string) => d.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+  const client = clientDomain ? clean(clientDomain) : null;
+  const competitor = params.competitor ? clean(params.competitor) : null;
+  let costUsd = 0;
+  const warnings: string[] = [];
+
+  async function ranked(target: string, take: number): Promise<any[]> {
+    const payload = [{ target, location_name: locationName, language_name: languageName, limit: take, order_by: ["keyword_data.keyword_info.search_volume,desc"] }];
+    const resp = await post(creds, "/dataforseo_labs/google/ranked_keywords/live", payload);
+    costUsd += taskCost(resp);
+    const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+    if (!rt || rt.status_code !== 20000) throw new Error(rt?.status_message || "DataForSEO returned no ranked keywords");
+    const result = Array.isArray(rt.result) ? rt.result[0] : null;
+    return Array.isArray(result?.items) ? result.items : [];
+  }
+  const rankOf = (it: any): number | null => {
+    const rse = it?.ranked_serp_element ?? {};
+    const serpItem = rse?.serp_item ?? {};
+    return num(serpItem.rank_absolute) ?? num(rse.rank_absolute);
+  };
+
+  // 1. Ideas — the one call that must succeed.
+  const ideasResp = await post(creds, "/dataforseo_labs/google/keyword_ideas/live", [
+    { keywords: seeds, location_name: locationName, language_name: languageName, limit, order_by: ["keyword_info.search_volume,desc"] },
+  ]);
+  costUsd += taskCost(ideasResp);
+  const ideasTask = Array.isArray(ideasResp?.tasks) ? ideasResp.tasks[0] : null;
+  if (!ideasTask || ideasTask.status_code !== 20000) throw new Error(ideasTask?.status_message || "DataForSEO returned no result");
+  const ideasResult = Array.isArray(ideasTask.result) ? ideasTask.result[0] : null;
+  const ideaItems: any[] = Array.isArray(ideasResult?.items) ? ideasResult.items : [];
+
+  const rows = new Map<string, DiscoveryKeyword>();
+  for (const it of ideaItems) {
+    const idea = toKeywordIdea(it);
+    if (!idea.keyword) continue;
+    const key = normKw(idea.keyword);
+    if (rows.has(key)) continue;
+    rows.set(key, { ...idea, clientRank: null, competitorRank: null, sources: ["seed"] });
+  }
+
+  // 2. Client's own footprint (best-effort).
+  const clientRank = new Map<string, number | null>();
+  if (client) {
+    try {
+      for (const it of await ranked(client, 1000)) {
+        const kw = normKw(toKeywordIdea(it).keyword);
+        if (kw && !clientRank.has(kw)) clientRank.set(kw, rankOf(it));
+      }
+      for (const [key, row] of rows) if (clientRank.has(key)) row.clientRank = clientRank.get(key) ?? null;
+    } catch (e) {
+      warnings.push(`client rankings (${client}): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // 3. Competitor gap (best-effort, only meaningful with a client footprint).
+  if (competitor && client) {
+    try {
+      for (const it of await ranked(competitor, 700)) {
+        const idea = toKeywordIdea(it);
+        if (!idea.keyword) continue;
+        const key = normKw(idea.keyword);
+        const compRank = rankOf(it);
+        if (compRank != null && compRank > 50) continue;      // only real competitor wins
+        if (clientRank.has(key)) continue;                     // client already ranks — not a gap
+        const existing = rows.get(key);
+        if (existing) {
+          existing.competitorRank = compRank;
+          if (!existing.sources.includes("gap")) existing.sources.push("gap");
+        } else {
+          rows.set(key, { ...idea, clientRank: null, competitorRank: compRank, sources: ["gap"] });
+        }
+      }
+    } catch (e) {
+      warnings.push(`competitor rankings (${competitor}): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  const out = [...rows.values()].sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+  return { rows: out, costUsd: Math.round(costUsd * 10000) / 10000, warnings };
+}
+
 // ── Domain authority / backlinks (Backlinks + Labs) ─────────────────────────
 
 /** Aggregate authority signals for a domain — the SEMrush overview replacement. */

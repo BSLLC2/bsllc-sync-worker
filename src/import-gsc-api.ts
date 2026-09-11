@@ -178,15 +178,20 @@ async function main() {
         const monthly = bucketMonthly(daily);
         let planted = 0;
         for (const [ym, agg] of monthly) {
-          // The backfill iterates through the CURRENT, in-progress month too —
-          // monthSnapshot caps it at today (shared with GA4/D365/HubSpot).
-          // (`end` = today-2 because GSC lags; the in-progress month's row ends
-          // there too, so period_end never claims days the data doesn't cover.)
-          const { start, end: monthEnd, syncedAt } = monthSnapshot(ym, new Date(`${end}T12:00:00.000Z`));
+          // The backfill iterates through the CURRENT, in-progress month too.
+          // monthSnapshot (shared with GA4/D365/HubSpot) caps it at today and
+          // stamps it NOW rather than a backdated noon: connector health treats
+          // a source as failing while its newest error row is newer than its
+          // newest live row, and a backfill that failed once (the 400 on
+          // `dimensions`) then succeeded would otherwise leave the error
+          // standing until the next daily pull. period_end is additionally
+          // capped at the query end (today-2, GSC lags) so it never claims
+          // days the data doesn't cover.
+          const { start, end: monthEnd, syncedAt } = monthSnapshot(ym);
           if (agg.impressions === 0) continue;
           syncs.push({
             client_id: slug, source: "gsc", external_id: siteUrl,
-            period_start: start, period_end: monthEnd, synced_at: syncedAt,
+            period_start: start, period_end: monthEnd > end ? end : monthEnd, synced_at: syncedAt,
             data_state: "live", error_message: null,
             metrics: {
               "gsc.clicks": agg.clicks, "gsc.impressions": agg.impressions,
