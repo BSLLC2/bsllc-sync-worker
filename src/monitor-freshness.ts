@@ -1,6 +1,9 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { deriveJobCadences, type JobCadence } from "./job-cadence.js";
 
 /**
  * Watches data freshness and Slack-alerts when a pipeline stops flowing. Reads
@@ -14,24 +17,31 @@ import pg from "pg";
  */
 const DASH = (process.env.DASHBOARD_URL || "https://bsllc-account-health.vercel.app").replace(/\/+$/, "");
 
-// Expected freshness per pipeline (hours) — mirrors the dashboard cockpit.
-// Keys here must match the literal --job= value each workflow's Heartbeat
-// step passes (see `grep -rh "heartbeat -- --job=" .github/workflows`) — a
-// mismatch doesn't error, it just silently falls back to the generic 36h
-// default below, which is how several jobs (hubspot_deals, qbo_financials,
-// research, send_sms, etc.) have been drifting unmapped; only the keys added
-// alongside this fix are guaranteed current.
-const SLA: Record<string, number> = {
-  google_ads: 36, ga4: 36, gsc: 36, hubspot: 36, d365: 36, seo: 192, aeo: 192,
-  email_import: 3, db_backup: 36, mrr_snapshot: 840, review_email: 2, comment_notify: 2, d365_import: 36, incremental_ads: 36, seo_import: 192, aeo_import: 192, webops_import: 36,
-  import_d365: 36, import_ga4: 36, import_gsc: 36, import_hubspot: 36, import_och: 36,
-  incremental_sync: 36, snapshot_plans: 2, offline_conversions: 36, publish_och_web_leads: 36,
-  // Fires once per client (contract start set), not on a recurring cadence —
-  // a generous SLA keeps this from alerting as "stale" between firings.
-  backfill_client_since: 8760,
+// Expected freshness (hours) is DERIVED from each workflow's cron by
+// job-cadence.ts (1.5× the longest gap between firings, ≥ interval + 2h for
+// GitHub's scheduled-run delays): a weekly job gets a weekly SLA, a job with
+// no cron at all (workflow_dispatch only) is never "stale", only failed. The
+// hand-kept table this replaced fell back to a generic 36h for every job it
+// didn't list, which is how the weekly domain-authority import read as "not
+// flowing" every Wednesday. The static map below is now only the fallback
+// when the workflow files aren't on disk (running outside the checkout).
+const SLA_FALLBACK: Record<string, number> = {
+  google_ads: 36, ga4: 36, gsc: 36, hubspot: 36, d365: 36, seo: 252, aeo: 252, authority: 252,
+  email_import: 3, db_backup: 36, mrr_snapshot: 1116, review_email: 2, comment_notify: 2, seo_import: 252, aeo_import: 252, webops_import: 36,
+  domain_authority_import: 252, import_d365: 36, import_ga4: 36, import_gsc: 36, import_hubspot: 36, import_hubspot_metrics: 36, import_och: 36,
+  incremental_sync: 36, snapshot_plans: 2, offline_conversions: 36, publish_och_web_leads: 36, slack_users_sync: 36, morning_audit: 108,
+};
+// Metric sources are refreshed by one importer each; a source's freshness
+// SLA is that importer's cadence.
+const SOURCE_JOB: Record<string, string> = {
+  google_ads: "incremental_sync", ga4: "import_ga4", gsc: "import_gsc", hubspot: "import_hubspot_metrics", d365: "import_d365",
+  seo: "seo_import", aeo: "aeo_import", authority: "domain_authority_import",
 };
 const LABEL: Record<string, string> = {
-  google_ads: "Google Ads", ga4: "GA4", gsc: "Search Console", hubspot: "HubSpot", d365: "Dynamics 365", seo: "SEO ranks", aeo: "AI visibility",
+  google_ads: "Google Ads", ga4: "GA4", gsc: "Search Console", hubspot: "HubSpot", d365: "Dynamics 365", seo: "SEO ranks", aeo: "AI visibility", authority: "Domain authority",
+  domain_authority_import: "Domain authority import", import_hubspot_metrics: "HubSpot metrics import", hubspot_deals: "HubSpot deals import", slack_users_sync: "Slack user names",
+  qbo_financials: "QBO financials", qbo_invoice: "QBO invoice on signature", qbo_invoices_sync: "QBO invoices sync", qbo_items_sync: "QBO catalog sync", qbo_send_invoice: "QBO send invoice",
+  research: "Research queue", send_sms: "Client SMS", slack_post: "Slack CRM posts", task_digest: "Task digest", team_notify: "Team notifications", push_notify: "Push notifications", outbound_email: "Outbound email", morning_audit: "Morning audit",
   email_import: "Email import", db_backup: "DB backup", mrr_snapshot: "MRR snapshot", review_email: "Review emails", comment_notify: "Comment alerts", d365_import: "D365 import", incremental_ads: "Ads sync", seo_import: "SEO import", aeo_import: "AEO import", webops_import: "WebOps import",
   import_d365: "D365 import", import_ga4: "GA4 import", import_gsc: "Search Console import", import_hubspot: "HubSpot import", import_och: "OCH admissions import",
   incremental_sync: "Google Ads sync", snapshot_plans: "Plan snapshots", offline_conversions: "Offline conversions (close-the-loop)",
@@ -79,6 +89,25 @@ async function main() {
        ) t WHERE data_state='error' AND synced_at > now() - interval '8 days' ORDER BY source, client_id`,
     );
     const beats = await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats WHERE job <> 'freshness_monitor'`);
+
+    // Per-job cadence from the workflow files (see job-cadence.ts).
+    const wfDir = [join(process.cwd(), ".github/workflows"), join(process.cwd(), "worker/.github/workflows")].find((d) => existsSync(d));
+    const cadence: Map<string, JobCadence> = wfDir ? deriveJobCadences(wfDir) : new Map();
+    if (!wfDir) console.log("Workflow files not found — using the static SLA fallback table.");
+    // null = on demand (never stale); undefined = unknown job.
+    const slaFor = (job: string): number | null | undefined => {
+      const cad = cadence.get(job);
+      if (cad) return cad.slaHours;
+      return SLA_FALLBACK[job];
+    };
+    const sourceSla = (source: string): number => slaFor(SOURCE_JOB[source] ?? source) ?? SLA_FALLBACK[source] ?? 36;
+    // Publish the derived SLA next to each heartbeat so the dashboard's Data
+    // health page judges jobs by the same cadence instead of its own table.
+    if (!dryRun && cadence.size) {
+      await c.query(`ALTER TABLE job_heartbeats ADD COLUMN IF NOT EXISTS sla_hours DOUBLE PRECISION`);
+      // 0 = on demand only (workflow_dispatch), which the page reads as "never stale".
+      for (const [job, cad] of cadence) await c.query(`UPDATE job_heartbeats SET sla_hours = $2 WHERE job = $1`, [job, cad.slaHours ?? 0]);
+    }
 
     // Website leads per client. Every importer above reports "ok" on an empty
     // input, so a client's form losing its webhook action (or a rotated
@@ -162,14 +191,22 @@ async function main() {
       // staleness alert for it (the query takes MAX(synced_at), so one row is all
       // it takes). Treat it as down: the data cannot be trusted either way.
       if (ageH < -FUTURE_SKEW_H) { down.push(r.source); continue; }
-      if (ageH > (SLA[r.source] ?? 36)) { down.push(r.source); continue; } // dark → down, regardless of errors
+      if (ageH > sourceSla(r.source)) { down.push(r.source); continue; } // dark → down, regardless of errors
       const n = Number(r.recent_errors);
       if (n > 0) erroring.push({ src: r.source, n, m: Number(r.recent_total) });
     }
+    const orphans: string[] = [];
     for (const b of beats.rows) {
+      const sla = slaFor(b.job);
+      // A heartbeat row no workflow stamps any more (the job was renamed or
+      // retired — qbo_estimate became qbo_invoice) is not a pipeline, just a
+      // leftover row: never alert on it, name it so someone deletes it.
+      if (sla === undefined) { orphans.push(b.job); continue; }
       const ageH = b.ran_at ? (now - b.ran_at.getTime()) / 3_600_000 : Infinity;
-      if (!b.ok || ageH < -FUTURE_SKEW_H || ageH > (SLA[b.job] ?? 36)) down.push(b.job);
+      if (!b.ok || ageH < -FUTURE_SKEW_H) { down.push(b.job); continue; }
+      if (sla !== null && ageH > sla) down.push(b.job); // on-demand jobs (sla null) can't be stale
     }
+    if (orphans.length) console.log(`Heartbeat rows with no workflow behind them (retired jobs — remove with \`npm run oneoff-retire-heartbeat -- --job=<name>\`): ${orphans.join(", ")}`);
     const noLeads: { slug: string; ageH: number }[] = [];
     const noUploads: { slug: string; gclid30: number; lastUpload: Date | null }[] = [];
     for (const r of leadRows) {
@@ -251,11 +288,15 @@ async function main() {
     // Record the new signature so we only alert on the next change. Not in a
     // dry run: recording it there would make the next REAL run see "no
     // change" and swallow the alert the dry run only pretended to post.
+    // ok=true: this row means "the monitor ran"; what it FOUND lives in the
+    // signature. Writing ok=false whenever something was down made the
+    // dashboard's Data health page list the monitor itself as "1/1 erroring"
+    // with the signature string as the error.
     if (dryRun) { console.log("[dry-run] signature not recorded."); return; }
     await c.query(
-      `INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ('freshness_monitor', now(), $1, $2)
-       ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = EXCLUDED.ok, note = EXCLUDED.note`,
-      [down.length === 0, signature],
+      `INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ('freshness_monitor', now(), true, $1)
+       ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = true, note = EXCLUDED.note`,
+      [signature],
     );
   } finally {
     await c.end();

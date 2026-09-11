@@ -74,3 +74,28 @@ export function calendarWindows(asOf: Date, finalizeDays = 5): Window[] {
   }
   return out;
 }
+
+/**
+ * Calendar-month snapshot bounds for a "YYYY-MM" (or "YYYYMM") key, shared by
+ * every monthly importer (GA4, Search Console, D365, HubSpot) so their rows
+ * line up and none of them can stamp the future.
+ *
+ * The in-progress month is capped at today: capping at the calendar month's
+ * last day used to stamp period_end/synced_at weeks ahead, which the Data
+ * health page reads as "Bad timestamp (future)" and which then out-ranks
+ * every later, correct row in "latest reading" picks. Finished months keep
+ * their real end date and a noon-UTC synced_at on that date (a backfill must
+ * backdate synced_at so trend windows land). The in-progress month gets
+ * synced_at = now: noon of today is still up to 12h in the future for the
+ * 07:xx UTC crons, enough to trip the future-timestamp check every morning.
+ */
+export function monthSnapshot(ymKey: string, now = new Date()): { start: string; end: string; syncedAt: string } {
+  const ym = ymKey.length === 6 ? `${ymKey.slice(0, 4)}-${ymKey.slice(4, 6)}` : ymKey;
+  const y = Number(ym.slice(0, 4));
+  const m = Number(ym.slice(5, 7));
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const monthEnd = `${ym}-${String(last).padStart(2, "0")}`;
+  const today = ymd(now);
+  const end = monthEnd > today ? today : monthEnd;
+  return { start: `${ym}-01`, end, syncedAt: end < today ? `${end}T12:00:00.000Z` : now.toISOString() };
+}

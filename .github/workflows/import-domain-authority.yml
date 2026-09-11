@@ -70,11 +70,14 @@ jobs:
           args=()
           [ -n "$CLIENT_FILTER" ] && args+=("--client=$CLIENT_FILTER")
           [ "$DRY_RUN" = "true" ] && args+=("--dry-run")
-          npm run import-domain-authority -- "${args[@]}"
+          set -o pipefail
+          npm run import-domain-authority -- "${args[@]}" 2>&1 | tee run.log
 
       - name: Heartbeat
         if: always()
         working-directory: worker
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npm run heartbeat -- --job=domain_authority_import --status=${{ job.status }}
+        # --log: on failure the note is the script's last error line, so the
+        # Data health page says why instead of the bare "job status: failure".
+        run: npm run heartbeat -- --job=domain_authority_import --status=${{ job.status }} --log=run.log

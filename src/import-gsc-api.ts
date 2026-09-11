@@ -3,6 +3,7 @@ import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
+import { monthSnapshot } from "./dates.js";
 
 /**
  * Google Search Console → dashboard importer (LIVE API). Replaces the CSV-only
@@ -123,22 +124,6 @@ async function queryDaily(token: string, siteUrl: string, startDate: string, end
   })).filter((r: DayRow) => /^\d{4}-\d{2}-\d{2}$/.test(r.date));
 }
 
-/** Calendar-month bounds for a "YYYY-MM" key, matching import-ga4.ts's
- *  monthBounds so a client's GA4 and GSC monthly snapshots line up. */
-function monthBoundsYm(ym: string): { start: string; end: string } {
-  const y = Number(ym.slice(0, 4));
-  const m = Number(ym.slice(5, 7));
-  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const end = `${ym}-${String(last).padStart(2, "0")}`;
-  // The --since backfill iterates through the CURRENT, still-in-progress
-  // month too -- capping at the calendar month's last day would then stamp
-  // period_end/synced_at days or weeks in the future (see import-ga4.ts,
-  // which hit this for real). Cap at today; a finished past month's end date
-  // is always <= today already, so this only changes the in-progress month.
-  const today = new Date().toISOString().slice(0, 10);
-  return { start: `${ym}-01`, end: end > today ? today : end };
-}
-
 /** Sums daily rows into calendar months. Clicks/impressions add directly;
  *  position is impressions-weighted (not a naive average of daily averages)
  *  so a high-traffic day's ranking counts more than a near-zero-traffic one —
@@ -193,19 +178,20 @@ async function main() {
         const monthly = bucketMonthly(daily);
         let planted = 0;
         for (const [ym, agg] of monthly) {
-          const { start, end: monthEnd } = monthBoundsYm(ym);
+          // The backfill iterates through the CURRENT, in-progress month too.
+          // monthSnapshot (shared with GA4/D365/HubSpot) caps it at today and
+          // stamps it NOW rather than a backdated noon: connector health treats
+          // a source as failing while its newest error row is newer than its
+          // newest live row, and a backfill that failed once (the 400 on
+          // `dimensions`) then succeeded would otherwise leave the error
+          // standing until the next daily pull. period_end is additionally
+          // capped at the query end (today-2, GSC lags) so it never claims
+          // days the data doesn't cover.
+          const { start, end: monthEnd, syncedAt } = monthSnapshot(ym);
           if (agg.impressions === 0) continue;
-          // Past months are stamped at their month-end so the row reads as
-          // "as of" that month. The in-progress month is stamped NOW: connector
-          // health treats a source as failing while its newest error row is
-          // newer than its newest live row, and a backfill that failed once
-          // (e.g. the 400 on `dimensions`) then succeeded would otherwise leave
-          // the error standing until the next daily pull.
-          const inProgress = monthEnd === new Date().toISOString().slice(0, 10);
           syncs.push({
             client_id: slug, source: "gsc", external_id: siteUrl,
-            period_start: start, period_end: monthEnd,
-            synced_at: inProgress ? new Date().toISOString() : `${monthEnd}T12:00:00.000Z`,
+            period_start: start, period_end: monthEnd > end ? end : monthEnd, synced_at: syncedAt,
             data_state: "live", error_message: null,
             metrics: {
               "gsc.clicks": agg.clicks, "gsc.impressions": agg.impressions,

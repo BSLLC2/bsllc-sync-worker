@@ -1,0 +1,35 @@
+name: One-off — retire a renamed/removed job's heartbeat row
+
+# qbo_estimate: import-qbo-invoices.yml stamped it until the job was renamed
+# to qbo_invoice (commit b628569); the leftover row read as "Not flowing"
+# on Admin → Data health. Dry-run by default.
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "job_heartbeats.job to delete"
+        required: true
+        default: "qbo_estimate"
+      dry_run:
+        description: "Print only, write nothing (true/false)."
+        required: false
+        default: "true"
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Retire
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run oneoff-retire-heartbeat -- --job="${{ inputs.job }}" --dry-run
+          else
+            npm run oneoff-retire-heartbeat -- --job="${{ inputs.job }}"
+          fi

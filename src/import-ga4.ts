@@ -3,6 +3,7 @@ import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
+import { monthSnapshot } from "./dates.js";
 
 /**
  * GA4 → dashboard conversions importer. For clients where we have no CRM to
@@ -141,20 +142,6 @@ async function runReport(token: string, propertyId: string, since: string, metri
   return res.json();
 }
 
-function monthBounds(ym: string): { start: string; end: string } {
-  const y = Number(ym.slice(0, 4));
-  const m = Number(ym.slice(4, 6));
-  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const end = `${ym.slice(0, 4)}-${ym.slice(4, 6)}-${String(last).padStart(2, "0")}`;
-  // GA4 reports a row for the CURRENT, still-in-progress month too (partial
-  // data so far) -- capping at the calendar month's last day would then stamp
-  // period_end/synced_at days or weeks in the future. Cap at today instead;
-  // a genuinely finished past month's end date is always <= today already,
-  // so this only changes behavior for the in-progress month.
-  const today = new Date().toISOString().slice(0, 10);
-  return { start: `${ym.slice(0, 4)}-${ym.slice(4, 6)}-01`, end: end > today ? today : end };
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const databaseUrl = process.env.DATABASE_URL?.trim();
@@ -219,7 +206,9 @@ async function main() {
       const sessions = Number(row.metricValues?.[0]?.value ?? 0);
       const conv = Number(row.metricValues?.[1]?.value ?? 0);
       const revenueCents = Math.round(Number(row.metricValues?.[2]?.value ?? 0) * 100);
-      const { start, end } = monthBounds(ym);
+      // GA4 reports the CURRENT, in-progress month too — monthSnapshot caps
+      // it at today so period_end/synced_at never land in the future.
+      const { start, end, syncedAt } = monthSnapshot(ym);
       const metrics: Record<string, number> = { "ga4.conversions": conv, "ga4.sessions": sessions };
       // Only plant ga4.revenue_cents when there's an actual figure. Most
       // clients have no e-commerce tracking configured at all, so GA4 always
@@ -233,11 +222,7 @@ async function main() {
         external_id: propertyId,
         period_start: start,
         period_end: end,
-        // In-progress month stamped now (same reason as import-gsc-api.ts):
-        // a backdated live row can never clear an error row written by an
-        // earlier failed attempt, so the connector would read "failing" until
-        // the next daily pull even though this run just succeeded.
-        synced_at: end === new Date().toISOString().slice(0, 10) ? new Date().toISOString() : `${end}T12:00:00.000Z`,
+        synced_at: syncedAt,
         data_state: "live",
         error_message: null,
         // namespaced keys — sync.ts stores them verbatim; dashboard reads ga4.*

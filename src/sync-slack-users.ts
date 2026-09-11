@@ -40,7 +40,19 @@ async function main() {
         ok?: boolean; error?: string; members?: SlackUser[];
         response_metadata?: { next_cursor?: string };
       };
-      if (!j.ok) throw new Error(j.error || `HTTP ${res.status}`);
+      if (!j.ok) {
+        const err = j.error || `HTTP ${res.status}`;
+        // This job has failed on every run since it was added (2026-08-20)
+        // while the same token posts to Slack fine — i.e. the token works but
+        // the app was never granted users:read. Say exactly that; the fix is
+        // in the Slack app config, not in this code.
+        const hint = err === "missing_scope"
+          ? " — the bot token lacks the users:read scope. In api.slack.com → the BS LLC app → OAuth & Permissions, add users:read under Bot Token Scopes, reinstall the app to the workspace, then update the SLACK_BOT_TOKEN secret if the token changed."
+          : /invalid_auth|token_revoked|account_inactive|not_authed/.test(err)
+            ? " — SLACK_BOT_TOKEN is invalid or revoked; reinstall the Slack app and update the secret."
+            : "";
+        throw new Error(`Slack users.list failed: ${err}${hint}`);
+      }
 
       for (const u of j.members ?? []) {
         if (u.deleted || u.is_bot) continue;

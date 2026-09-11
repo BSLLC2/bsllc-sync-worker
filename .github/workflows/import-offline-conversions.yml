@@ -39,14 +39,17 @@ jobs:
           OCH_ADS_CUSTOMER_ID: ${{ secrets.OCH_ADS_CUSTOMER_ID }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
+          set -o pipefail
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run import-offline-conversions -- --dry-run
+            npm run import-offline-conversions -- --dry-run 2>&1 | tee run.log
           else
-            npm run import-offline-conversions
+            npm run import-offline-conversions 2>&1 | tee run.log
           fi
 
       - name: Heartbeat
         if: always()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npm run heartbeat -- --job=offline_conversions --status=${{ job.status }}
+        # --log: on failure the note is the script's last error line, so the
+        # Data health page says why instead of the bare "job status: failure".
+        run: npm run heartbeat -- --job=offline_conversions --status=${{ job.status }} --log=run.log
