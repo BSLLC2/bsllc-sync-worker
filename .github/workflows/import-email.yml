@@ -17,6 +17,10 @@ on:
         description: "Fetch + write payload only, do not upsert (true/false)."
         required: false
         default: "false"
+      backfill:
+        description: "Re-import this many days, one day at a time (e.g. 90). Idempotent by Gmail id; overrides days."
+        required: false
+        default: ""
 
 concurrency:
   group: email-import
@@ -56,14 +60,19 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           EMAIL_LOG_MAILBOXES: ${{ secrets.EMAIL_LOG_MAILBOXES }}
+          # Optional: "alias@bsllc.biz=user@bsllc.biz,…" for send-as addresses
+          # not on the user's row in Admin → Users.
+          EMAIL_ALIASES: ${{ secrets.EMAIL_ALIASES }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DASHBOARD_DIR: ${{ github.workspace }}/dashboard
         run: |
           DAYS="${{ inputs.days }}"; DAYS="${DAYS:-2}"
+          BACKFILL="${{ inputs.backfill }}"
+          if [ -n "$BACKFILL" ]; then WINDOW="--backfill=$BACKFILL"; else WINDOW="--days=$DAYS"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run import-email -- --days="$DAYS" --dry-run
+            npm run import-email -- "$WINDOW" --dry-run
           else
-            npm run import-email -- --days="$DAYS"
+            npm run import-email -- "$WINDOW"
           fi
       - name: Heartbeat
         if: always()
