@@ -99,3 +99,28 @@ export function monthSnapshot(ymKey: string, now = new Date()): { start: string;
   const end = monthEnd > today ? today : monthEnd;
   return { start: `${ym}-01`, end, syncedAt: end < today ? `${end}T12:00:00.000Z` : now.toISOString() };
 }
+
+/**
+ * Search Console only keeps ~16 months of data. Asking for anything older
+ * returns a 400, which used to fail the whole GSC backfill and leave an
+ * "error" row newer than every good one — so connector health then read the
+ * source as failing (see `isConnectorFailing`'s rule). A contract start older
+ * than the window (OCH, Aug 2024) is clamped to it instead.
+ *
+ * The floor is today minus 16 months, plus one day: the oldest date the API
+ * will still answer for.
+ */
+export const GSC_RETENTION_MONTHS = 16;
+
+export function gscRetentionFloor(now = new Date()): string {
+  const floor = new Date(now);
+  floor.setUTCMonth(floor.getUTCMonth() - GSC_RETENTION_MONTHS);
+  floor.setUTCDate(floor.getUTCDate() + 1);
+  return ymd(floor);
+}
+
+/** The `--since` to actually query, and whether it had to be clamped. */
+export function clampSinceToGscRetention(since: string, now = new Date()): { since: string; clamped: boolean; floor: string } {
+  const floor = gscRetentionFloor(now);
+  return since < floor ? { since: floor, clamped: true, floor } : { since, clamped: false, floor };
+}

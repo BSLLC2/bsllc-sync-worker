@@ -3,6 +3,8 @@ import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { DAILY, staleJobs, rerunSteps } from "./audit-jobs.js";
+import { FAILING_CONNECTORS_SQL } from "./connector-health.js";
 
 /**
  * Every weekday morning, before the brief: check every heartbeat and every
@@ -24,23 +26,6 @@ const INTERNAL_CLIENT = "BS LLC (internal)";
 const ASSIGNEE = "Sebastien";
 const SA_EMAIL = "bsllc-dashboard-sync@bs-llc-internal-tools.iam.gserviceaccount.com";
 
-// heartbeat job → workflow step key, expected cadence in hours
-const DAILY: Record<string, { step: string; hours: number }> = {
-  incremental_sync: { step: "ads", hours: 26 },
-  import_hubspot_metrics: { step: "hubspot_metrics", hours: 26 },
-  import_och: { step: "och", hours: 26 },
-  import_ga4: { step: "ga4", hours: 26 },
-  import_gsc: { step: "gsc", hours: 26 },
-  import_d365: { step: "d365", hours: 26 },
-  match_web_leads_to_crm: { step: "crm_match", hours: 26 },
-  hubspot_deals: { step: "hubspot_deals", hours: 14 },
-  qbo_invoices_sync: { step: "qbo", hours: 26 },
-  qbo_financials: { step: "qbo_financials", hours: 26 },
-  qbo_depth: { step: "qbo_depth", hours: 26 },
-  seo_import: { step: "seo", hours: 8 * 24 },
-  aeo_import: { step: "aeo", hours: 8 * 24 },
-  domain_authority_import: { step: "authority", hours: 8 * 24 },
-};
 const SOURCE_LABEL: Record<string, string> = { google_ads: "Google Ads", gsc: "Search Console", ga4: "GA4", hubspot: "HubSpot", d365: "Dynamics 365", square: "Square", seo: "SEO rank tracking", aeo: "AEO", authority: "Domain authority" };
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
@@ -63,15 +48,12 @@ async function main() {
   try {
     const beats = new Map((await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats`)).rows.map((r) => [r.job, r]));
     const now = Date.now();
-    const staleJobs = Object.entries(DAILY).filter(([job, cfg]) => {
-      const b = beats.get(job);
-      return !b || !b.ok || now - new Date(b.ran_at).getTime() > cfg.hours * 3_600_000;
-    });
+    const stale = staleJobs(beats.values(), new Date(now));
 
     if (mode === "plan") {
-      const rerun = staleJobs.map(([, cfg]) => cfg.step).join(",");
-      console.log(`heartbeats: ${Object.keys(DAILY).length} daily/weekly jobs, ${staleJobs.length} missed or failed → re-run: ${rerun || "(none)"}`);
-      for (const [job] of staleJobs) { const b = beats.get(job); console.log(`  ${job}: ${b ? `${b.ok ? "ok" : "FAILED"} at ${new Date(b.ran_at).toISOString()}` : "never ran"}`); }
+      const rerun = rerunSteps(stale);
+      console.log(`heartbeats: ${Object.keys(DAILY).length} daily/weekly jobs, ${stale.length} missed or failed → re-run: ${rerun || "(none)"}`);
+      for (const [job] of stale) { const b = beats.get(job); console.log(`  ${job}: ${b ? `${b.ok ? "ok" : "FAILED"} at ${new Date(b.ran_at).toISOString()}` : "never ran"}`); }
       if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `rerun=${rerun}\n`);
       return;
     }
@@ -96,18 +78,9 @@ async function main() {
     // ── Findings → tasks ──
     const findings: Finding[] = [];
     // Connectors whose newest error is newer than their newest success
+    // One definition of "failing", shared with the test — see ./connector-health.js.
     const conn = (await c.query<{ name: string; source: string; error_message: string | null }>(
-      `WITH latest AS (
-         SELECT DISTINCT ON (client_id, source, metric_key) client_id, source, metric_key, data_state, error_message, synced_at
-           FROM metric_snapshots WHERE (period_end IS NULL OR period_end <= now()) ORDER BY client_id, source, metric_key, synced_at DESC),
-       -- a run that answered no_data is a success too: the pipeline worked, the account was empty
-       live AS (SELECT client_id, source, max(synced_at) AS m FROM latest WHERE data_state IN ('live', 'no_data') GROUP BY 1, 2),
-       err AS (SELECT DISTINCT ON (client_id, source) client_id, source, error_message, synced_at FROM latest WHERE data_state = 'error' ORDER BY client_id, source, synced_at DESC)
-       SELECT c.name, e.source, e.error_message FROM err e
-         JOIN connector_mappings m ON m.client_id = e.client_id AND m.source = e.source AND m.enabled
-         JOIN clients c ON c.id = e.client_id
-         LEFT JOIN live ON live.client_id = e.client_id AND live.source = e.source
-        WHERE (live.m IS NULL OR e.synced_at > live.m) AND c.status IN ('launch', 'active')`)).rows;
+      FAILING_CONNECTORS_SQL)).rows;
     for (const r of conn) findings.push({
       key: `conn:${slugify(r.name)}:${r.source}`, priority: "P1", status: "blocked",
       title: `${r.name} — ${SOURCE_LABEL[r.source] ?? r.source} is failing`,
@@ -115,9 +88,9 @@ async function main() {
     });
     // Jobs still stale after the morning re-run
     const beats2 = new Map((await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats`)).rows.map((r) => [r.job, r]));
-    for (const [job, cfg] of Object.entries(DAILY)) {
+    for (const [job] of staleJobs(beats2.values())) {
       const b = beats2.get(job);
-      if (!b || !b.ok || Date.now() - new Date(b.ran_at).getTime() > cfg.hours * 3_600_000) findings.push({
+      findings.push({
         key: `job:${job}`, priority: "P1",
         title: `Worker job "${job}" has not succeeded ${b ? `since ${new Date(b.ran_at).toISOString().slice(0, 10)}` : "yet"}`,
         description: "Re-run this morning and still failing or missing. Open the workflow's last run in GitHub Actions (bsllc-sync-worker) for the error.",

@@ -122,6 +122,9 @@
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check:conflicts": "node scripts/check-conflict-markers.mjs",
     "typecheck": "tsc --noEmit",
     "set-task-category": "tsx src/set-task-category.ts",
     "set-client-status": "tsx src/set-client-status.ts",
@@ -174,6 +177,7 @@
     "@types/pdfkit": "^0.17.6",
     "@types/pg": "^8.20.3",
     "tsx": "^4.23.5",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^3.2.7"
   }
 }

@@ -3,7 +3,8 @@ import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
-import { monthSnapshot } from "./dates.js";
+import { monthSnapshot, clampSinceToGscRetention } from "./dates.js";
+import { bucketMonthly, type DayRow } from "./gsc-monthly.js";
 
 /**
  * Google Search Console → dashboard importer (LIVE API). Replaces the CSV-only
@@ -96,7 +97,6 @@ async function queryTotals(token: string, siteUrl: string, startDate: string, en
   return { clicks: Number(row.clicks ?? 0), impressions: Number(row.impressions ?? 0), ctr: Number(row.ctr ?? 0), position: Number(row.position ?? 0) };
 }
 
-interface DayRow { date: string; clicks: number; impressions: number; position: number }
 
 /** Same query as queryTotals but dimensioned by day, for bucketing into
  *  monthly snapshots. rowLimit covers years of daily rows without pagination
@@ -124,24 +124,6 @@ async function queryDaily(token: string, siteUrl: string, startDate: string, end
   })).filter((r: DayRow) => /^\d{4}-\d{2}-\d{2}$/.test(r.date));
 }
 
-/** Sums daily rows into calendar months. Clicks/impressions add directly;
- *  position is impressions-weighted (not a naive average of daily averages)
- *  so a high-traffic day's ranking counts more than a near-zero-traffic one —
- *  the same principle CTR already gets by being recomputed from the summed
- *  totals rather than averaged. */
-function bucketMonthly(rows: DayRow[]): Map<string, { clicks: number; impressions: number; posWeighted: number }> {
-  const m = new Map<string, { clicks: number; impressions: number; posWeighted: number }>();
-  for (const r of rows) {
-    const ym = r.date.slice(0, 7);
-    const cur = m.get(ym) ?? { clicks: 0, impressions: 0, posWeighted: 0 };
-    cur.clicks += r.clicks;
-    cur.impressions += r.impressions;
-    cur.posWeighted += r.position * r.impressions;
-    m.set(ym, cur);
-  }
-  return m;
-}
-
 async function main() {
   const argv = process.argv.slice(2);
   const dryRun = argv.includes("--dry-run");
@@ -166,11 +148,11 @@ async function main() {
     // Search Console keeps 16 months. A contract start older than that (OCH,
     // Aug 2024) used to make the whole backfill error out and leave an
     // "error" row newer than every good one, so the connector read as failing.
-    // Clamp to the retention window and say so.
-    const floor = new Date(); floor.setUTCMonth(floor.getUTCMonth() - 16); floor.setUTCDate(floor.getUTCDate() + 1);
-    const floorIso = iso(floor);
-    let sinceEff = since;
-    if (since < floorIso) { sinceEff = floorIso; console.log(`  --since ${since} is older than Search Console's 16-month retention; starting at ${floorIso} instead.`); }
+    // Clamp to the retention window and say so. (Pure, in ./dates.js, so
+    // tests/gsc-retention.test.ts can hold the boundary.)
+    const clamp = clampSinceToGscRetention(since);
+    const sinceEff = clamp.since;
+    if (clamp.clamped) console.log(`  --since ${since} is older than Search Console's 16-month retention; starting at ${clamp.floor} instead.`);
     console.log(`GSC historical import — ${Object.keys(map).length} propert(ies), ${sinceEff}…${end}${dryRun ? " (dry-run)" : ""}`);
     for (const [slug, siteUrl] of Object.entries(map)) {
       try {

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheap and install-free, so it reports in seconds. Twenty-five hand-resolved
+  # merges in a day is how a marker gets committed; this is the backstop.
+  conflict-markers:
+    name: No conflict markers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/check-conflict-markers.mjs
+
+  typecheck-and-test:
+    name: Typecheck and test
+    runs-on: ubuntu-latest
+    env:
+      # Every date here is UTC by construction; pinning a real offset is what
+      # proves a non-UTC runner cannot change an answer.
+      TZ: America/New_York
+      # tests/connector-health.test.ts runs the real failing-connector SQL
+      # against this; without it that file skips.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # No bundle step in this repo — every entry point runs under tsx — so
+      # typecheck plus the suite is the whole gate.
+      - name: Test
+        run: npm test
