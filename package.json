@@ -119,6 +119,7 @@
     "upload-to-drive": "tsx src/upload-to-drive.ts",
     "heartbeat": "tsx src/heartbeat.ts",
     "monitor-freshness": "tsx src/monitor-freshness.ts",
+    "test-connections": "tsx src/test-connections.ts",
     "backfill": "tsx src/index.ts --mode=backfill",
     "incremental": "tsx src/index.ts --mode=incremental",
     "start": "tsx src/index.ts",

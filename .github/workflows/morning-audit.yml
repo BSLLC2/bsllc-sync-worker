@@ -151,6 +151,25 @@ jobs:
           QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
         run: npm run import-qbo-depth && npm run heartbeat -- --job=qbo_depth --status=success
 
+      # Re-prove client access before the findings run. A pass is evidence about
+      # the moment it was taken: an admin can revoke in October access granted
+      # in August, and without this nobody would press the button again to find
+      # out. Bounded by --max so a bad morning can't become a quota incident,
+      # and continue-on-error because a failed sweep must never stop the audit
+      # itself from filing everything else.
+      - name: Re-test client connections that have aged out
+        if: inputs.dry_run != 'true'
+        continue-on-error: true
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
+        run: npm run test-connections -- --stale-days=7 --max=60
+
       - name: Apply — auto-fixes and findings → tasks
         working-directory: worker
         run: |

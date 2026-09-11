@@ -1,0 +1,64 @@
+name: Test client connections (on-demand)
+
+# Fired by the dashboard's "Test connection" button (via GitHub's API) to prove
+# we can read a client's Search Console / GA4 / Google Ads accounts RIGHT NOW,
+# instead of finding out when a nightly sync fails or silently returns nothing.
+#
+# Deliberately NOT an import. Each probe is the smallest real read that answers
+# "can we read this, yes or no", and it writes only to connector_tests — never
+# to metric_snapshots, where an error row would make a healthy connector read as
+# failing under the newest-error-vs-newest-success rule.
+#
+# It therefore needs no dashboard checkout: there is no `npm run sync` in this
+# path, so this workflow is the one Google-touching job that talks to Postgres
+# directly and is over in well under a minute — which is what makes it usable
+# behind a button a person is waiting on.
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id)"
+        required: true
+      sources:
+        description: "Comma-separated: gsc,ga4,google_ads. Blank = all three."
+        required: false
+        default: ""
+      request_ids:
+        description: "connector_tests row ids to close, paired 1:1 with sources. Blank = insert new rows."
+        required: false
+        default: ""
+
+concurrency:
+  # Per client, not global: two AMs testing two different clients at the same
+  # moment must not queue behind each other while they watch a spinner.
+  group: test-connections-${{ inputs.client_id }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci
+      - name: Probe each connector
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # loadConfig() requires it, but no probe runs `npm run sync`, so any
+          # path satisfies the check without a dashboard checkout to maintain.
+          DASHBOARD_DIR: ${{ github.workspace }}
+        run: |
+          npm run test-connections -- \
+            --client="${{ inputs.client_id }}" \
+            --sources="${{ inputs.sources }}" \
+            --request-ids="${{ inputs.request_ids }}"

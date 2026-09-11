@@ -113,6 +113,37 @@ async function main() {
       title: `${r.name} — ${SOURCE_LABEL[r.source] ?? r.source} is failing`,
       description: `${fixHint(r.source, r.error_message)}\n\nLast error: ${(r.error_message ?? "").slice(0, 300)}`,
     });
+    // Connection tests that REGRESSED: this connector proved readable before,
+    // and its newest probe failed. Deliberately separate from the failing-
+    // connector finding above, and deliberately narrower — a connector that has
+    // never once passed is an unfinished launch, chased by the launch flow, not
+    // something to raise as a new alert every morning. A regression is the case
+    // nothing else catches: access an admin revoked months after it was given.
+    //
+    // The fix text is left to the dashboard on purpose. shared/connection-test.ts
+    // holds the one error-to-fix mapping and a second copy here would drift —
+    // and a drifted instruction sends a client to change the wrong setting. So
+    // this names what broke, quotes the error, and points at the page that
+    // spells out the fix.
+    const regressed = (await c.query<{ name: string; source: string; raw_error: string | null; detail: string | null; tested_at: Date; last_pass: Date }>(
+      `WITH settled AS (
+         SELECT client_id, source, outcome, raw_error, detail, tested_at,
+                row_number() OVER (PARTITION BY client_id, source ORDER BY tested_at DESC) AS rn
+           FROM connector_tests WHERE outcome <> 'running' AND tested_at IS NOT NULL),
+       newest AS (SELECT * FROM settled WHERE rn = 1 AND outcome = 'fail'),
+       passed AS (SELECT client_id, source, max(tested_at) AS last_pass FROM settled
+                   WHERE outcome IN ('pass', 'no_data') GROUP BY 1, 2)
+       SELECT cl.name, n.source, n.raw_error, n.detail, n.tested_at, p.last_pass
+         FROM newest n
+         JOIN passed p ON p.client_id = n.client_id AND p.source = n.source AND p.last_pass < n.tested_at
+         JOIN clients cl ON cl.id = n.client_id
+        WHERE cl.status IN ('launch', 'active')`)).rows;
+    for (const r of regressed) findings.push({
+      key: `conntest:${slugify(r.name)}:${r.source}`, priority: "P1", status: "blocked",
+      title: `${r.name} — ${SOURCE_LABEL[r.source] ?? r.source} access was working and now isn't`,
+      description: `We could read this on ${new Date(r.last_pass).toISOString().slice(0, 10)} and cannot as of ${new Date(r.tested_at).toISOString().slice(0, 10)} — so this is access that was REMOVED, not access that was never granted. Somebody changed a permission on the client's side, or the account changed state.\n\nOpen the client page and press "Test connection" for the exact fix and the wording to send them.${r.detail ? `\n\nWhat the test saw: ${r.detail}` : ""}\n\nLast error: ${(r.raw_error ?? "(none recorded)").slice(0, 300)}`,
+    });
+
     // Jobs still stale after the morning re-run
     const beats2 = new Map((await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats`)).rows.map((r) => [r.job, r]));
     for (const [job, cfg] of Object.entries(DAILY)) {
