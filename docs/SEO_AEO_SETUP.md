@@ -51,3 +51,39 @@ DataForSEO also covers keyword research (Labs/Keywords Data), site audits
 (OnPage), backlinks, and keyword/backlink gap (Domain Intersection). Once
 on-demand research tools for those exist in the dashboard, SEMrush can be
 cancelled. Until then, keep the SEMrush seat for the manual research GUI.
+
+## Keyword research (added 2026-09-10) — the Semrush replacement
+Two entry points in the dashboard, one engine here:
+- **Client page → SEO & AEO tab → "Keyword research"**: seeds (≤10) + optional
+  competitor domain → the app stores a `research_requests` row with
+  `kind='discovery'`, `client_id`, `params_json` (`{seeds, competitor, limit}`),
+  and `estimated_cost_usd`. The app never calls DataForSEO — it only stores the
+  row and (best-effort) dispatches `run-research.yml` via GitHub so the result
+  lands in under a minute instead of on the 2-minute cron.
+- **SEO research page** (sidebar): the older cross-client workbench — kinds
+  `ideas`, `rankings`, `gap`.
+
+`run-research` (`src/run-research.ts` → `keywordDiscovery()` in
+`src/dataforseo.ts`) makes at most three Labs calls per discovery run:
+1. `dataforseo_labs/google/keyword_ideas/live` with all seeds in one task
+   (volume, CPC, competition, KD, intent, SERP features);
+2. `ranked_keywords/live` for the client domain (≤1000) → each idea's
+   `clientRank` ("you rank #N");
+3. `ranked_keywords/live` for the competitor (≤700) when given → rows the
+   competitor wins (top 50) that the client doesn't rank for, tagged `gap`.
+Calls 2–3 are best-effort (a failure is logged as a warning; the ideas still
+land). The sum of each task's `cost` field from DataForSEO's responses is
+written to `cost_usd`, so the UI shows estimate vs actual.
+
+**Cost guard.** The estimate the AM sees before clicking Run uses DataForSEO's
+Labs list price ($0.01 per task + $0.0001 per returned row —
+`DATAFORSEO_LABS_PRICING` in the dashboard's `shared/schema.ts`; confirm
+against https://dataforseo.com/pricing when the plan changes). Inputs are
+clamped server-side (≤10 seeds, ≤500 ideas) and a run estimated above $1.00 is
+refused. A typical run (200 ideas + client rankings) is ≈ $0.13 worst case.
+
+Smoke test from here without the UI:
+```
+npm run enqueue-research -- --kind=discovery --query="commercial roofing, flat roof repair" --target=client.com --competitor=rival.com
+```
+(or dispatch **Enqueue research** with `kind=discovery`.)
