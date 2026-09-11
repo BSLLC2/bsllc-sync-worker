@@ -108,6 +108,91 @@ export class QboClient {
     return (res.QueryResponse?.Account ?? []).map((a) => ({ id: a.Id, name: a.Name, balance: a.CurrentBalance ?? 0 }));
   }
 
+  // ── Depth reads (2026-09-11) — everything below is read-only and feeds
+  // import-qbo-depth.ts, which stores account-level P&L, the general ledger,
+  // aging and the account/vendor/class dimensions so every Financials figure
+  // can be peeled back to its transactions. Report calls are throttled to
+  // stay far under Intuit's 500 requests/minute per realm.
+  private lastReportAt = 0;
+  private async throttle(): Promise<void> {
+    const minGapMs = 150;
+    const wait = this.lastReportAt + minGapMs - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    this.lastReportAt = Date.now();
+  }
+  /** P&L with a chosen column breakdown. "Month" gives one column per
+   *  calendar month in the range (plus Total); "Customers"/"Classes"/
+   *  "Vendors" give one column per entity (ColKey metadata = entity id) plus
+   *  a "Not Specified" column and Total. Rows are the account tree. */
+  async getProfitAndLossBy(startDate: string, endDate: string, summarizeBy: "Month" | "Customers" | "Classes" | "Vendors" | "Total"): Promise<QboReport> {
+    await this.throttle();
+    return this.call<QboReport>("GET", `reports/ProfitAndLoss?start_date=${startDate}&end_date=${endDate}&summarize_column_by=${summarizeBy}`);
+  }
+  /** General ledger — every posted line, grouped by account (nested
+   *  sections for sub-accounts). The one report that carries account, name
+   *  (customer/vendor id), class, memo, doc number AND the transaction id
+   *  (on the txn_type column) per line, so it is the transaction store. */
+  async getGeneralLedger(startDate: string, endDate: string): Promise<QboReport> {
+    await this.throttle();
+    const columns = "tx_date,txn_type,doc_num,name,memo,split_acc,klass_name,subt_nat_amount";
+    return this.call<QboReport>("GET", `reports/GeneralLedger?start_date=${startDate}&end_date=${endDate}&columns=${columns}`);
+  }
+  /** Aged receivables / payables summary — one row per customer / vendor,
+   *  columns Current, 1-30, 31-60, 61-90, 91+ and Total. */
+  async getAgedReceivables(asOfDate: string): Promise<QboReport> {
+    await this.throttle();
+    return this.call<QboReport>("GET", `reports/AgedReceivables?report_date=${asOfDate}&aging_period=30&num_periods=4`);
+  }
+  async getAgedPayables(asOfDate: string): Promise<QboReport> {
+    await this.throttle();
+    return this.call<QboReport>("GET", `reports/AgedPayables?report_date=${asOfDate}&aging_period=30&num_periods=4`);
+  }
+  /** Generic paged entity query — QBO caps a page at 1000 rows. */
+  private async queryAll<T>(entity: string, fields: string, where?: string): Promise<T[]> {
+    const out: T[] = [];
+    let start = 1;
+    for (;;) {
+      await this.throttle();
+      const q = encodeURIComponent(`SELECT ${fields} FROM ${entity}${where ? ` WHERE ${where}` : ""} STARTPOSITION ${start} MAXRESULTS 1000`);
+      const res = await this.call<{ QueryResponse?: Record<string, T[]> }>("GET", `query?query=${q}`);
+      const page = res.QueryResponse?.[entity] ?? [];
+      out.push(...page);
+      if (page.length < 1000) break;
+      start += 1000;
+    }
+    return out;
+  }
+  /** The chart of accounts — every account, active or not (a deactivated
+   *  account still owns historical lines). */
+  async getAccounts(): Promise<{ id: string; name: string; fullyQualifiedName: string | null; accountType: string | null; accountSubType: string | null; classification: string | null; parentId: string | null; active: boolean; currentBalance: number | null }[]> {
+    const rows = await this.queryAll<{ Id: string; Name?: string; FullyQualifiedName?: string; AccountType?: string; AccountSubType?: string; Classification?: string; ParentRef?: { value?: string }; Active?: boolean; CurrentBalance?: number }>(
+      "Account", "Id, Name, FullyQualifiedName, AccountType, AccountSubType, Classification, ParentRef, Active, CurrentBalance",
+    );
+    return rows.map((a) => ({
+      id: a.Id, name: a.Name ?? "", fullyQualifiedName: a.FullyQualifiedName ?? null, accountType: a.AccountType ?? null,
+      accountSubType: a.AccountSubType ?? null, classification: a.Classification ?? null, parentId: a.ParentRef?.value ?? null,
+      active: a.Active !== false, currentBalance: a.CurrentBalance ?? null,
+    }));
+  }
+  async getVendors(): Promise<{ id: string; name: string; active: boolean; balance: number }[]> {
+    const rows = await this.queryAll<{ Id: string; DisplayName?: string; Active?: boolean; Balance?: number }>("Vendor", "Id, DisplayName, Active, Balance");
+    return rows.map((v) => ({ id: v.Id, name: v.DisplayName ?? "", active: v.Active !== false, balance: v.Balance ?? 0 }));
+  }
+  async getClasses(): Promise<{ id: string; name: string; fullyQualifiedName: string | null; active: boolean }[]> {
+    const rows = await this.queryAll<{ Id: string; Name?: string; FullyQualifiedName?: string; Active?: boolean }>("Class", "Id, Name, FullyQualifiedName, Active");
+    return rows.map((c) => ({ id: c.Id, name: c.Name ?? "", fullyQualifiedName: c.FullyQualifiedName ?? null, active: c.Active !== false }));
+  }
+  /** Every vendor bill — the AP counterpart of getInvoices(). */
+  async getBills(): Promise<{ id: string; docNumber: string | null; txnDate: string | null; dueDate: string | null; totalAmt: number; balance: number; vendorId: string | null; vendorName: string | null }[]> {
+    const rows = await this.queryAll<{ Id: string; DocNumber?: string; TxnDate?: string; DueDate?: string; TotalAmt?: number; Balance?: number; VendorRef?: { value?: string; name?: string } }>(
+      "Bill", "Id, DocNumber, TxnDate, DueDate, TotalAmt, Balance, VendorRef",
+    );
+    return rows.map((b) => ({
+      id: b.Id, docNumber: b.DocNumber ?? null, txnDate: b.TxnDate ?? null, dueDate: b.DueDate ?? null,
+      totalAmt: b.TotalAmt ?? 0, balance: b.Balance ?? 0, vendorId: b.VendorRef?.value ?? null, vendorName: b.VendorRef?.name ?? null,
+    }));
+  }
+
   /** Every active QBO customer — id, display name, fully-qualified name
    *  (QBO's own "Parent:Child" path for a sub-customer/project — what the
    *  UI's "Client/Vendor" column actually shows, distinct from DisplayName
@@ -437,15 +522,19 @@ export interface QboLine { name: string; description?: string | null; amount: nu
 // deliberately loose since the exact nesting varies by report and by which
 // rows/columns are present for a given date range. Callers should treat this
 // as "search it," never assume a fixed shape.
+export interface QboReportCol { value?: string; id?: string }
 export interface QboReportRow {
   group?: string;
   type?: string;
-  ColData?: { value?: string }[];
+  ColData?: QboReportCol[];
+  Header?: { ColData?: QboReportCol[] };
   Rows?: { Row?: QboReportRow[] };
-  Summary?: { ColData?: { value?: string }[] };
+  Summary?: { ColData?: QboReportCol[] };
 }
+export interface QboReportColumn { ColTitle?: string; ColType?: string; MetaData?: { Name?: string; Value?: string }[] }
 export interface QboReport {
-  Header?: { StartPeriod?: string; EndPeriod?: string; Time?: string };
+  Header?: { StartPeriod?: string; EndPeriod?: string; Time?: string; ReportName?: string };
+  Columns?: { Column?: QboReportColumn[] };
   Rows?: { Row?: QboReportRow[] };
 }
 

@@ -103,6 +103,8 @@
     "send-qbo-invoice": "tsx src/send-qbo-invoice.ts",
     "import-qbo-financials": "tsx src/import-qbo-financials.ts",
     "verify-qbo": "tsx src/verify-qbo.ts",
+    "import-qbo-depth": "tsx src/import-qbo-depth.ts",
+    "verify-qbo-depth": "tsx src/import-qbo-depth.ts --dry-run",
     "verify-slack": "tsx src/verify-slack.ts",
     "verify-dataforseo": "tsx src/verify-dataforseo.ts",
     "verify-webops": "tsx src/verify-webops.ts",

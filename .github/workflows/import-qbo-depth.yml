@@ -1,0 +1,61 @@
+name: QBO — depth (P&L by account/customer/vendor, ledger, aging)
+
+# The layer under the Financials tab's summary numbers: account-level P&L per
+# month, P&L by customer / class / vendor, every General Ledger line with a
+# deep link into QuickBooks, AR/AP aging by customer/vendor, and vendor
+# bills. Read-only, same QBO connection and OAuth scope as the other QBO
+# jobs; no new secrets. Daily run refreshes the current + two prior months;
+# the Sunday run re-pulls the trailing 24 months so a back-dated edit in
+# QuickBooks never goes stale here. See src/import-qbo-depth.ts.
+on:
+  schedule:
+    - cron: "20 8 * * 1-6"   # daily incremental, 08:20 UTC (after the 08:00 financials snapshot)
+    - cron: "20 8 * * 0"     # Sunday: full 24-month refresh
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "incremental (3 months) | full (24 months) | since"
+        required: false
+        default: "incremental"
+      since:
+        description: "Backfill start date YYYY-MM-DD (only when mode=since)."
+        required: false
+        default: ""
+      dry_run:
+        description: "Pull and parse only, write nothing to Postgres (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: import-qbo-depth
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Pull QBO depth
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$(date -u +%u)" = "7" ]; then ARGS="--full"; fi
+          if [ "${{ inputs.mode }}" = "full" ]; then ARGS="--full"; fi
+          if [ "${{ inputs.mode }}" = "since" ] && [ -n "${{ inputs.since }}" ]; then ARGS="--since=${{ inputs.since }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          npm run import-qbo-depth -- $ARGS
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=qbo_depth --status=${{ job.status }}

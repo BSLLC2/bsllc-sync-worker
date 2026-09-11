@@ -117,6 +117,28 @@ jobs:
           QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
           QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
         run: npm run import-qbo-invoices-sync && npm run heartbeat -- --job=qbo_invoices_sync --status=success
+      - name: Re-run QBO financials snapshot
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'qbo_financials')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+        run: npm run import-qbo-financials && npm run heartbeat -- --job=qbo_financials --status=success
+      - name: Re-run QBO depth
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'qbo_depth')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+        run: npm run import-qbo-depth && npm run heartbeat -- --job=qbo_depth --status=success
 
       - name: Apply — auto-fixes and findings → tasks
         working-directory: worker
