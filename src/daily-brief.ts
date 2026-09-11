@@ -14,8 +14,11 @@ import pg from "pg";
 const DASH = "https://work.bsllc.biz";
 const PRIORITY = ["Franklin Brazing", "Ohio Community Health (OCH)", "Diesel Power Group", "Tablespoon"];
 const PROJECT_NAME = "Data readiness";
+// Same rule as the dashboard's shared/case-study.ts: only revenue traceable
+// to our leads counts as a tier. Company-wide totals (d365.revenue_cents,
+// hubspot.revenue_cents, ga4/square revenue) are context, never a tier.
 const CONFIRMED = ["manual.revenue_confirmed_cents"];
-const SYSTEM = ["d365.revenue_cents", "d365.cw_revenue_bsllc_cents", "hubspot.revenue_cents", "manual.revenue_system_cents", "ga4.revenue_cents", "square.revenue_cents"];
+const SYSTEM = ["d365.cw_revenue_bsllc_cents", "hubspot.cw_revenue_bsllc_cents", "manual.revenue_system_cents"];
 const MODELED = ["manual.revenue_cents"];
 const CONV = ["manual.admissions_marketing_current", "manual.admissions_marketing", "ads.conversions", "ga4.conversions"];
 const slug = (n: string) => n.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -49,7 +52,8 @@ async function main() {
         `SELECT DISTINCT metric_key FROM metric_snapshots WHERE client_id = $1 AND data_state = 'live' AND value_numeric > 0 AND metric_key = ANY($2)`,
         [cl.id, [...CONFIRMED, ...SYSTEM, ...MODELED]]);
       const keys = new Set(rev.map((r) => r.metric_key));
-      const { rows: [wins] } = await c.query<{ n: string; total: string }>(`SELECT count(*)::text AS n, coalesce(sum(value_cents),0)::text AS total FROM client_named_wins WHERE client_id = $1`, [cl.id]);
+      // Named wins count only with a documented source (the client record they came from).
+      const { rows: [wins] } = await c.query<{ n: string; total: string }>(`SELECT count(*)::text AS n, coalesce(sum(value_cents),0)::text AS total FROM client_named_wins WHERE client_id = $1 AND coalesce(trim(source), '') <> ''`, [cl.id]);
       const tier = CONFIRMED.some((k) => keys.has(k)) ? "client confirmed"
         : SYSTEM.some((k) => keys.has(k)) || Number(wins?.n ?? 0) > 0 ? "client records"
         : MODELED.some((k) => keys.has(k)) || (cl.customer_value_cents && (cl.close_rate_pct != null)) ? "modeled"

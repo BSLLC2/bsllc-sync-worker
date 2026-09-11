@@ -3,6 +3,7 @@ import "dotenv/config";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { monthSnapshot } from "./dates.js";
+import { fetchHubspotDealsWithContacts, hsFetchAll, hubspotBucket, hubspotDealSource, hubspotDealStage, isAttributed, loadWebInquiryIndex, matchWebInquiry, looksLikeSample, resolveHubspotToken, type Bucket, type HSObj } from "./attribution.js";
 
 /**
  * Per-CLIENT HubSpot metrics importer — distinct from import-hubspot.ts,
@@ -10,6 +11,12 @@ import { monthSnapshot } from "./dates.js";
  * using the single global HUBSPOT_TOKEN. This reads a CLIENT's own separate
  * HubSpot portal (e.g. Tablespoon's private-events pipeline) and plants
  * hubspot.revenue_cents / hubspot.deals_won / hubspot.leads per month, which
+ * are company-wide totals (context only on a case study), PLUS the
+ * case-study keys hubspot.cw_revenue_bsllc_cents / hubspot.cw_deals_bsllc:
+ * won deals whose original source is a channel we run (paid / organic
+ * search) or whose contact matches a web inquiry we captured where HubSpot
+ * has no source — the same rule match-web-leads-to-crm applies row by row
+ * (src/attribution.ts), so the monthly figure and the drill-down agree.
  * the dashboard's revenue-by-channel tile already knows how to read and —
  * when 2+ channels are live in the same period — sum (see
  * shared/schema.ts SIGNAL_CONNECTOR_KEYS.revenue).
@@ -54,64 +61,6 @@ function envSuffix(clientName: string): string {
   return clientName.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
-interface HSObj { id: string; properties: Record<string, string | null> }
-
-async function hsGet(token: string, path: string): Promise<any> {
-  for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`${HS}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (res.status === 429 && attempt < 6) { await new Promise((r) => setTimeout(r, 1000 * (attempt + 1))); continue; }
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      const err = new Error(`HubSpot GET ${path} → ${res.status}: ${body.slice(0, 300)}`);
-      (err as any).status = res.status;
-      throw err;
-    }
-    return res.json();
-  }
-}
-
-async function fetchAll(token: string, object: string, properties: string[]): Promise<HSObj[]> {
-  const out: HSObj[] = [];
-  let after: string | undefined;
-  do {
-    const qp = new URLSearchParams({ limit: "100" });
-    properties.forEach((p) => qp.append("properties", p));
-    if (after) qp.set("after", after);
-    const data = await hsGet(token, `/crm/v3/objects/${object}?${qp.toString()}`);
-    out.push(...((data.results ?? []) as HSObj[]));
-    after = data.paging?.next?.after;
-  } while (after);
-  return out;
-}
-
-/**
- * Resolve a client's HubSpot token: prefer whatever's already in
- * client_integration_tokens (the worker's own rotating store); otherwise
- * seed it from the per-client env var and persist it there for next time.
- * Same "seed once, then own it" pattern as integration_tokens for QBO.
- */
-async function resolveToken(pgc: pg.Client, clientId: string, clientName: string): Promise<string | null> {
-  const { rows } = await pgc.query<{ data: string }>(
-    `SELECT data FROM client_integration_tokens WHERE client_id = $1 AND provider = 'hubspot'`, [clientId],
-  );
-  if (rows[0]) {
-    try {
-      const parsed = JSON.parse(rows[0].data);
-      if (parsed.token && String(parsed.token).trim()) return String(parsed.token).trim();
-    } catch { /* fall through to env seed */ }
-  }
-  const envName = `HUBSPOT_TOKEN_${envSuffix(clientName)}`;
-  const fromEnv = process.env[envName]?.trim();
-  if (!fromEnv) return null;
-  await pgc.query(
-    `INSERT INTO client_integration_tokens (client_id, provider, data, updated_at)
-     VALUES ($1, 'hubspot', $2, now())
-     ON CONFLICT (client_id, provider) DO UPDATE SET data = $2, updated_at = now()`,
-    [clientId, JSON.stringify({ token: fromEnv })],
-  );
-  return fromEnv;
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const databaseUrl = env("DATABASE_URL");
@@ -146,8 +95,10 @@ async function main() {
     const c = new pg.Client({ connectionString: databaseUrl });
     await c.connect();
     let token: string | null;
+    let webIdx: Awaited<ReturnType<typeof loadWebInquiryIndex>>;
     try {
-      token = await resolveToken(c, client.id, client.name);
+      token = await resolveHubspotToken(c, client.id, client.name);
+      webIdx = await loadWebInquiryIndex(c, client.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""), null);
     } finally {
       await c.end();
     }
@@ -158,11 +109,11 @@ async function main() {
       continue;
     }
 
-    let deals: HSObj[], contacts: HSObj[];
+    let deals: HSObj[], contacts: HSObj[], contactsById: Map<string, HSObj>;
     try {
-      [deals, contacts] = await Promise.all([
-        fetchAll(token, "deals", ["amount", "closedate", "hs_is_closed_won"]),
-        fetchAll(token, "contacts", ["createdate"]),
+      [{ deals, contactsById }, contacts] = await Promise.all([
+        fetchHubspotDealsWithContacts(token),
+        hsFetchAll(token, "contacts", ["createdate"]),
       ]);
     } catch (e) {
       const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
@@ -172,23 +123,41 @@ async function main() {
     }
 
     // Bucket closed-won deal revenue + count, and new-contact count, by month.
-    const byMonth = new Map<string, { revenueCents: number; dealsWon: number; leads: number }>();
+    type Month = { revenueCents: number; dealsWon: number; leads: number; cw: Record<Bucket, number>; cwDealsBsllc: number };
+    const byMonth = new Map<string, Month>();
     const bump = (ym: string) => {
       let e = byMonth.get(ym);
-      if (!e) { e = { revenueCents: 0, dealsWon: 0, leads: 0 }; byMonth.set(ym, e); }
+      if (!e) { e = { revenueCents: 0, dealsWon: 0, leads: 0, cw: { bsllc: 0, other: 0, manual: 0, unknown: 0 }, cwDealsBsllc: 0 }; byMonth.set(ym, e); }
       return e;
     };
+    const tally: Record<Bucket, number> = { bsllc: 0, other: 0, manual: 0, unknown: 0 };
+    let matchedAsSource = 0, samples = 0;
     for (const d of deals) {
-      if (d.properties.hs_is_closed_won !== "true") continue;
+      if (hubspotDealStage(d) !== "won") continue;
       const closeDate = d.properties.closedate;
       if (!closeDate) continue;
       const ym = closeDate.slice(0, 7);
       if (ym < sinceYm) continue;
       const amount = Number(d.properties.amount ?? 0);
+      const cents = Number.isFinite(amount) ? Math.round(amount * 100) : 0;
       const e = bump(ym);
-      e.revenueCents += Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+      e.revenueCents += cents;
       e.dealsWon += 1;
+      // Case-study slice: the CRM's own original source, else a match to a
+      // web inquiry we captured (see attribution.ts — one rule for both jobs).
+      const { value: source, contact } = hubspotDealSource(d, contactsById);
+      const bucket = hubspotBucket(source);
+      const matched = !!matchWebInquiry(webIdx, { emails: [contact?.properties.email], phones: [contact?.properties.phone, contact?.properties.mobilephone], gclid: contact?.properties.hs_google_click_id });
+      const sample = looksLikeSample(d.properties.dealname, contact?.properties.email);
+      if (sample) { samples++; continue; }
+      const ours = isAttributed(bucket, matched, sample);
+      if (ours && bucket !== "bsllc") matchedAsSource++;
+      const slot: Bucket = ours ? "bsllc" : bucket;
+      e.cw[slot] += cents;
+      if (ours) e.cwDealsBsllc += 1;
+      tally[slot] += 1;
     }
+    console.log(`  ${client.name} — won deals by source: ${tally.bsllc} ours (${matchedAsSource} via web-lead match) · ${tally.other} other · ${tally.manual} offline · ${tally.unknown} no source${samples ? ` · ${samples} sample skipped` : ""}`);
     for (const ct of contacts) {
       const created = ct.properties.createdate;
       if (!created) continue;
@@ -218,6 +187,11 @@ async function main() {
           "hubspot.revenue_cents": v.revenueCents,
           "hubspot.deals_won": v.dealsWon,
           "hubspot.leads": v.leads,
+          "hubspot.cw_revenue_bsllc_cents": v.cw.bsllc,
+          "hubspot.cw_deals_bsllc": v.cwDealsBsllc,
+          "hubspot.cw_revenue_other_cents": v.cw.other,
+          "hubspot.cw_revenue_manual_cents": v.cw.manual,
+          "hubspot.cw_revenue_unknown_cents": v.cw.unknown,
         },
       });
       planted++;

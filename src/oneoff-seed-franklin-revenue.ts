@@ -16,7 +16,14 @@ import pg from "pg";
  * 560 website leads captured Mar 2024 – Dec 2025 = 1.8%. Same denominator
  * the case study uses (website leads), so modeled and actual reconcile.
  *
- * Idempotent: the named win is keyed on name, the snapshot on external_id.
+ * Also records the EVIDENCE (clients.revenue_basis_note): the RFQ log ties
+ * every counted row to our campaign via its own "RFQ Source" column, which is
+ * what lets the dashboard treat the $18,994 + Amerex as client-tabulated
+ * against our leads (basis c) instead of context. Without that note the
+ * figure is shown as "context: total company revenue" and excluded from ROI.
+ *
+ * Idempotent: the named win is keyed on name, the snapshot on external_id,
+ * the note is a plain overwrite with the same text.
  *
  *   npm run oneoff-seed-franklin-revenue -- --dry-run=true
  */
@@ -29,6 +36,7 @@ const SOURCE = `Franklin Brazing RFQ & quote log export, as of ${AS_OF}`;
 const NAMED_WIN = { name: "Amerex Fire", valueCents: 1_800_000_00, wonOn: "2025-04-01", notes: "RFQ Source: BS LLC AD CAMPAIGN. Awarded April 2025 per the RFQ log; day of month not recorded in the export." };
 const OTHER_WINS_CENTS = 18_994_00;
 const CLOSE_RATE_PCT = 1.8;
+const BASIS_NOTE = `Franklin Brazing RFQ & quote log (Smartsheet "Case Study Numbers", 694 rows), RFQ Source = "BS LLC AD CAMPAIGN", Jan 2024 – Dec 2025, as of ${AS_OF}`;
 
 async function main() {
   const dryRun = arg("dry-run", "true") !== "false";
@@ -38,6 +46,7 @@ async function main() {
     // Same idempotent DDL as the dashboard's ensureSchema v136, so this can run
     // before the deployed app has cold-started and applied it itself.
     await c.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS close_rate_pct DOUBLE PRECISION`);
+    await c.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS revenue_basis_note TEXT`); // dashboard ensureSchema v141
     await c.query(`CREATE TABLE IF NOT EXISTS client_named_wins (
       id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id), name TEXT NOT NULL, value_cents INTEGER NOT NULL,
       won_on TEXT, tier TEXT NOT NULL DEFAULT 'system', source TEXT, notes TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
@@ -51,6 +60,7 @@ async function main() {
     const { rows: [snap] } = await c.query<{ id: string }>(`SELECT id FROM metric_snapshots WHERE client_id = $1 AND external_id = $2`, [client.id, "franklin-rfq-log-2024-2025-other-wins"]);
     console.log(`named win "${NAMED_WIN.name}": ${win ? "already present" : "will insert"}; other-wins snapshot: ${snap ? "already present" : "will insert"}`);
     console.log(`close rate → ${CLOSE_RATE_PCT}% (10 won customers / 560 website leads, Mar 2024 – Dec 2025)`);
+    console.log(`evidence note → ${BASIS_NOTE}`);
     if (dryRun) { console.log("DRY RUN — nothing written."); return; }
 
     if (!win) {
@@ -64,7 +74,7 @@ async function main() {
          VALUES ($1, 'manual', 'manual.revenue_system_cents', $2, NULL, $3::date, $4::date, 'live', NULL, $4::timestamptz, $5)`,
         [client.id, OTHER_WINS_CENTS, WINDOW_START, AS_OF, "franklin-rfq-log-2024-2025-other-wins"]);
     }
-    await c.query(`UPDATE clients SET close_rate_pct = $2 WHERE id = $1`, [client.id, CLOSE_RATE_PCT]);
+    await c.query(`UPDATE clients SET close_rate_pct = $2, revenue_basis_note = $3 WHERE id = $1`, [client.id, CLOSE_RATE_PCT, BASIS_NOTE]);
     console.log("done.");
   } finally { await c.end(); }
 }

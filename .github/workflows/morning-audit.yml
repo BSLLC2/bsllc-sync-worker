@@ -99,6 +99,17 @@ jobs:
           DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
           DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
         run: npm run import-d365 && npm run heartbeat -- --job=import_d365 --status=success
+      - name: Re-run web-lead → CRM match
+        if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'crm_match')
+        continue-on-error: true
+        working-directory: worker
+        env:
+          DYNAMICS_TENANT_ID: "ac0f116c-73d5-4a33-92ab-c69f79f06055"
+          DYNAMICS_CLIENT_ID: "8f9c4bee-bcae-4347-80d4-7ee0449ce4de"
+          DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
+          DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
+          HUBSPOT_TOKEN_TABLESPOON: ${{ secrets.HUBSPOT_TOKEN_TABLESPOON }}
+        run: npm run match-web-leads-to-crm && npm run heartbeat -- --job=match_web_leads_to_crm --status=success
       - name: Re-run HubSpot deals
         if: inputs.dry_run != 'true' && contains(steps.plan.outputs.rerun, 'hubspot_deals')
         continue-on-error: true

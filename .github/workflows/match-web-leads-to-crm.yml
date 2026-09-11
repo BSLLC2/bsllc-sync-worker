@@ -1,0 +1,54 @@
+name: Match web leads to CRM (attribution chain)
+
+# Daily, after the D365 + HubSpot imports: tie the web inquiries WE captured
+# to each CRM client's leads / opportunities / deals and write one row per
+# CRM record that traces to BS LLC into the dashboard's lead_attributions
+# table (source field = ours, or email / phone / gclid match to our web lead
+# where the CRM has no source). Read-only against the CRMs; idempotent.
+# See src/match-web-leads-to-crm.ts and the dashboard's shared/case-study.ts.
+on:
+  schedule:
+    - cron: "10 8 * * *" # 08:10 UTC daily, after import-d365 (07:50) and HubSpot
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Fetch + print the chain, write nothing (true/false)."
+        required: false
+        default: "true"
+      client:
+        description: "Only this client slug (blank = every client with a CRM connector)."
+        required: false
+        default: ""
+
+concurrency:
+  group: crm-match
+  cancel-in-progress: false
+
+jobs:
+  match:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Match
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Non-secret identifiers (same as import-d365.yml); only the secret is a secret.
+          DYNAMICS_TENANT_ID: "ac0f116c-73d5-4a33-92ab-c69f79f06055"
+          DYNAMICS_CLIENT_ID: "8f9c4bee-bcae-4347-80d4-7ee0449ce4de"
+          DYNAMICS_RESOURCE_URL: "https://dpg-prod.crm.dynamics.com"
+          DYNAMICS_CLIENT_SECRET: ${{ secrets.DYNAMICS_CLIENT_SECRET }}
+          HUBSPOT_TOKEN_TABLESPOON: ${{ secrets.HUBSPOT_TOKEN_TABLESPOON }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ -n "${{ inputs.client }}" ]; then ARGS="$ARGS --client=${{ inputs.client }}"; fi
+          npm run match-web-leads-to-crm -- $ARGS
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=match_web_leads_to_crm --status=${{ job.status }}
