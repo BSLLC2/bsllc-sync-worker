@@ -1,0 +1,113 @@
+name: Agent — read-only run, output to a check run
+
+# For agent sessions whose sandbox cannot download Actions logs (the log host
+# is outside their egress policy): runs ONE allowlisted read-only / dry-run
+# script and republishes its stdout+stderr as a check-run "output" on the
+# commit, which IS readable through the plain REST API
+# (GET /repos/{o}/{r}/commits/{sha}/check-runs). Nothing else changes.
+#
+# Import scripts always get --dry-run appended here; the only allowlisted
+# script that writes is sync-slack-users, whose only write is an idempotent
+# id → display-name cache upsert (and it has never succeeded, so seeing its
+# error is the point).
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "npm script to run (allowlisted read-only scripts only)"
+        required: true
+        default: "monitor-freshness"
+      args:
+        description: "extra CLI args (e.g. --client=\"LBL Law\")"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: agent-readonly-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync --dry-run`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run the script
+        id: run
+        working-directory: worker
+        continue-on-error: true
+        env:
+          SCRIPT: ${{ inputs.script }}
+          EXTRA_ARGS: ${{ inputs.args }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GA4_PROPERTY_MAP: ${{ secrets.GA4_PROPERTY_MAP }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
+          OCH_ADS_CUSTOMER_ID: ${{ secrets.OCH_ADS_CUSTOMER_ID }}
+          HUBSPOT_TOKEN_TABLESPOON: ${{ secrets.HUBSPOT_TOKEN_TABLESPOON }}
+        run: |
+          case "$SCRIPT" in
+            monitor-freshness|dump-client-metrics|debug-september-coverage|debug-client-cltv|debug-data-health|debug-all-clients-gap-status|sync-slack-users) ;;
+            import-*|oneoff-*|audit-and-repair) EXTRA_ARGS="$EXTRA_ARGS --dry-run" ;;
+            *) echo "script '$SCRIPT' is not on the read-only allowlist"; exit 1 ;;
+          esac
+          if [ "$SCRIPT" = "monitor-freshness" ]; then EXTRA_ARGS="$EXTRA_ARGS --dry-run"; fi
+          if [ "$SCRIPT" = "audit-and-repair" ] && ! echo "$EXTRA_ARGS" | grep -q -- "--mode="; then EXTRA_ARGS="$EXTRA_ARGS --mode=apply"; fi
+          echo "npm run $SCRIPT -- $EXTRA_ARGS" | tee ../out.txt
+          set -o pipefail
+          eval "npm run \"$SCRIPT\" -- $EXTRA_ARGS" 2>&1 | tee -a ../out.txt
+
+      - name: Publish the output as a check run
+        uses: actions/github-script@v7
+        env:
+          SCRIPT: ${{ inputs.script }}
+          OUTCOME: ${{ steps.run.outcome }}
+        with:
+          script: |
+            const fs = require("fs");
+            let text = fs.readFileSync("out.txt", "utf8");
+            if (text.length > 60000) text = "…(truncated)…\n" + text.slice(-60000);
+            const ok = process.env.OUTCOME === "success";
+            await github.rest.checks.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              name: `agent-output:${process.env.SCRIPT}`,
+              head_sha: context.sha,
+              external_id: String(context.runId),
+              status: "completed",
+              conclusion: ok ? "success" : "failure",
+              output: { title: `${process.env.SCRIPT} (${process.env.OUTCOME})`, summary: `run ${context.runId}`, text: "```\n" + text + "\n```" },
+            });

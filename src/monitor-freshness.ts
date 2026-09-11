@@ -248,7 +248,10 @@ async function main() {
       console.log(dryRun ? `[dry-run] would post:\n${text}` : "SLACK_WEBHOOK_URL not set — skipping post.");
     }
 
-    // Record the new signature so we only alert on the next change.
+    // Record the new signature so we only alert on the next change. Not in a
+    // dry run: recording it there would make the next REAL run see "no
+    // change" and swallow the alert the dry run only pretended to post.
+    if (dryRun) { console.log("[dry-run] signature not recorded."); return; }
     await c.query(
       `INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ('freshness_monitor', now(), $1, $2)
        ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = EXCLUDED.ok, note = EXCLUDED.note`,
