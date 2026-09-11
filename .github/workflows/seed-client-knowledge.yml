@@ -1,0 +1,71 @@
+name: Seed client knowledge (research briefs → dashboard)
+
+# On-demand: reads every docs/client-knowledge/<slug>.md in the dashboard repo
+# (written by the Drive research agents), splits each by H2, and upserts the
+# nine `knowledge.*` client_module_notes rows per client as 'drive-research'.
+# A section a person edited in the app is never overwritten — it's listed as
+# skipped in the log. Idempotent; dry run by default.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Parse + print only, write nothing (true/false)."
+        required: false
+        default: "true"
+      client:
+        description: "Optional client slug to limit to, e.g. franklin-brazing (blank = every file)."
+        required: false
+        default: ""
+
+concurrency:
+  group: seed-client-knowledge
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for docs/client-knowledge/*.md)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Seed client knowledge
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+          CLIENT: ${{ inputs.client }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ -n "$CLIENT" ]; then
+            if ! echo "$CLIENT" | grep -qE '^[a-z0-9-]+$'; then
+              echo "client must be a slug (lowercase letters, digits, dashes)"; exit 1
+            fi
+            ARGS="$ARGS --client=$CLIENT"
+          fi
+          npm run seed-client-knowledge -- $ARGS
+
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true'
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=seed_client_knowledge --status=${{ job.status }}

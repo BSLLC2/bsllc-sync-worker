@@ -1,8 +1,10 @@
 name: Run research (DataForSEO)
 
 # Runs queued keyword-research requests against DataForSEO. The app enqueues in
-# research_requests; this writes results back. Runs every 2 min + on demand.
-# No-op when nothing is pending.
+# research_requests (the SEO-research workbench, and each client's SEO tab
+# "Keyword research"); this writes results + actual cost back. Runs every 2 min,
+# and the app also dispatches it right after enqueueing (WORKER_DISPATCH_TOKEN)
+# so an AM usually sees results in under a minute. No-op when nothing is pending.
 on:
   schedule:
     - cron: "*/2 * * * *"
