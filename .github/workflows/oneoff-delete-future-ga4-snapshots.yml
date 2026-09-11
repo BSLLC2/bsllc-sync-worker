@@ -1,8 +1,12 @@
-name: One-off — delete future-dated GA4 metric_snapshots rows
+name: One-off — delete future-dated metric_snapshots rows (per source)
 
 on:
   workflow_dispatch:
     inputs:
+      source:
+        description: "metric_snapshots source to clean (ga4, hubspot, gsc, d365 …)"
+        required: false
+        default: "hubspot"
       dry_run:
         description: "Parse + print only, write nothing (true/false)."
         required: false
@@ -22,7 +26,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run oneoff-delete-future-ga4-snapshots -- --dry-run
+            npm run oneoff-delete-future-ga4-snapshots -- --source="${{ inputs.source }}" --dry-run
           else
-            npm run oneoff-delete-future-ga4-snapshots
+            npm run oneoff-delete-future-ga4-snapshots -- --source="${{ inputs.source }}"
           fi

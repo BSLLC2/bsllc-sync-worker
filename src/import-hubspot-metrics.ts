@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
+import { monthSnapshot } from "./dates.js";
 
 /**
  * Per-CLIENT HubSpot metrics importer — distinct from import-hubspot.ts,
@@ -198,15 +199,19 @@ async function main() {
 
     let planted = 0;
     for (const [ym, v] of Array.from(byMonth.entries()).sort()) {
-      const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7));
-      const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
-      const start = `${ym}-01`, end = `${ym}-${String(last).padStart(2, "0")}`;
+      // The CURRENT month is in here too (deals closed / contacts created so
+      // far this month). Stamping it with the calendar month's last day put
+      // period_end/synced_at up to 30 days in the future — the Data health
+      // page's "Bad timestamp (future), last sync 20d in the future" — and
+      // that row out-ranked every later, correct one. monthSnapshot caps the
+      // in-progress month at today, same as GA4 / Search Console / D365.
+      const { start, end, syncedAt } = monthSnapshot(ym);
       syncs.push({
         client_id: client.id,
         source: "hubspot",
         period_start: start,
         period_end: end,
-        synced_at: `${end}T12:00:00.000Z`,
+        synced_at: syncedAt,
         data_state: "live",
         error_message: null,
         metrics: {

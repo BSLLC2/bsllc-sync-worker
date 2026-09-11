@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
+import { monthSnapshot } from "./dates.js";
 import { loadD365Config, fetchClosedWon, classify, type Bucket } from "./d365.js";
 
 /**
@@ -23,20 +24,6 @@ import { loadD365Config, fetchClosedWon, classify, type Bucket } from "./d365.js
 
 const DEFAULT_SLUG = "diesel-power-group";
 
-function monthBounds(ym: string): { start: string; end: string } {
-  const y = Number(ym.slice(0, 4));
-  const m = Number(ym.slice(5, 7));
-  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const end = `${ym}-${String(last).padStart(2, "0")}`;
-  // A deal closed earlier in the CURRENT, still-in-progress month would
-  // otherwise get its month capped at the calendar month's last day --
-  // stamping period_end/synced_at days or weeks in the future (see
-  // import-ga4.ts, which hit this for real). Cap at today; a finished past
-  // month's end date is always <= today already, so this only changes the
-  // in-progress month.
-  const today = new Date().toISOString().slice(0, 10);
-  return { start: `${ym}-01`, end: end > today ? today : end };
-}
 
 interface Agg { revCents: Record<Bucket, number>; deals: Record<Bucket, number> }
 function emptyAgg(): Agg {
@@ -83,13 +70,16 @@ async function main() {
     // real wins instead of only a monthly total. item_id dedupes re-runs.
     const closeDate = o.actualclosedate.slice(0, 10);
     const label = [contact?.fullname?.trim() || null, o.name?.trim() || null].filter(Boolean).join(" — ") || "(unnamed)";
+    // A deal closed TODAY must not be stamped noon-today (up to 4h ahead of
+    // the 07:50 UTC cron, which reads as a future timestamp) — use now.
+    const closedToday = closeDate >= new Date().toISOString().slice(0, 10);
     dealSyncs.push({
       client_id: slug,
       source: "d365",
       item_id: o.opportunityid,
       period_start: closeDate,
       period_end: closeDate,
-      synced_at: `${closeDate}T12:00:00.000Z`,
+      synced_at: closedToday ? new Date().toISOString() : `${closeDate}T12:00:00.000Z`,
       data_state: "live",
       error_message: null,
       metrics: {
@@ -109,13 +99,15 @@ async function main() {
 
   const syncs: SyncEntry[] = [];
   for (const [ym, a] of Array.from(byMonth.entries()).sort()) {
-    const { start, end } = monthBounds(ym);
+    // A deal closed in the CURRENT, in-progress month — monthSnapshot caps
+    // that month at today so nothing is stamped in the future.
+    const { start, end, syncedAt } = monthSnapshot(ym);
     syncs.push({
       client_id: slug,
       source: "d365",
       period_start: start,
       period_end: end,
-      synced_at: `${end}T12:00:00.000Z`,
+      synced_at: syncedAt,
       data_state: "live",
       error_message: null,
       metrics: {

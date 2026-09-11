@@ -86,6 +86,7 @@
     "daily-brief": "tsx src/daily-brief.ts",
     "audit-and-repair": "tsx src/audit-and-repair.ts",
     "debug-data-health": "tsx src/debug-data-health.ts",
+    "oneoff-retire-heartbeat": "tsx src/oneoff-retire-heartbeat.ts",
     "post-note": "tsx src/post-note.ts",
     "oneoff-label-och-ctm-calls": "tsx src/oneoff-label-och-ctm-calls.ts",
     "oneoff-trim-pre-contract-web-inquiries": "tsx src/oneoff-trim-pre-contract-web-inquiries.ts",

@@ -98,9 +98,21 @@ async function sheetsToken(): Promise<string> {
   return token;
 }
 async function sheetsGet(token: string, path: string): Promise<any> {
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) throw new Error(`Sheets GET ${path} → ${res.status} ${await res.text()}`);
-  return res.json();
+  // The scheduled run fails intermittently (8 of the last ~22) with no code
+  // change in between — the shape of a transient upstream error. Retry the
+  // retryable statuses with backoff before giving up; a 403/404 is still
+  // immediate.
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.ok) return res.json();
+    const body = await res.text();
+    if ((res.status === 429 || res.status >= 500) && attempt < 4) {
+      console.warn(`Sheets GET ${path.slice(0, 60)}… → ${res.status}; retrying in ${5 * (attempt + 1)}s`);
+      await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+      continue;
+    }
+    throw new Error(`Sheets GET ${path} → ${res.status} ${body.slice(0, 300)}`);
+  }
 }
 function findCol(header: string[], needles: string[]): number {
   const norm = header.map((h) => (h ?? "").toString().trim().toLowerCase());

@@ -3,6 +3,7 @@ import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
+import { monthSnapshot } from "./dates.js";
 
 /**
  * Google Search Console → dashboard importer (LIVE API). Replaces the CSV-only
@@ -123,22 +124,6 @@ async function queryDaily(token: string, siteUrl: string, startDate: string, end
   })).filter((r: DayRow) => /^\d{4}-\d{2}-\d{2}$/.test(r.date));
 }
 
-/** Calendar-month bounds for a "YYYY-MM" key, matching import-ga4.ts's
- *  monthBounds so a client's GA4 and GSC monthly snapshots line up. */
-function monthBoundsYm(ym: string): { start: string; end: string } {
-  const y = Number(ym.slice(0, 4));
-  const m = Number(ym.slice(5, 7));
-  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const end = `${ym}-${String(last).padStart(2, "0")}`;
-  // The --since backfill iterates through the CURRENT, still-in-progress
-  // month too -- capping at the calendar month's last day would then stamp
-  // period_end/synced_at days or weeks in the future (see import-ga4.ts,
-  // which hit this for real). Cap at today; a finished past month's end date
-  // is always <= today already, so this only changes the in-progress month.
-  const today = new Date().toISOString().slice(0, 10);
-  return { start: `${ym}-01`, end: end > today ? today : end };
-}
-
 /** Sums daily rows into calendar months. Clicks/impressions add directly;
  *  position is impressions-weighted (not a naive average of daily averages)
  *  so a high-traffic day's ranking counts more than a near-zero-traffic one —
@@ -193,11 +178,15 @@ async function main() {
         const monthly = bucketMonthly(daily);
         let planted = 0;
         for (const [ym, agg] of monthly) {
-          const { start, end: monthEnd } = monthBoundsYm(ym);
+          // The backfill iterates through the CURRENT, in-progress month too —
+          // monthSnapshot caps it at today (shared with GA4/D365/HubSpot).
+          // (`end` = today-2 because GSC lags; the in-progress month's row ends
+          // there too, so period_end never claims days the data doesn't cover.)
+          const { start, end: monthEnd, syncedAt } = monthSnapshot(ym, new Date(`${end}T12:00:00.000Z`));
           if (agg.impressions === 0) continue;
           syncs.push({
             client_id: slug, source: "gsc", external_id: siteUrl,
-            period_start: start, period_end: monthEnd, synced_at: `${monthEnd}T12:00:00.000Z`,
+            period_start: start, period_end: monthEnd, synced_at: syncedAt,
             data_state: "live", error_message: null,
             metrics: {
               "gsc.clicks": agg.clicks, "gsc.impressions": agg.impressions,

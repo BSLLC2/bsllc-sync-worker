@@ -14,13 +14,21 @@ import pg from "pg";
  * paths had the same latent bug but no evidence either one produced a row
  * yet, so left alone here.
  *
- *   npm run oneoff-delete-future-ga4-snapshots -- --dry-run   (read-only)
- *   npm run oneoff-delete-future-ga4-snapshots                (applies)
+ * 2026-09-10: generalized with --source=<name> (default ga4). HubSpot had
+ * the same bug — import-hubspot-metrics stamped the in-progress month with
+ * the calendar month's last day, "last sync 20d in the future" on the Data
+ * health page; the importer is fixed (monthSnapshot in dates.ts) and this
+ * removes the rows it already planted. Also matches period_end in the future,
+ * which the synced_at-only check missed.
+ *
+ *   npm run oneoff-delete-future-ga4-snapshots -- --source=hubspot --dry-run   (read-only)
+ *   npm run oneoff-delete-future-ga4-snapshots -- --source=hubspot            (applies)
  */
 function env(n: string): string { const v = process.env[n]; if (!v?.trim()) throw new Error(`Missing ${n}`); return v.trim(); }
 
 async function main() {
   const dryRun = process.argv.slice(2).includes("--dry-run");
+  const source = (process.argv.slice(2).find((a) => a.startsWith("--source="))?.slice(9) || "ga4").trim();
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
@@ -29,14 +37,15 @@ async function main() {
               ms.period_start, ms.period_end, ms.synced_at
          FROM metric_snapshots ms
          LEFT JOIN clients cl ON cl.id = ms.client_id
-        WHERE ms.source = 'ga4' AND ms.synced_at > now()
+        WHERE ms.source = $1 AND (ms.synced_at > now() + interval '1 hour' OR ms.period_end > now() + interval '1 day')
         ORDER BY ms.synced_at DESC`,
+      [source],
     );
     if (rows.length === 0) {
-      console.log("No future-dated GA4 metric_snapshots rows found. Nothing to fix.");
+      console.log(`No future-dated ${source} metric_snapshots rows found. Nothing to fix.`);
       return;
     }
-    console.log(`${rows.length} future-dated GA4 row(s):`);
+    console.log(`${rows.length} future-dated ${source} row(s):`);
     for (const r of rows) {
       console.log(`  ${r.client_name ?? "(no client)"} — ${r.metric_key} = ${r.value_numeric ?? r.value_text} — period ${String(r.period_start).slice(0, 10)}..${String(r.period_end).slice(0, 10)} — synced_at ${r.synced_at} — row ${r.id}`);
     }
@@ -44,7 +53,7 @@ async function main() {
 
     const ids = rows.map((r) => r.id);
     await c.query(`DELETE FROM metric_snapshots WHERE id = ANY($1::int[])`, [ids]);
-    console.log(`\nDeleted ${ids.length} row(s). The next GA4 sync (already fixed, commit 476f23a) will replant correct data.`);
+    console.log(`\nDeleted ${ids.length} row(s). The next ${source} sync (importer fixed to cap the in-progress month at today) will replant correct data.`);
   } finally {
     await c.end();
   }
