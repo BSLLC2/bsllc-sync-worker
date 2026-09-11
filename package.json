@@ -64,6 +64,7 @@
     "oneoff-enrich-contacts": "tsx src/oneoff-enrich-contacts.ts",
     "debug-contact-cleanup-scope": "tsx src/debug-contact-cleanup-scope.ts",
     "debug-fathom-webhook-status": "tsx src/debug-fathom-webhook-status.ts",
+    "dump-fathom-log": "tsx src/dump-fathom-log.ts",
     "debug-dpg-web-leads": "tsx src/debug-dpg-web-leads.ts",
     "debug-d365-lead-schema": "tsx src/debug-d365-lead-schema.ts",
     "debug-all-clients-gap-status": "tsx src/debug-all-clients-gap-status.ts",
