@@ -1,0 +1,62 @@
+name: Sales follow-up digest (fallback)
+
+# The app owns the 8am ET "Sales follow-ups" digest: its own Vercel cron hits
+# /api/cron/sales-follow-up-digest at 12:00 UTC on weekdays, which sends one
+# push + Slack DM per seller (overdue / due today / no next step) and the exec
+# escalation for any deal over the threshold with a week of silence. Vercel
+# crons have gone quiet before without anyone noticing (see
+# debug-lead-hygiene-cron-status), so this calls the SAME URL ten minutes
+# later. The endpoint is idempotent per ET day — whichever fires first wins,
+# nobody gets the digest twice. Read-only from the worker's point of view:
+# the app computes and sends; nothing here touches the database directly.
+#
+# Needs the CRON_SECRET repo secret (same value as the app's Vercel
+# CRON_SECRET). Skips with a plain message when it isn't set.
+on:
+  schedule:
+    - cron: "10 12 * * 1-5" # 08:10 EDT / 07:10 EST weekdays
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute + print what would be sent, send nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: sales-follow-up-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the app's digest endpoint
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          DASHBOARD_URL: ${{ secrets.DASHBOARD_URL }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "CRON_SECRET is not set on this repo — add it (same value as the app's Vercel CRON_SECRET) to enable this fallback. Nothing sent."
+            exit 0
+          fi
+          BASE="${DASHBOARD_URL:-https://work.bsllc.biz}"
+          BASE="${BASE%/}"
+          QUERY=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then QUERY="?dryRun=1"; fi
+          curl -sS --fail --max-time 60 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$BASE/api/cron/sales-follow-up-digest$QUERY"
+          echo
+      - uses: actions/checkout@v4
+        if: always()
+      - uses: actions/setup-node@v4
+        if: always()
+        with:
+          node-version: 20
+      - run: npm ci
+        if: always()
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=sales_digest --status=${{ job.status }}
