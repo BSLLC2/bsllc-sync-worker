@@ -1,0 +1,45 @@
+name: Debug — email logging (why is a reply missing?)
+
+# READ-ONLY. For one team mailbox: what Gmail holds in the window split by
+# From shape (exact / display-name / alias / external), which of those Gmail
+# ids are in crm_activities and with what direction, the "never log" list
+# with our-own-address entries flagged, and — with contact_email — every
+# message involving that contact with a verdict on why it did or didn't log.
+# Writes nothing. Then dispatch import-email.yml with backfill=90 to repair.
+on:
+  workflow_dispatch:
+    inputs:
+      mailbox:
+        description: "Team mailbox to inspect (e.g. ben@bsllc.biz)."
+        required: true
+      days:
+        description: "How many days back to scan."
+        required: false
+        default: "14"
+      contact_email:
+        description: "A prospect's email to trace end to end (optional)."
+        required: false
+        default: ""
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Report
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          EMAIL_LOG_MAILBOXES: ${{ secrets.EMAIL_LOG_MAILBOXES }}
+          EMAIL_ALIASES: ${{ secrets.EMAIL_ALIASES }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          CONTACT="${{ inputs.contact_email }}"
+          if [ -n "$CONTACT" ]; then
+            npm run debug-email-logging -- --mailbox="${{ inputs.mailbox }}" --days="${{ inputs.days }}" --contact="$CONTACT"
+          else
+            npm run debug-email-logging -- --mailbox="${{ inputs.mailbox }}" --days="${{ inputs.days }}"
+          fi

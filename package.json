@@ -20,6 +20,7 @@
     "import-d365": "tsx src/import-d365.ts",
     "verify-d365": "tsx src/verify-d365.ts",
     "import-email": "tsx src/import-email.ts",
+    "debug-email-logging": "tsx src/debug-email-logging.ts",
     "import-seo": "tsx src/import-seo.ts",
     "import-domain-authority": "tsx src/import-domain-authority.ts",
     "import-aeo": "tsx src/import-aeo.ts",
