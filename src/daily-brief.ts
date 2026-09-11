@@ -5,9 +5,9 @@ import pg from "pg";
 /**
  * One Slack message every weekday morning instead of a transcript: per
  * priority client, what flowed this month (leads, conversions, revenue tier),
- * which connectors are failing, and the Data-readiness tasks that are blocked,
- * overdue, or due for Sebastien today. Reads Postgres only; posts via
- * SLACK_WEBHOOK_URL (same as monitor-freshness).
+ * which connectors are failing, the launches still in progress, and the
+ * Data-readiness tasks that are blocked, overdue, or due for Sebastien today.
+ * Reads Postgres only; posts via SLACK_WEBHOOK_URL (same as monitor-freshness).
  *
  *   npm run daily-brief -- --dry-run
  */
@@ -79,6 +79,44 @@ async function main() {
       lines.push(`• *${name}* — ${parts.join(" · ")}`);
     }
 
+    // ── Launches still open ──
+    // The signal is client_setup_reminders: the dashboard's daily
+    // setup-checklist cron inserts a row for any client with an outstanding
+    // launch step and DELETES it the moment nothing is outstanding, having
+    // recomputed every step against live evidence (connector syncs, real form
+    // submissions, share-link opens) first. So a row here means "this launch
+    // was genuinely unfinished as of the last run" — which is a far better
+    // signal than counting client_setup_status rows, since a step that has
+    // never been touched has no row at all and pending is the default.
+    // created_at is when the launch first showed up as unfinished.
+    const { rows: launches } = await c.query<{
+      id: string; name: string; am_owner: string | null; started: string;
+      reminders: number; escalations: number; done: string; blocked: string; reasons: string[] | null;
+    }>(
+      `SELECT cl.id, cl.name, cl.am_owner, r.created_at::text AS started,
+              r.reminder_count AS reminders, r.escalation_count AS escalations,
+              count(s.id) FILTER (WHERE s.status = 'done')::text    AS done,
+              count(s.id) FILTER (WHERE s.status = 'blocked')::text AS blocked,
+              array_remove(array_agg(s.reason) FILTER (WHERE s.status = 'blocked'), NULL) AS reasons
+         FROM client_setup_reminders r
+         JOIN clients cl ON cl.id = r.client_id
+         LEFT JOIN client_setup_status s ON s.client_id = cl.id
+        WHERE cl.status NOT IN ('churned', 'paused') AND cl.is_internal = false
+        GROUP BY cl.id, cl.name, cl.am_owner, r.created_at, r.reminder_count, r.escalation_count
+        ORDER BY r.created_at`);
+    const launchLines = launches.slice(0, 8).map((l) => {
+      const age = Math.floor((Date.now() - new Date(l.started).getTime()) / 86_400_000);
+      const bits = [
+        `${l.done} done`,
+        Number(l.blocked) > 0 ? `${l.blocked} blocked` : "",
+        `open ${age}d`,
+        l.am_owner ? l.am_owner : ":warning: no AM",
+        Number(l.escalations) > 0 ? `:rotating_light: escalated ${l.escalations}x` : "",
+      ].filter(Boolean);
+      const why = (l.reasons ?? []).filter(Boolean).slice(0, 2).join(" · ");
+      return `    – <${DASH}/#/client/${l.id}/launch|${l.name}> — ${bits.join(" · ")}${why ? ` — blocked: ${why}` : ""}`;
+    });
+
     const { rows: tasks } = await c.query<{ title: string; status: string; priority: string; due_date: string | null; assignee_name: string | null }>(
       `SELECT title, status, priority, due_date, assignee_name FROM commitments
         WHERE source IN ('data-readiness', 'data-audit') AND workstream = $1 AND status <> 'complete' ORDER BY priority, due_date NULLS LAST`, [PROJECT_NAME]);
@@ -92,6 +130,8 @@ async function main() {
       `:sunrise: *Morning brief — ${today}*`,
       ...lines,
       "",
+      ...(launchLines.length ? [`*Launches in progress:* ${launches.length}`, ...launchLines] : []),
+      ...(launchLines.length ? [""] : []),
       `*${PROJECT_NAME}:* ${tasks.length} open · ${blocked.length} blocked · ${overdue.length} overdue`,
       ...(dueToday.length ? [`*Due today:*`, ...dueToday.map(fmt)] : []),
       ...(overdue.length ? [`*Overdue:*`, ...overdue.slice(0, 6).map(fmt)] : []),
