@@ -32,6 +32,7 @@ const DAILY: Record<string, { step: string; hours: number }> = {
   import_ga4: { step: "ga4", hours: 26 },
   import_gsc: { step: "gsc", hours: 26 },
   import_d365: { step: "d365", hours: 26 },
+  match_web_leads_to_crm: { step: "crm_match", hours: 26 },
   hubspot_deals: { step: "hubspot_deals", hours: 14 },
   qbo_invoices_sync: { step: "qbo", hours: 26 },
   seo_import: { step: "seo", hours: 8 * 24 },
@@ -183,8 +184,10 @@ async function main() {
           [randomUUID(), internal.id, f.priority, f.title, f.description, ASSIGNEE, f.status ?? "not_started", PROJECT_NAME, f.key]);
       }
     }
+    // `case-study:` keys are filed and closed by the dashboard's own
+    // case-study-needs cron (server/case-study-needs.ts) — never touch them here.
     const live = new Set(findings.map((f) => f.key));
-    for (const key of open.keys()) if (!live.has(key)) {
+    for (const key of open.keys()) if (!live.has(key) && !key.startsWith("case-study:")) {
       closed++;
       if (!dryRun) await c.query(`UPDATE commitments SET status = 'complete', completed_at = now(), last_updated_at = now(), description = coalesce(description,'') || E'\n\nAuto-resolved by the morning audit: the condition is gone.' WHERE client_id = $1 AND source = 'data-audit' AND external_id = $2 AND status <> 'complete'`, [internal.id, key]);
     }
