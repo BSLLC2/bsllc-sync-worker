@@ -1,0 +1,16 @@
+name: Check dashboard version
+
+# Prints what work.bsllc.biz is actually serving (GET /api/version: build sha +
+# time) so a deploy can be confirmed from a place that can reach the site —
+# agent sandboxes can't. Read-only; no secrets.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET /api/version
+        run: |
+          curl -sS --max-time 30 https://work.bsllc.biz/api/version
+          echo
