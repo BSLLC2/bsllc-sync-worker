@@ -1,0 +1,43 @@
+name: QBO — verify depth pull (read-only, dry run)
+
+# Proves the depth importer against the live company without writing a row:
+# authenticates, pulls the chart of accounts / vendors / classes / bills, the
+# P&L by month + by customer/vendor/class for the last three months, the
+# General Ledger and both aging reports, then prints counts per report and
+# the first rows of each. Run this after merging to confirm the parsers fit
+# this company's real report shapes before trusting the drill-down.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "incremental (3 months) | full (24 months)"
+        required: false
+        default: "incremental"
+
+concurrency:
+  group: verify-qbo-depth
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Dry-run depth pull (nothing written)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_REALM_ID: ${{ secrets.QBO_REALM_ID }}
+          QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
+          QBO_ENV: ${{ secrets.QBO_ENV }}
+        run: |
+          if [ "${{ inputs.mode }}" = "full" ]; then
+            npm run import-qbo-depth -- --dry-run --full
+          else
+            npm run import-qbo-depth -- --dry-run
+          fi

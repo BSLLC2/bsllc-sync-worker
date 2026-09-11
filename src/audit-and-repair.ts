@@ -35,6 +35,8 @@ const DAILY: Record<string, { step: string; hours: number }> = {
   match_web_leads_to_crm: { step: "crm_match", hours: 26 },
   hubspot_deals: { step: "hubspot_deals", hours: 14 },
   qbo_invoices_sync: { step: "qbo", hours: 26 },
+  qbo_financials: { step: "qbo_financials", hours: 26 },
+  qbo_depth: { step: "qbo_depth", hours: 26 },
   seo_import: { step: "seo", hours: 8 * 24 },
   aeo_import: { step: "aeo", hours: 8 * 24 },
   domain_authority_import: { step: "authority", hours: 8 * 24 },
