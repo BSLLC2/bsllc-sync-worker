@@ -1,0 +1,38 @@
+name: Ads — verify outcomes (read-only)
+
+# The after-check. Re-reads the entity a change was made to, 14 and 28 days
+# later, and writes the comparison onto the finding. Over months this becomes
+# the record no chat session can have: what actually worked, per client and per
+# tactic. A loss is recorded as plainly as a win — that is what stops us
+# re-recommending something already tried and failed here.
+#
+# READ-ONLY against every ad platform.
+on:
+  schedule:
+    - cron: "40 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ads-verify-outcomes
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Verify outcomes
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: npm run ads-verify-outcomes

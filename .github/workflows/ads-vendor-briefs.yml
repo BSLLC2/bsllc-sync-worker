@@ -1,0 +1,52 @@
+name: Ads — vendor briefs
+
+# Rolls findings the API deliberately does not action (ad copy under
+# LegitScript, landing pages, bid strategy) into a brief on a 4-weekly cadence,
+# and files it as a task with an owner and a due date so it is chased like any
+# other work. A brief closes on a VERIFICATION CHECK — the next audit re-reads
+# the account — never on someone saying it is done.
+#
+# Reads findings already in Postgres; touches no ad platform at all.
+on:
+  schedule:
+    # 07:10 UTC on the 1st and 15th — a fortnightly cadence that always lands on
+    # a weekday somewhere in the month without needing day-of-week arithmetic.
+    - cron: "10 7 1,15 * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug. Blank = every client with open vendor findings."
+        required: false
+        default: ""
+      dry_run:
+        description: "Print the brief, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: ads-vendor-briefs
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Generate vendor briefs
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.client }}" ] && ARGS="--client=${{ inputs.client }}"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          npm run ads-vendor-briefs -- $ARGS
