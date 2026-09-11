@@ -8,7 +8,7 @@ import { evaluate, ADS_RULESET_VERSION, type DerivedFinding } from "./ads/rules.
 import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
-import { upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor, logEvent } from "./ads/store.js";
+import { upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
 
 /**
@@ -82,9 +82,16 @@ async function auditOne(
     }
   }
 
-  if (!dryRun) {
+  // Only sweep when we actually SAW the account. A read that returns nothing —
+  // a dormant adapter, an expired token, a permissions change — is
+  // indistinguishable from an account with no problems, and sweeping on it
+  // would close every open finding the client has. Requiring at least one
+  // campaign makes "we looked and it's clean" the only case that sweeps.
+  if (!dryRun && input.campaigns.length > 0) {
     const swept = await sweepResolved(c, clientId, platform, accountId, ids, ACTOR);
     if (swept) console.log(`    · ${swept} finding(s) closed — the condition cleared on its own`);
+  } else if (!dryRun) {
+    console.log(`    · read returned no campaigns — not sweeping, since that is indistinguishable from a failed read`);
   }
 
   return { findings, created, reopened, ids };
@@ -135,6 +142,10 @@ async function fileUrgentTasks(c: pg.Client, clientId: string, clientName: strin
     `UPDATE commitments SET status = 'complete', completed_at = now(), last_updated_at = now(),
             description = coalesce(description,'') || E'\n\nAuto-closed: the finding has been actioned.'
       WHERE client_id = $1 AND source = 'ads-audit' AND status <> 'complete'
+        -- Scoped to finding-keyed tasks only. 'ads-audit' also carries the
+        -- vendor-brief tasks (external_id 'ads-brief:…'), which close on their
+        -- own verification check, not on this one.
+        AND external_id LIKE 'ads-finding:%'
         AND external_id NOT IN (
           SELECT 'ads-finding:' || id FROM ads_findings
            WHERE client_id = $1 AND status IN ('open','proposed'))`,
