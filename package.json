@@ -163,7 +163,8 @@
     "list-accessible-accounts": "tsx src/list-accessible-accounts.ts",
     "check-brand-awareness-pmax-assets": "tsx src/check-brand-awareness-pmax-assets.ts",
     "audit-live-campaigns-only": "tsx src/audit-live-campaigns-only.ts",
-    "och-revenue-audit": "tsx src/och-revenue-audit.ts"
+    "och-revenue-audit": "tsx src/och-revenue-audit.ts",
+    "verify-ads-operability": "tsx src/verify-ads-operability.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

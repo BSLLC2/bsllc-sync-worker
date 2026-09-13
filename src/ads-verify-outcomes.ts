@@ -6,6 +6,7 @@ import { loadConfig, digitsOnly } from "./config.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import { logEvent } from "./ads/store.js";
+import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 
 /**
  * The after-check. This is the part that turns a pile of recommendations into
@@ -115,9 +116,16 @@ async function main() {
         WHERE status IN ('verifying','won','lost')
           AND (verify_at_14 <= now() OR verify_at_28 <= now())`,
     );
-    if (!rows.length) { console.log("No after-checks are due."); return; }
+    if (!rows.length) {
+      console.log("No after-checks are due.");
+      // Said out loud on the heartbeat: nothing due is the normal state while
+      // nothing has been applied, and it must not read as a dead job.
+      emitJobSummary(formatJobSummary({ due: 0, checked: 0 }, "ran, no after-check was due"));
+      return;
+    }
     console.log(`${rows.length} finding(s) with an after-check due. READ-ONLY — nothing is changed in any account.\n`);
 
+    let checked = 0;
     for (const r of rows) {
       const existing: any[] = r.outcomes_json ? JSON.parse(r.outcomes_json) : [];
       const done = new Set(existing.map((o) => o.horizonDays));
@@ -156,7 +164,9 @@ async function main() {
       const settled = existing.find((o) => o.horizonDays === 28);
       const status = settled ? (settled.verdict === "inconclusive" ? "applied" : settled.verdict) : "verifying";
       await c.query(`UPDATE ads_findings SET outcomes_json = $2, status = $3 WHERE id = $1`, [r.id, JSON.stringify(existing), status]);
+      checked++;
     }
+    emitJobSummary(formatJobSummary({ due: rows.length, checked }, `${checked} of ${rows.length} due finding(s) given an after-check`));
   } finally {
     await c.end();
   }

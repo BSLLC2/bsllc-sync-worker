@@ -37,7 +37,20 @@ async function main() {
   const status = (arg("status") || "success").toLowerCase();
   const ok = status === "success";
   const log = arg("log");
-  const note = arg("note") ?? (ok ? null : (log && lastLogLine(log)) ?? `job status: ${status}`);
+  // A job's own one-line summary, passed by the workflow from a step output
+  // (e.g. the ads jobs' `summary=` on $GITHUB_OUTPUT). This is the whole
+  // difference between "the weekly ads audit never ran" and "it ran and found
+  // nothing": on success the note carries what it found, so an empty screen
+  // has a dated, provable reason next to it.
+  //
+  // An EMPTY --note= is treated as absent, not as an empty note — a workflow
+  // interpolating a step output that didn't get set would otherwise wipe out
+  // the error line the log gives us on failure.
+  const noteArg = arg("note")?.trim() || undefined;
+  const fromLog = log ? lastLogLine(log) : null;
+  // On failure the error beats the summary: a script that printed a summary
+  // and then died is still a failure, and the last line says why.
+  const note = ok ? (noteArg ?? null) : (fromLog ?? noteArg ?? `job status: ${status}`);
 
   const url = process.env.DATABASE_URL;
   if (!url?.trim()) throw new Error("Missing DATABASE_URL");

@@ -26,6 +26,7 @@ jobs:
           node-version: 20
       - run: npm ci
       - name: Verify outcomes
+        id: run
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DASHBOARD_DIR: ${{ github.workspace }}
@@ -35,4 +36,18 @@ jobs:
           GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
           GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-        run: npm run ads-verify-outcomes
+        run: |
+          set -o pipefail
+          npm run ads-verify-outcomes 2>&1 | tee run.log
+
+      # The heartbeat is what makes a SILENT STOP visible. Without it a job
+      # that quietly stopped firing produces exactly the same empty screen as a
+      # week with nothing to report, and the second one is the answer people
+      # act on. `if: always()` so a failure is recorded as a failure rather than
+      # as silence, and the run's own one-line summary becomes the note, so a
+      # green heartbeat says what it actually looked at.
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=ads_verify_outcomes --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log

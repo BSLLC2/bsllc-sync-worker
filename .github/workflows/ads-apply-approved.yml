@@ -35,6 +35,7 @@ jobs:
           node-version: 20
       - run: npm ci
       - name: Apply approved changes
+        id: run
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DASHBOARD_DIR: ${{ github.workspace }}
@@ -45,8 +46,25 @@ jobs:
           GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
         run: |
+          set -o pipefail
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run ads-apply-approved -- --dry-run
+            npm run ads-apply-approved -- --dry-run 2>&1 | tee run.log
           else
-            npm run ads-apply-approved
+            npm run ads-apply-approved 2>&1 | tee run.log
           fi
+
+      # The heartbeat is what makes a SILENT STOP visible. Without it a job
+      # that quietly stopped firing produces exactly the same empty screen as a
+      # week with nothing to report, and the second one is the answer people
+      # act on. `if: always()` so a failure is recorded as a failure rather than
+      # as silence, and the run's own one-line summary becomes the note, so a
+      # green heartbeat says what it actually looked at.
+      - name: Heartbeat
+        # A DRY RUN is deliberately excluded. It proves nothing about the
+        # scheduled job, and stamping a fresh heartbeat from a hand-dispatched
+        # dry run would hide a schedule that has stopped firing — the exact
+        # failure this heartbeat exists to expose.
+        if: always() && inputs.dry_run != 'true'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=ads_apply_approved --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log

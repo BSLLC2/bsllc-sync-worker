@@ -259,5 +259,66 @@ export async function protectedPatternsFor(c: pg.Client, clientId: string): Prom
   // The bare domain label ("ohiocommunityhealth" from ohiocommunityhealth.com)
   // catches branded queries typed as a URL.
   if (r.seo_domain) add(r.seo_domain.replace(/^www\./, "").split(".")[0]);
+  // The half we cannot derive: partners, sister brands, product names the
+  // client owns, competitor terms they bid on deliberately. Collected by the
+  // "Protected terms collected from the client" launch step into
+  // clients.ads_protected_terms (dashboard schema v163). This is the SAME
+  // source of truth as the derived patterns, not a second one — one function
+  // still answers "what may never be blocked for this client", and the apply
+  // path keeps refusing a collision at mutation time regardless.
+  for (const t of await collectedProtectedTerms(c, clientId)) add(t);
   return Array.from(out);
+}
+
+/** clients.ads_protected_terms, one term per line or comma-separated. Returns
+ *  nothing (rather than throwing) on a database that predates the column, so a
+ *  worker deploy never has to be lock-stepped with a dashboard deploy. */
+async function collectedProtectedTerms(c: pg.Client, clientId: string): Promise<string[]> {
+  try {
+    const { rows } = await c.query<{ ads_protected_terms: string | null }>(
+      `SELECT ads_protected_terms FROM clients WHERE id = $1`, [clientId],
+    );
+    return (rows[0]?.ads_protected_terms ?? "")
+      .split(/[\n,]/)
+      .map((t) => t.trim().toLowerCase())
+      // Mirrors parseProtectedTerms in the dashboard's shared/ads-findings.ts:
+      // a one- or two-character term matches inside almost every query, and the
+      // guard is a whole-run ABORT rather than a filter, so junk here is
+      // expensive. Dropped rather than honoured.
+      .filter((t) => t.length >= 3);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Did the CLIENT agree to us changing this ad account?
+ *
+ * "unrecorded" (the column being NULL, which is where every client starts) is
+ * NOT a soft yes — it behaves exactly like "reporting_only". Our manager link
+ * grants write access to every account whether or not the client ever wanted
+ * us using it, so the absence of an answer has to mean no; anything else makes
+ * the default state of the system "we may change a stranger's budget".
+ *
+ * Mirrors ADS_WRITE_AUTHORITIES / adsWritesAllowed in the dashboard's
+ * shared/ads-findings.ts. Read defensively: on a database without the column
+ * the answer is "unrecorded", i.e. read-only, which is the safe direction.
+ */
+export async function adsWriteAuthorityFor(
+  c: pg.Client,
+  clientId: string,
+): Promise<{ allowed: boolean; value: string; clientName: string }> {
+  const { rows: nameRows } = await c.query<{ name: string }>(`SELECT name FROM clients WHERE id = $1`, [clientId]);
+  const clientName = nameRows[0]?.name ?? clientId;
+  let value = "unrecorded";
+  try {
+    const { rows } = await c.query<{ ads_write_authority: string | null }>(
+      `SELECT ads_write_authority FROM clients WHERE id = $1`, [clientId],
+    );
+    const raw = (rows[0]?.ads_write_authority ?? "").trim();
+    if (raw === "reporting_only" || raw === "changes") value = raw;
+  } catch {
+    /* column not deployed yet → unrecorded → read-only */
+  }
+  return { allowed: value === "changes", value, clientName };
 }

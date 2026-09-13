@@ -5,7 +5,8 @@ import { GoogleAdsApi } from "google-ads-api";
 import { loadConfig, digitsOnly } from "./config.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
-import { logEvent, protectedPatternsFor } from "./ads/store.js";
+import { logEvent, protectedPatternsFor, adsWriteAuthorityFor } from "./ads/store.js";
+import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 
 /**
  * Drains human-approved findings, and human-requested rollbacks.
@@ -27,6 +28,14 @@ import { logEvent, protectedPatternsFor } from "./ads/store.js";
  *      we make unattended.
  *   5. schedule the after-checks and write the audit row.
  *
+ * Step 0, before any of that: THE CLIENT'S OWN WRITE AUTHORITY. Approving is a
+ * BS LLC role decision — it says one of our people thinks the change is right.
+ * It does not say the client ever agreed to us changing their account, and our
+ * manager link grants write either way. An account whose authority is not
+ * recorded as "changes" is treated as READ-ONLY here and the approval is
+ * refused with the reason on the finding's own timeline. Unrecorded is the
+ * state every client starts in, deliberately.
+ *
  *   npm run ads-apply-approved                (live — this is the applying job)
  *   npm run ads-apply-approved -- --dry-run   (validate only, apply nothing)
  */
@@ -37,6 +46,10 @@ const ACTOR = "ads-apply-approved";
 const MEASURE_DAYS = 28;
 const ymd = (d: Date) => d.toISOString().slice(0, 10);
 const daysAgo = (n: number) => ymd(new Date(Date.now() - n * 86_400_000));
+
+/** Counted for the heartbeat note, so a quiet hour is distinguishable from a
+ *  dead job (see src/ads-operability.ts). */
+const tally = { approved: 0, applied: 0, failed: 0, blocked: 0, rollbacks: 0 };
 
 interface Pending {
   id: string; client_id: string; platform: string; account_id: string;
@@ -105,11 +118,39 @@ async function main() {
         WHERE status = 'approved' AND change_payload_json IS NOT NULL
         ORDER BY est_impact_cents DESC NULLS LAST`,
     );
-    if (!approved.length && !rollbacks.length) { console.log("Nothing approved and nothing to roll back."); return; }
+    if (!approved.length && !rollbacks.length) {
+      console.log("Nothing approved and nothing to roll back.");
+      emitJobSummary(formatJobSummary({ approved: 0, applied: 0, failed: 0, blocked: 0, rollbacks: rollbacks.length }, "ran, nothing was waiting"));
+      return;
+    }
+
+    tally.approved = approved.length;
+    tally.rollbacks = rollbacks.length;
 
     for (const r of approved) {
+      // ── 0. Did the client ever agree to us changing this account? ─────────
+      // Refused, not deferred: leaving it at 'approved' would park it under
+      // "Approved — waiting on the worker" in the dashboard, which reads as a
+      // slow worker rather than as a permission nobody ever asked for. Back to
+      // 'proposed' with the reason on the timeline, and the morning audit files
+      // it as a task naming the client and the fix.
+      const authority = await adsWriteAuthorityFor(c, r.client_id);
+      if (!authority.allowed) {
+        tally.blocked++;
+        console.log(`\n⛔ ${r.title}`);
+        console.log(`   ${authority.clientName}: ads change authority is "${authority.value}" — the account is read-only. Nothing was applied.`);
+        await logEvent(
+          c, r.id, "apply_failed", ACTOR,
+          `Refused: ${authority.clientName} has no ads change authority recorded (currently "${authority.value}"), so the account is treated as read-only and nothing was changed. Record what the client agreed to on their Paid campaigns tab, then approve again.`,
+          null,
+        );
+        await c.query(`UPDATE ads_findings SET status = 'proposed', approved_by = NULL, approved_at = NULL WHERE id = $1`, [r.id]);
+        continue;
+      }
+
       const payload = JSON.parse(r.change_payload_json ?? "null") as { op: string; body: unknown } | null;
       if (!payload?.op) {
+        tally.failed++;
         await logEvent(c, r.id, "apply_failed", ACTOR, "No change payload on an approved finding.", null);
         continue;
       }
@@ -122,6 +163,7 @@ async function main() {
       // 1. Re-validate against the live account.
       const v = await adapter.validate(payload.op, payload.body);
       if (!v.ok) {
+        tally.failed++;
         console.log(`   ✖ validation failed: ${v.message.slice(0, 400)}`);
         await logEvent(c, r.id, "apply_failed", ACTOR, `Validation failed: ${v.message.slice(0, 500)}`, null);
         // Back to proposed, not dismissed: the account changed under us and a
@@ -143,6 +185,7 @@ async function main() {
         : await adapter.apply(payload.op, payload.body);
 
       if (!out.ok || !out.priorValues) {
+        tally.failed++;
         console.log(`   ✖ apply failed: ${out.message.slice(0, 400)}`);
         await logEvent(c, r.id, "apply_failed", ACTOR, out.priorValues ? out.message.slice(0, 500) : "No prior values were recorded, so the change was not treated as applied.", null);
         await c.query(`UPDATE ads_findings SET status = 'proposed', approved_by = NULL, approved_at = NULL WHERE id = $1`, [r.id]);
@@ -163,9 +206,16 @@ async function main() {
         `Applied. Reversal recorded; 14- and 28-day checks scheduled.`,
         JSON.stringify({ rollbackPlan: out.rollbackPlan, log: out.message.split("\n").slice(0, 40) }),
       );
+      tally.applied++;
       console.log(`   ✅ APPLIED — reversible, after-checks scheduled`);
       for (const line of out.rollbackPlan) console.log(`      reverse: ${line}`);
     }
+    emitJobSummary(formatJobSummary(
+      { approved: tally.approved, applied: tally.applied, failed: tally.failed, blocked: tally.blocked, rollbacks: tally.rollbacks },
+      dryRun
+        ? `dry run — ${tally.approved} approved change(s) validated, nothing applied`
+        : `${tally.applied} applied, ${tally.failed} failed, ${tally.blocked} refused for want of client write authority`,
+    ));
   } finally {
     await c.end();
   }

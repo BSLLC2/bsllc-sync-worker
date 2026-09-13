@@ -117,6 +117,55 @@ async function main() {
       return `    – <${DASH}/#/client/${l.id}/launch|${l.name}> — ${bits.join(" · ")}${why ? ` — blocked: ${why}` : ""}`;
     });
 
+    // ── Ads decisions ──
+    // Nothing routed anyone to the paid-media queue on a schedule: Home shows
+    // the block only to whoever owns the account and only if they look. One
+    // line, three states, and the three are deliberately different sentences:
+    //
+    //   • findings waiting  — how many, the biggest, and what has been sitting.
+    //   • none waiting      — said ONLY when the weekly audit is healthy, with
+    //                         the date it last ran. "Nothing to decide" is a
+    //                         real answer; it just has to carry its evidence.
+    //   • audit unhealthy   — the same empty queue, but "none waiting" would be
+    //                         a lie. This is the failure mode the whole line
+    //                         exists for: a job that quietly stopped looks
+    //                         exactly like a clean week.
+    const ADS_IGNORED_AFTER_SEEN = 4; // mirrors shared/ads-findings.ts
+    let adsLine: string | null = null;
+    try {
+      const { rows: [ads] } = await c.query<{
+        waiting: string; ignored: string; oldest_days: number | null;
+        top_client: string | null; top_title: string | null; top_cents: number | null;
+      }>(
+        `WITH q AS (
+           SELECT f.est_impact_cents, f.first_seen_at, f.times_seen, f.title, cl.name AS client
+             FROM ads_findings f JOIN clients cl ON cl.id = f.client_id
+            WHERE f.status IN ('open','proposed') AND cl.status NOT IN ('churned','paused'))
+         SELECT count(*)::text AS waiting,
+                count(*) FILTER (WHERE times_seen >= $1)::text AS ignored,
+                (now()::date - min(first_seen_at)::date) AS oldest_days,
+                (SELECT client FROM q ORDER BY est_impact_cents DESC NULLS LAST LIMIT 1) AS top_client,
+                (SELECT title  FROM q ORDER BY est_impact_cents DESC NULLS LAST LIMIT 1) AS top_title,
+                (SELECT est_impact_cents FROM q ORDER BY est_impact_cents DESC NULLS LAST LIMIT 1) AS top_cents
+           FROM q`, [ADS_IGNORED_AFTER_SEEN]);
+      const { rows: [beat] } = await c.query<{ ok: boolean; ran_at: Date; sla_hours: number | null }>(
+        `SELECT ok, ran_at, sla_hours FROM job_heartbeats WHERE job = 'ads_findings'`);
+      const staleH = beat ? (Date.now() - new Date(beat.ran_at).getTime()) / 3_600_000 : Infinity;
+      const auditHealthy = Boolean(beat?.ok) && staleH <= (beat?.sla_hours || 252);
+      const waiting = Number(ads?.waiting ?? 0);
+      if (waiting > 0) {
+        const bits = [`${waiting} waiting`];
+        if (ads?.top_cents && ads.top_client) bits.push(`biggest ${usd(ads.top_cents)}/mo — ${ads.top_client}, ${(ads.top_title ?? "").slice(0, 60)}`);
+        if (ads?.oldest_days != null) bits.push(`oldest ${ads.oldest_days}d`);
+        if (Number(ads?.ignored ?? 0) > 0) bits.push(`${ads!.ignored} seen ${ADS_IGNORED_AFTER_SEEN}×+ with no decision`);
+        adsLine = `*Ads decisions:* ${bits.join(" · ")} <${DASH}/#/ads|Open →>`;
+      } else if (auditHealthy) {
+        adsLine = `*Ads decisions:* none waiting · weekly audit ran ${new Date(beat!.ran_at).toISOString().slice(0, 10)}`;
+      } else {
+        adsLine = `*Ads decisions:* :warning: the weekly audit ${beat ? `has not succeeded since ${new Date(beat.ran_at).toISOString().slice(0, 10)}` : "has never run"} — an empty queue means nothing until it does`;
+      }
+    } catch { /* ads_findings not deployed yet */ }
+
     const { rows: tasks } = await c.query<{ title: string; status: string; priority: string; due_date: string | null; assignee_name: string | null }>(
       `SELECT title, status, priority, due_date, assignee_name FROM commitments
         WHERE source IN ('data-readiness', 'data-audit') AND workstream = $1 AND status <> 'complete' ORDER BY priority, due_date NULLS LAST`, [PROJECT_NAME]);
@@ -132,6 +181,7 @@ async function main() {
       "",
       ...(launchLines.length ? [`*Launches in progress:* ${launches.length}`, ...launchLines] : []),
       ...(launchLines.length ? [""] : []),
+      ...(adsLine ? [adsLine, ""] : []),
       `*${PROJECT_NAME}:* ${tasks.length} open · ${blocked.length} blocked · ${overdue.length} overdue`,
       ...(dueToday.length ? [`*Due today:*`, ...dueToday.map(fmt)] : []),
       ...(overdue.length ? [`*Overdue:*`, ...overdue.slice(0, 6).map(fmt)] : []),

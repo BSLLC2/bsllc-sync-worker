@@ -3,6 +3,10 @@ import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { deriveJobCadences } from "./job-cadence.js";
+import { ADS_JOB_NAMES, adsJobFindings } from "./ads-operability.js";
 
 /**
  * Every weekday morning, before the brief: check every heartbeat and every
@@ -113,8 +117,51 @@ async function main() {
       title: `${r.name} — ${SOURCE_LABEL[r.source] ?? r.source} is failing`,
       description: `${fixHint(r.source, r.error_message)}\n\nLast error: ${(r.error_message ?? "").slice(0, 300)}`,
     });
+    // Heartbeats re-read AFTER the morning re-runs above, so a job that was
+    // stale at plan time and has since succeeded is not filed as a problem.
+    const beats2 = new Map((await c.query<{ job: string; ran_at: Date; ok: boolean; note: string | null }>(`SELECT job, ran_at, ok, note FROM job_heartbeats`)).rows.map((r) => [r.job, r]));
+
+    // ── The ads pipeline ──
+    // Four scheduled jobs that, until now, stamped nothing at all. If the
+    // Monday findings audit silently stopped, the Ads decisions queue simply
+    // stopped changing — which is indistinguishable from "no issues found this
+    // week", and that is the answer people act on. These jobs are NOT in the
+    // DAILY re-run table above on purpose: one of them writes to live ad
+    // accounts, and the morning audit must never re-run that on its own. It
+    // reports, a person re-runs.
+    //
+    // Cadence comes from each workflow's own cron (job-cadence.ts) rather than
+    // a number typed here, so hourly-apply and weekly-findings are judged
+    // correctly and the SLA can never drift from the schedule.
+    const wfDir = [join(process.cwd(), ".github/workflows"), join(process.cwd(), "worker/.github/workflows")].find((d) => existsSync(d));
+    const cadences = wfDir ? deriveJobCadences(wfDir) : new Map();
+    if (!wfDir) console.log("Workflow files not on disk — ads jobs judged on failure only, not staleness.");
+    const adsBeats = new Map(ADS_JOB_NAMES.map((j) => {
+      const b = beats2.get(j);
+      return [j, b ? { ok: b.ok, ranAt: new Date(b.ran_at), note: (b as { note?: string | null }).note ?? null } : undefined] as const;
+    }));
+    // Approvals the apply job refused because the client's write authority was
+    // never recorded. The dashboard files these under "Approved — waiting on
+    // the worker", which reads as a slow worker rather than a missing
+    // permission, so the audit is what names the real reason.
+    let blockedOnAuthority: { client: string; findings: number }[] = [];
+    try {
+      blockedOnAuthority = (await c.query<{ client: string; n: string }>(
+        `SELECT cl.name AS client, count(*)::text AS n
+           FROM ads_findings f JOIN clients cl ON cl.id = f.client_id
+          WHERE f.status = 'approved'
+            AND coalesce(cl.ads_write_authority, 'unrecorded') <> 'changes'
+          GROUP BY cl.name ORDER BY cl.name`,
+      )).rows.map((r) => ({ client: r.client, findings: Number(r.n) }));
+    } catch { /* ads_findings or the v163 column not deployed yet */ }
+    for (const f of adsJobFindings({
+      now: Date.now(),
+      beats: adsBeats,
+      slaHours: new Map(ADS_JOB_NAMES.map((j) => [j, cadences.get(j)?.slaHours ?? null] as const)),
+      blockedOnAuthority,
+    })) findings.push(f);
+
     // Jobs still stale after the morning re-run
-    const beats2 = new Map((await c.query<{ job: string; ran_at: Date; ok: boolean }>(`SELECT job, ran_at, ok FROM job_heartbeats`)).rows.map((r) => [r.job, r]));
     for (const [job, cfg] of Object.entries(DAILY)) {
       const b = beats2.get(job);
       if (!b || !b.ok || Date.now() - new Date(b.ran_at).getTime() > cfg.hours * 3_600_000) findings.push({

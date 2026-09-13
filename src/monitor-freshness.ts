@@ -30,6 +30,9 @@ const SLA_FALLBACK: Record<string, number> = {
   email_import: 3, db_backup: 36, mrr_snapshot: 1116, review_email: 2, comment_notify: 2, seo_import: 252, aeo_import: 252, webops_import: 36,
   domain_authority_import: 252, import_d365: 36, import_ga4: 36, import_gsc: 36, import_hubspot: 36, import_hubspot_metrics: 36, import_och: 36,
   incremental_sync: 36, snapshot_plans: 2, offline_conversions: 36, publish_och_web_leads: 36, slack_users_sync: 36, morning_audit: 108,
+  // The ads pipeline. Real values come from each workflow's own cron via
+  // job-cadence.ts; these are only the off-checkout fallback.
+  ads_findings: 252, ads_apply_approved: 3, ads_verify_outcomes: 36, ads_vendor_briefs: 612,
 };
 // Metric sources are refreshed by one importer each; a source's freshness
 // SLA is that importer's cadence.
@@ -47,6 +50,8 @@ const LABEL: Record<string, string> = {
   incremental_sync: "Google Ads sync", snapshot_plans: "Plan snapshots", offline_conversions: "Offline conversions (close-the-loop)",
   publish_och_web_leads: "OCH web-leads tab",
   backfill_client_since: "Contract-start backfill",
+  ads_findings: "Ads findings audit (weekly)", ads_apply_approved: "Ads apply-approved drain",
+  ads_verify_outcomes: "Ads outcome verification", ads_vendor_briefs: "Ads vendor briefs",
 };
 const label = (s: string) => LABEL[s] ?? s;
 

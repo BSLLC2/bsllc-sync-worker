@@ -10,6 +10,7 @@ import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import { upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
+import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 
 /**
  * The cadenced deep audit — the job that gives the ads analysis a memory.
@@ -196,6 +197,11 @@ async function main() {
 
     const digest: string[] = [];
     let totalCreated = 0, totalReopened = 0;
+    // Counted so the heartbeat can say what this run actually looked at. A run
+    // that succeeded across ZERO accounts produces the same empty screen as a
+    // clean week and means nothing at all — `accounts` and `read` are what let
+    // the morning audit tell those apart (src/ads-operability.ts).
+    let accounts = 0, accountsRead = 0, totalFindings = 0;
 
     for (const [platform, adapter, source] of [
       ["google_ads", google as PlatformAdapter, "google_ads"],
@@ -203,12 +209,15 @@ async function main() {
     ] as const) {
       const targets = await mappedAccounts(c, source, onlyClient || undefined);
       if (!targets.length) { console.log(`\nNo mapped ${platform} accounts${onlyClient ? ` for ${onlyClient}` : ""}.`); continue; }
+      accounts += targets.length;
 
       for (const t of targets) {
         const accountId = platform === "google_ads" ? digitsOnly(t.accountId) : t.accountId;
         try {
           const r = await auditOne(c, adapter, platform, t.clientId, t.clientName, accountId, dryRun);
+          accountsRead++;
           totalCreated += r.created; totalReopened += r.reopened;
+          totalFindings += r.findings.length;
           for (const f of r.findings) {
             if (f.estImpactCents >= DIGEST_FLOOR_CENTS) {
               digest.push(`${t.clientName} · ${usd(f.estImpactCents)}/mo · ${f.title}`);
@@ -230,6 +239,12 @@ async function main() {
       const sent = await queueDigest(c, digest);
       console.log(`\n${"─".repeat(72)}`);
       console.log(`${totalCreated} new · ${totalReopened} re-opened on changed evidence · ${digest.length} above ${usd(DIGEST_FLOOR_CENTS)}/mo · digest queued for ${sent} teammate(s)`);
+      emitJobSummary(formatJobSummary(
+        { accounts, read: accountsRead, findings: totalFindings, new: totalCreated, reopened: totalReopened },
+        accounts === 0
+          ? "no mapped ad account to read — \"no findings\" says nothing about anyone's spend"
+          : `${accountsRead}/${accounts} account(s) read, ${totalFindings} finding(s)${totalFindings === 0 && accountsRead > 0 ? " — looked and found nothing" : ""}`,
+      ));
     } else {
       console.log(`\n${"─".repeat(72)}\nDry run complete — nothing written.`);
     }

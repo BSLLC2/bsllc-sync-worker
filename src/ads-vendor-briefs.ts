@@ -4,6 +4,7 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { loadConfig } from "./config.js";
 import { logEvent } from "./ads/store.js";
+import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 
 /**
  * Vendor briefs — what the API cannot do, written so someone else can do it.
@@ -154,8 +155,15 @@ async function main() {
         ORDER BY c.name`,
     );
     const targets = clients.filter((cl) => !onlyClient || slugify(cl.name).startsWith(slugify(onlyClient)));
-    if (!targets.length) { console.log("No clients have open vendor-applicable findings."); return; }
+    if (!targets.length) {
+      console.log("No clients have open vendor-applicable findings.");
+      // Nothing to brief is normal. Said on the heartbeat so it cannot be
+      // mistaken for the job having stopped.
+      emitJobSummary(formatJobSummary({ clients: 0, briefs: 0 }, "ran, no client had an open vendor finding"));
+      return;
+    }
 
+    let briefsWritten = 0;
     for (const cl of targets) {
       const { rows } = await c.query<Row>(
         `SELECT id, platform, account_id, finding_type, entity_type, entity_name, title, summary,
@@ -239,6 +247,7 @@ async function main() {
         await c.query(`UPDATE ads_findings SET brief_id = $2 WHERE id = ANY($1::text[])`, [ids, briefId]);
         for (const id of ids) await logEvent(c, id, "briefed", ACTOR, `Included in vendor brief ${tid}.`, null);
 
+        briefsWritten++;
         console.log(`✅ ${cl.name} · ${platform}: brief ${tid} with ${items.length} item(s), filed as a task due in 10 days.`);
       }
     }
@@ -264,6 +273,10 @@ async function main() {
             AND external_id IN (SELECT 'ads-brief:' || tracking_id FROM ads_briefs WHERE status = 'closed')`,
       );
     }
+    emitJobSummary(formatJobSummary(
+      { clients: targets.length, briefs: briefsWritten },
+      `${targets.length} client(s) with open vendor findings, ${briefsWritten} brief(s) written`,
+    ));
   } finally {
     await c.end();
   }
