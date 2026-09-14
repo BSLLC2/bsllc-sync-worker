@@ -38,6 +38,16 @@ import {
   STRANDED_ERROR,
   MAX_RAW_ERROR,
   PROBEABLE_SOURCES,
+  planSweep,
+  summarizeSweep,
+  sweepStateOf,
+  sweepDueAfterHours,
+  oursBackoffMinutes,
+  HEALTHY_RECONFIRM_HOURS,
+  IN_FLIGHT_MINUTES,
+  MID_LAUNCH_RETEST_HOURS,
+  STRANDED_RETRY_HOURS,
+  type SweepCandidate,
 } from "./connection-probe.js";
 
 let failures = 0;
@@ -285,6 +295,131 @@ ok("  …and in particular never contains the run status 'cancelled'", !/cancell
 console.log("\n10. The probeable sources are exactly the ones the dashboard offers a button for");
 ok("gsc, ga4 and google_ads", PROBEABLE_SOURCES.join(",") === "gsc,ga4,google_ads", PROBEABLE_SOURCES.join(","));
 ok("a connector with no probe is refused rather than left running", !isProbeableSource("hubspot") && !isProbeableSource("meta"));
+
+// ── 11. the scheduled sweep picks the right connectors ──────────────────────
+// The sweep is what turns "Not checked yet" from a permanent state into a
+// transient one. It has three ways to be actively harmful, and each is pinned
+// below: probing on top of a test already in flight, re-probing a whole
+// portfolio while Google is refusing us, and spending the run's budget on
+// connectors that already answered this week while a brand-new client's
+// connector has never been asked at all.
+console.log("\n11. The scheduled sweep — who gets probed, and who is left alone");
+
+const NOW = new Date("2026-09-14T15:00:00Z");
+const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000);
+
+// No real client names or account ids anywhere: two placeholder accounts.
+const cand = (over: Partial<SweepCandidate> & Pick<SweepCandidate, "clientId" | "source">): SweepCandidate => ({
+  clientName: null,
+  externalId: "sc-domain:example.com",
+  enabled: true,
+  midLaunch: false,
+  last: null,
+  ...over,
+});
+const answered = (outcome: string, hoursSince: number, rawError: string | null = null) => ({
+  outcome,
+  startedAt: hoursAgo(hoursSince),
+  testedAt: hoursAgo(hoursSince),
+  rawError,
+});
+
+// (a) never tested beats everything, and mid-launch beats the rest of that.
+{
+  const plan = planSweep(
+    [
+      cand({ clientId: "client-established", source: "gsc", last: answered("pass", 24 * 8) }),
+      cand({ clientId: "client-new", source: "gsc", midLaunch: true }),
+      cand({ clientId: "client-old", source: "ga4" }),
+    ],
+    { now: NOW },
+  );
+  const order = plan.targets.map((t) => t.candidate.clientId);
+  ok("a never-tested connector on a client mid-launch is probed FIRST", order[0] === "client-new", order.join(" → "));
+  ok("a never-tested connector on any client outranks a week-old pass", order[1] === "client-old", order.join(" → "));
+  ok("a week-old pass is still re-confirmed, just last", order[2] === "client-established");
+}
+
+// (b) an in-flight test is never piled on top of. This is the guard that stops
+// the sweep racing the button an AM just pressed on a client call.
+{
+  const plan = planSweep(
+    [cand({ clientId: "client-new", source: "gsc", last: { outcome: "running", startedAt: hoursAgo(0.05), testedAt: null, rawError: null } })],
+    { now: NOW },
+  );
+  ok("a test opened moments ago is left alone", plan.targets.length === 0 && plan.skipped[0]?.skip === "in_flight");
+  ok("  …and reads as in flight, not as a result", sweepStateOf({ outcome: "running", startedAt: hoursAgo(0.05), testedAt: null, rawError: null }, NOW) === "in_flight");
+  const stuck = { outcome: "running", startedAt: hoursAgo(2), testedAt: null, rawError: null };
+  ok(`  …while one open longer than ${IN_FLIGHT_MINUTES}m is stranded, and OURS to retry`, sweepStateOf(stuck, NOW) === "stranded");
+}
+
+// (c) a stranded row still terminates, and is retried — but not every run, or a
+// broken workflow would rewrite every client's row with our own failure all day.
+{
+  const strandedRow = answered("fail", 1, STRANDED_ERROR);
+  ok("a row closed by the stranded sweep is recognised as ours, not as a client failure", sweepStateOf(strandedRow, NOW) === "stranded");
+  ok(`  …and is retried after ${STRANDED_RETRY_HOURS}h rather than immediately`, sweepDueAfterHours("stranded", false) === STRANDED_RETRY_HOURS);
+  const soon = planSweep([cand({ clientId: "client-new", source: "gsc", last: strandedRow })], { now: NOW });
+  ok("  …so one an hour old is not retried yet", soon.targets.length === 0 && soon.skipped[0]?.skip === "not_due");
+  const later = planSweep([cand({ clientId: "client-new", source: "gsc", last: answered("fail", STRANDED_RETRY_HOURS + 1, STRANDED_ERROR) })], { now: NOW });
+  ok("  …and one older than that is", later.targets.length === 1);
+}
+
+// (d) quota (and every other OURS failure) backs the whole source off. Probing
+// forty more connectors against a spent quota learns nothing and deepens it.
+{
+  const quota = classifyFailure("gsc", "HTTP 429 RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'Queries'");
+  ok("a rate-limit is classified as ours", quota.scope === "ours" && quota.code === "quota");
+  ok("  …and buys a real pause rather than an immediate retry", oursBackoffMinutes("quota") > 0);
+  const held = planSweep(
+    [cand({ clientId: "client-new", source: "gsc", midLaunch: true }), cand({ clientId: "client-new", source: "ga4", midLaunch: true })],
+    { now: NOW, backoff: new Map([["gsc", { code: quota.code, at: hoursAgo(0.1) }]]) },
+  );
+  ok("  …so the whole source is held back, even for a never-tested mid-launch client", held.targets.every((t) => t.candidate.source !== "gsc"));
+  ok("  …and the other sources carry on", held.targets.some((t) => t.candidate.source === "ga4"));
+  ok("  …and the run log SAYS it is holding back, so a quiet run and a backed-off run never read alike", /HOLDING BACK/.test(summarizeSweep(held)));
+  const expired = planSweep(
+    [cand({ clientId: "client-new", source: "gsc", midLaunch: true })],
+    { now: NOW, backoff: new Map([["gsc", { code: quota.code, at: hoursAgo(24) }]]) },
+  );
+  ok("  …and the hold expires rather than being permanent", expired.targets.length === 1);
+  const disabled = classifyFailure("ga4", "HTTP 403 Analytics Data API has not been used in project 000000 before or it is disabled");
+  ok("an API switched off on OUR project backs off for longer than a rate limit", oursBackoffMinutes(disabled.code) > oursBackoffMinutes("quota"));
+  const theirs = classifyFailure("gsc", "HTTP 403 User does not have sufficient permission for site");
+  ok("a CLIENT-side refusal never backs a source off — that one is per-client", oursBackoffMinutes(theirs.code) === 0);
+}
+
+// (e) nothing is probed without an account id, and nothing that has no probe.
+{
+  const plan = planSweep(
+    [
+      cand({ clientId: "client-new", source: "gsc", externalId: "", midLaunch: true }),
+      cand({ clientId: "client-new", source: "ga4", externalId: "000000000", enabled: false, midLaunch: true }),
+      cand({ clientId: "client-new", source: "hubspot", externalId: "000000", midLaunch: true }),
+    ],
+    { now: NOW },
+  );
+  ok("a connector with no account id is not probed — that gap is OURS to fill, not a question for Google", plan.targets.length === 0);
+  ok("  …and is reported as unconfigured rather than as a failure", plan.skipped.filter((s) => s.skip === "not_configured").length === 2);
+  ok("  …and a source with no probe is refused, never left running", plan.skipped.some((s) => s.skip === "not_probeable"));
+}
+
+// (f) the budget caps a run and defers the rest — it never drops them.
+{
+  const many = Array.from({ length: 40 }, (_, i) => cand({ clientId: `client-${i}`, source: "gsc", last: answered("pass", 24 * 9) }));
+  const plan = planSweep(many, { now: NOW, maxProbes: 5, maxPerSource: 5 });
+  ok("a run probes at most its budget", plan.targets.length === 5);
+  ok("  …and says the rest are waiting for the next run, not that they were fine", plan.skipped.filter((s) => s.skip === "budget").length === 35);
+}
+
+// (g) the cadence numbers themselves.
+{
+  ok(`a working connector is re-confirmed on the dashboard's own freshness window (${HEALTHY_RECONFIRM_HOURS}h)`, sweepDueAfterHours("healthy", false) === HEALTHY_RECONFIRM_HOURS);
+  ok("a failing connector mid-launch is re-checked far sooner than an established one", sweepDueAfterHours("failing", true) === MID_LAUNCH_RETEST_HOURS && sweepDueAfterHours("failing", true) < sweepDueAfterHours("failing", false));
+  ok("a never-tested connector is due immediately", sweepDueAfterHours("never", false) === 0);
+  const fresh = planSweep([cand({ clientId: "client-established", source: "gsc", last: answered("pass", 2) })], { now: NOW });
+  ok("a connector that passed two hours ago is NOT probed again", fresh.targets.length === 0 && fresh.skipped[0]?.skip === "not_due");
+}
 
 console.log(`\n${"─".repeat(72)}`);
 console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

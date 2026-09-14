@@ -581,3 +581,298 @@ export function summarizeRun(lines: RunLine[]): string {
   if (unknown) parts.push(`${unknown} unrecognised — for engineering, not the client`);
   return `test-connections: ${parts.join(" · ")}.`;
 }
+
+// ── The scheduled sweep: which connectors are worth probing right now ────────
+/**
+ * Everything the sweep decides, as pure functions.
+ *
+ * The button answers "is this working?" for one connector the moment somebody
+ * asks. The sweep answers it for every connector without anybody asking, which
+ * is the only version that helps the case it was built for: a client grants
+ * access on a Tuesday afternoon and nobody is sitting on the page waiting.
+ *
+ * Three pressures shape the selection, and they pull against each other:
+ *
+ *  1. A connector that has NEVER been tested is the urgent one. "Not checked
+ *     yet" against a client who granted access last week is the state this
+ *     whole feature exists to remove, and it is worth a probe on the very next
+ *     run. Re-confirming one that passed yesterday is worth almost nothing.
+ *  2. These are tiny reads, but they are per client per source and they spend
+ *     the SAME Google quota as the importers that produce the actual product.
+ *     A sweep that costs a real importer its run has done net harm, so the
+ *     cadence is deliberately slow for anything already known to work and the
+ *     per-run budget is small.
+ *  3. When Google is refusing us — quota spent, an API switched off, our key
+ *     dead — every client fails identically, and re-probing fifty connectors
+ *     against that is a retry storm that makes the underlying problem worse
+ *     and fills every client's row with an error that is ours. So an
+ *     ours-scoped failure backs the whole SOURCE off, not just the connector
+ *     that hit it.
+ *
+ * Nothing here talks to a database or a network, so `npm run
+ * verify-connection-probe` can prove the whole policy without a live account.
+ */
+
+/** How long a `running` row is believed before it counts as stranded rather
+ *  than in flight. Mirrors the dashboard's CONNECTION_TEST_TIMEOUT_MINUTES —
+ *  the two numbers mean the same thing and are deliberately equal, so a row the
+ *  UI is already calling timed out is one the sweep is willing to retry. */
+export const IN_FLIGHT_MINUTES = 15;
+
+/** Re-confirm a working connector once a week. This is not a round number
+ *  picked for feel: it is the dashboard's own CONNECTION_TEST_FRESH_HOURS
+ *  (24 × 7), the point at which its UI already says a green result is worth a
+ *  second look. Matching it means the sentence "worth re-testing, this is over
+ *  a week old" can never be true for long, because the sweep gets there first. */
+export const HEALTHY_RECONFIRM_HOURS = 24 * 7;
+
+/** A connector that is FAILING on a client whose launch is still open is the
+ *  live case: an AM has asked for access, the client is granting it now, and
+ *  the answer wanted is "did that work?". Two hours is short enough that a
+ *  grant made after lunch shows green the same afternoon and slow enough that
+ *  one stuck connector cannot be more than a handful of calls a day. */
+export const MID_LAUNCH_RETEST_HOURS = 2;
+
+/** The same question on an established client is a standing problem, not a live
+ *  one — somebody has already been told, and the morning audit and the daily
+ *  brief both carry it. Daily is enough. */
+export const FAILING_RETEST_HOURS = 24;
+
+/** A row closed because our own run died says nothing about the client. Retry
+ *  it, but not on the next run: if the workflow itself is broken, an hourly
+ *  retry writes the same "our test did not finish" text into every client's row
+ *  all day. */
+export const STRANDED_RETRY_HOURS = 6;
+
+/** The most probes one sweep run will make, across all clients and sources.
+ *  The ordering below decides WHICH ones, so a small budget degrades into
+ *  "the most urgent ones, and the rest next run" rather than into a gap. */
+export const SWEEP_MAX_PROBES = 30;
+
+/** …and the most against any ONE source in a run, so a source that is quietly
+ *  rate-limiting us cannot consume the whole budget and starve the other two. */
+export const SWEEP_MAX_PER_SOURCE = 12;
+
+/**
+ * How long to leave a whole SOURCE alone after an ours-scoped failure.
+ *
+ * Every one of these means every client is failing identically right now, so
+ * probing the next forty connectors learns nothing and costs quota we are
+ * already short of. The numbers differ because the fixes differ in shape: a
+ * rate limit clears itself in minutes, a disabled API or a dead key needs a
+ * person and will not be fixed inside the hour.
+ */
+export function oursBackoffMinutes(code: FailureVerdict["code"]): number {
+  switch (code) {
+    case "quota": return 60;
+    case "api_disabled": return 6 * 60;
+    case "our_credential": return 6 * 60;
+    case "network": return 30;
+    default: return 0;
+  }
+}
+
+/** What the newest stored result for one connector amounts to, for scheduling. */
+export type SweepState = "never" | "in_flight" | "stranded" | "failing" | "healthy";
+
+/** One connector as the sweep sees it: the mapping, plus its newest test row. */
+export interface SweepCandidate {
+  clientId: string;
+  /** Only for the run log. Never written into a row. */
+  clientName?: string | null;
+  source: string;
+  externalId: string | null;
+  enabled: boolean;
+  /** The client's launch is still open — from `client_setup_reminders`, which
+   *  the dashboard's own cron maintains (a row per unfinished launch, deleted
+   *  the moment nothing is outstanding), or a client still in `launch` status. */
+  midLaunch: boolean;
+  /** The newest `connector_tests` row for this (client, source), or null when
+   *  this connector has never been tested at all. */
+  last: {
+    outcome: string;
+    /** When the row was opened. The only timestamp a `running` row has. */
+    startedAt: Date;
+    /** When an answer landed. Null while running. */
+    testedAt: Date | null;
+    rawError: string | null;
+  } | null;
+}
+
+/** Why a candidate was skipped. Printed in the run log — a sweep that quietly
+ *  probes nothing and a sweep that correctly has nothing to do must not look
+ *  the same. */
+export type SweepSkipReason =
+  | "not_configured"
+  | "not_probeable"
+  | "in_flight"
+  | "not_due"
+  | "source_backed_off"
+  | "budget";
+
+export interface SweepDecision {
+  candidate: SweepCandidate;
+  state: SweepState;
+  /** Lower sorts first. */
+  tier: number;
+  /** Hours since the last answer, or null when never tested. */
+  ageHours: number | null;
+  skip: SweepSkipReason | null;
+}
+
+export interface SweepPlan {
+  targets: SweepDecision[];
+  skipped: SweepDecision[];
+  /** Sources held back this run, and until when, so the log can say so. */
+  backedOff: Array<{ source: string; code: FailureVerdict["code"]; minutesLeft: number }>;
+}
+
+const MS_PER_HOUR = 3_600_000;
+
+/** What the newest row means for scheduling. Deliberately separate from
+ *  `classifyFailure`, which answers a different question (who fixes it). */
+export function sweepStateOf(last: SweepCandidate["last"], now: Date): SweepState {
+  if (!last) return "never";
+  if (last.outcome === "running") {
+    const openMin = (now.getTime() - last.startedAt.getTime()) / 60_000;
+    // Still plausibly in flight — never re-dispatch on top of it. Past the
+    // window it is a row nobody is going to close, so it is ours to retry.
+    return openMin <= IN_FLIGHT_MINUTES ? "in_flight" : "stranded";
+  }
+  if (last.outcome === "fail") {
+    return (last.rawError ?? "").includes(STRANDED_ERROR.slice(0, 32)) ? "stranded" : "failing";
+  }
+  return "healthy";
+}
+
+/** How stale a result of each kind is allowed to get. `0` means due now. */
+export function sweepDueAfterHours(state: SweepState, midLaunch: boolean): number {
+  switch (state) {
+    case "never": return 0;
+    case "stranded": return STRANDED_RETRY_HOURS;
+    case "failing": return midLaunch ? MID_LAUNCH_RETEST_HOURS : FAILING_RETEST_HOURS;
+    case "healthy": return HEALTHY_RECONFIRM_HOURS;
+    case "in_flight": return Number.POSITIVE_INFINITY;
+  }
+}
+
+/**
+ * Priority tier. Never-tested first, and within that a client mid-launch ahead
+ * of an established one — that is the whole point: the only person who cannot
+ * wait a day for an answer is the AM sitting in front of a client right now.
+ */
+export function sweepTier(state: SweepState, midLaunch: boolean): number {
+  if (state === "never") return midLaunch ? 0 : 1;
+  if (state === "failing" && midLaunch) return 2;
+  if (state === "stranded") return 3;
+  if (state === "failing") return 4;
+  return 5; // healthy re-confirm — always last
+}
+
+/**
+ * Turn every configured connector into a plan for this run.
+ *
+ * `backoff` is the newest ours-scoped failure per source, from the same
+ * `connector_tests` rows — the caller classifies them with `classifyFailure`
+ * and passes the verdict in, so this stays free of any I/O.
+ */
+export function planSweep(
+  candidates: SweepCandidate[],
+  opts: {
+    now: Date;
+    /** source → { code, at } for the newest failure that was OURS. */
+    backoff?: Map<string, { code: FailureVerdict["code"]; at: Date }>;
+    maxProbes?: number;
+    maxPerSource?: number;
+  },
+): SweepPlan {
+  const now = opts.now;
+  const maxProbes = opts.maxProbes ?? SWEEP_MAX_PROBES;
+  const maxPerSource = opts.maxPerSource ?? SWEEP_MAX_PER_SOURCE;
+
+  const backedOff: SweepPlan["backedOff"] = [];
+  const heldSources = new Set<string>();
+  for (const [source, b] of opts.backoff ?? new Map()) {
+    const mins = oursBackoffMinutes(b.code);
+    if (mins <= 0) continue;
+    const left = mins - (now.getTime() - b.at.getTime()) / 60_000;
+    if (left > 0) {
+      heldSources.add(source);
+      backedOff.push({ source, code: b.code, minutesLeft: Math.ceil(left) });
+    }
+  }
+
+  const decide = (c: SweepCandidate): SweepDecision => {
+    const state = sweepStateOf(c.last, now);
+    const answeredAt = c.last?.testedAt ?? null;
+    const ageHours = answeredAt ? (now.getTime() - answeredAt.getTime()) / MS_PER_HOUR : null;
+    const base = { candidate: c, state, tier: sweepTier(state, c.midLaunch), ageHours };
+
+    if (!c.enabled || !(c.externalId ?? "").trim()) return { ...base, skip: "not_configured" };
+    if (!isProbeableSource(c.source)) return { ...base, skip: "not_probeable" };
+    // The single most important guard: a test somebody just pressed, or a
+    // sweep still running, must never be piled on top of.
+    if (state === "in_flight") return { ...base, skip: "in_flight" };
+    if (heldSources.has(c.source)) return { ...base, skip: "source_backed_off" };
+
+    const due = sweepDueAfterHours(state, c.midLaunch);
+    if (due > 0) {
+      // A row with no answer timestamp (a stranded one we are retrying) is
+      // aged from when it was opened — otherwise it would look due forever.
+      const since = answeredAt ?? c.last?.startedAt ?? null;
+      const hrs = since ? (now.getTime() - since.getTime()) / MS_PER_HOUR : Number.POSITIVE_INFINITY;
+      if (hrs < due) return { ...base, skip: "not_due" };
+    }
+    return { ...base, skip: null };
+  };
+
+  const decisions = candidates.map(decide);
+  const skipped = decisions.filter((d) => d.skip !== null);
+
+  // Most urgent first; within a tier, whatever has gone longest without an
+  // answer. A never-tested connector has no age, so it sorts ahead of
+  // everything in its tier, which is correct — it is the one with no answer
+  // at all.
+  const due = decisions
+    .filter((d) => d.skip === null)
+    .sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      const ax = a.ageHours ?? Number.POSITIVE_INFINITY;
+      const bx = b.ageHours ?? Number.POSITIVE_INFINITY;
+      return bx - ax;
+    });
+
+  const targets: SweepDecision[] = [];
+  const perSource = new Map<string, number>();
+  for (const d of due) {
+    const n = perSource.get(d.candidate.source) ?? 0;
+    if (targets.length >= maxProbes || n >= maxPerSource) {
+      skipped.push({ ...d, skip: "budget" });
+      continue;
+    }
+    perSource.set(d.candidate.source, n + 1);
+    targets.push(d);
+  }
+  return { targets, skipped, backedOff };
+}
+
+/** One line per run, for the Actions log. Says what it did AND what it held
+ *  back, because a sweep that probed nothing because everything is fresh and
+ *  one that probed nothing because it is backing off Google are opposite
+ *  facts that would otherwise print identically. */
+export function summarizeSweep(plan: SweepPlan): string {
+  const count = (r: SweepSkipReason) => plan.skipped.filter((s) => s.skip === r).length;
+  const parts = [
+    `${plan.targets.length} to probe`,
+    `${count("not_due")} still fresh`,
+    `${count("not_configured")} with no account id`,
+  ];
+  if (count("in_flight")) parts.push(`${count("in_flight")} already being tested`);
+  if (count("budget")) parts.push(`${count("budget")} over this run's budget — next run`);
+  if (plan.backedOff.length) {
+    parts.push(
+      `HOLDING BACK ${plan.backedOff.map((b) => `${b.source} (${b.code}, ${b.minutesLeft}m left)`).join(", ")} — that failure is OURS and every client would fail the same way`,
+    );
+  }
+  return `sweep-connections: ${parts.join(" · ")}.`;
+}

@@ -1,0 +1,102 @@
+name: Sweep connections (scheduled)
+
+# Answers "can we read this client's account?" for EVERY client, without
+# anybody pressing anything.
+#
+# The button-driven test-connections.yml only ever runs when a person asks. That
+# leaves the one case this exists for unanswered: an AM asks a client for access
+# on Monday, the client grants it on Tuesday afternoon, and nobody is sitting on
+# the page to find out. Until this job existed the step read "Not checked yet"
+# until somebody remembered — which is a manual action standing in for an
+# automatic one.
+#
+# What it does NOT do: choose its own cadence in this file. The selection rules
+# (never-tested first, mid-launch ahead of established, a working connector
+# re-confirmed weekly, a source backed off when the failure is OURS, a per-run
+# budget) are pure functions in src/connection-probe.ts, proved by
+# `npm run verify-connection-probe`. This file only decides how often the
+# question is ASKED; the job decides how much of it is worth answering.
+#
+# Cost, because these calls are not free and share quota with the importers:
+# one probe is one small read (plus one enumeration call only when it fails).
+# Across the whole client base, with the intervals above, this is tens of calls
+# a day, not thousands — and a run that finds everything fresh makes no Google
+# call at all.
+#
+# Secrets used (every one already in use by the importers — this job adds none):
+#   GOOGLE_SERVICE_ACCOUNT_JSON  Search Console + GA4 reads
+#   GOOGLE_ADS_CLIENT_ID / _CLIENT_SECRET / _DEVELOPER_TOKEN / _REFRESH_TOKEN
+#   DATABASE_URL                 to read the connectors and write the results
+
+on:
+  schedule:
+    # Hourly through the working day, ET, weekdays. An hour is the granularity
+    # that matters: it is the difference between an AM seeing "we can read it"
+    # before the client has left the call's follow-up email, and seeing it
+    # tomorrow. Outside those hours nobody is granting access and nobody is
+    # watching, so the extra runs would buy nothing.
+    - cron: "0 11-23 * * 1-5" # 07:00–19:00 ET
+    # …and once each weekend day, so the weekly re-confirm never drifts past a
+    # week and a Saturday grant is not invisible until Monday.
+    - cron: "0 15 * * 0,6"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Decide and probe for real, but write nothing (true/false)."
+        required: false
+        default: "true"
+      limit:
+        description: "Max probes this run (default 30)."
+        required: false
+        default: ""
+
+concurrency:
+  # One sweep at a time, and NEVER cancel one in flight: a cancelled run is the
+  # one way a row gets stranded that the script itself cannot catch. The job
+  # also takes a Postgres advisory lock, for the case where this group does not
+  # save us (a manual dispatch racing a scheduled run in another queue).
+  group: sweep-connections
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    # Well under an hour, so two scheduled runs can never overlap even if one
+    # is slow. The per-run budget is what actually keeps it to a few minutes.
+    timeout-minutes: 20
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sweep
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          # MCC id (BS LLC · Manager) — not a secret, so it lives here in the
+          # open, same as test-connections.yml and sync-client-now.yml.
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Dispatch inputs reach the shell as environment variables, never
+          # interpolated into the command line: ${{ }} substitution happens
+          # before bash parses anything, so an input containing shell syntax
+          # would otherwise run as shell.
+          DRY_RUN: ${{ inputs.dry_run }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          ARGS="--sweep"
+          # A scheduled run has no inputs at all, so an empty DRY_RUN means the
+          # real thing. Only an explicit "true" on a manual dispatch is a dry run.
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ -n "$LIMIT" ]; then ARGS="$ARGS --limit=$LIMIT"; fi
+          npm run test-connections -- $ARGS

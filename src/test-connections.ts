@@ -3,6 +3,7 @@ import "dotenv/config";
 import { JWT } from "google-auth-library";
 import { GoogleAdsApi } from "google-ads-api";
 import pg from "pg";
+import { randomUUID } from "node:crypto";
 import {
   analyzeAdsVisibility,
   analyzeGscSites,
@@ -13,16 +14,24 @@ import {
   httpErrorText,
   isProbeableSource,
   outcomeForRead,
+  oursBackoffMinutes,
+  planSweep,
   summarizeRun,
+  summarizeSweep,
   truncate,
+  IN_FLIGHT_MINUTES,
   STRANDED_ERROR,
+  SWEEP_MAX_PER_SOURCE,
+  SWEEP_MAX_PROBES,
   windowHasData,
   MAX_DETAIL,
   PROBEABLE_SOURCES,
   SOURCE_LABEL,
+  type FailureVerdict,
   type GscSiteEntry,
   type ProbeResult,
   type RunLine,
+  type SweepCandidate,
 } from "./connection-probe.js";
 
 /**
@@ -66,6 +75,8 @@ import {
  *   npm run test-connections -- --client=<clientId> --request-ids=a,b --sources=gsc,ga4
  *   npm run test-connections -- --client=<clientId> --sources=gsc --dry-run
  *   npm run test-connections -- --request-ids=a,b --finalize-only --reason="…"
+ *   npm run test-connections -- --sweep            (the scheduled run)
+ *   npm run test-connections -- --sweep --dry-run  (decide + probe, write nothing)
  *
  * --dry-run does everything except the database write (it still performs the
  * real reads — that is the part worth proving) and prints what it would have
@@ -517,6 +528,290 @@ async function finalizeStranded(db: pg.Client, ids: string[], reason: string, dr
   return n;
 }
 
+// ── probing a set of rows ───────────────────────────────────────────────────
+
+/**
+ * Probe every row we were handed and close it. Shared by the button-driven run
+ * and the scheduled sweep, because the two differ ONLY in how the rows were
+ * chosen — everything after that (the per-source net, the ours-vs-theirs log
+ * line, the write, the "no_data is not a failure" sentence) must be identical
+ * or the two paths will start meaning different things by the same row.
+ *
+ * `abortSources` is the in-run half of the back-off. `planSweep` holds a source
+ * back on the strength of the PREVIOUS run's failures; this catches the case
+ * where we discover mid-run that Google is rate-limiting us and there are
+ * twenty more of the same source still queued. Nothing is stranded by it: a
+ * skipped row was never opened, because the sweep opens rows one at a time.
+ */
+async function probeTargets(
+  db: pg.Client,
+  targets: TestRow[],
+  dryRun: boolean,
+  toFinalize: Set<string>,
+  abortSources?: Set<string>,
+): Promise<{ lines: RunLine[]; oursCount: number }> {
+  const lines: RunLine[] = [];
+  let oursCount = 0;
+
+  for (const row of targets) {
+    const label = SOURCE_LABEL[row.source as keyof typeof SOURCE_LABEL] ?? row.source;
+    console.log(`\n── ${label} (${row.source}) ──`);
+    if (!isProbeableSource(row.source)) {
+      console.log(`  ! ${row.source} is not probeable — closing the row rather than leaving it open.`);
+    }
+    const externalId = row.external_id?.trim() ?? "";
+    console.log(`  id on the connector: ${externalId || "(none stored)"}`);
+
+    let result: ProbeResult;
+    try {
+      result = await probe(row.source, externalId);
+    } catch (e) {
+      // Anything the probe threw — a dead token, a timeout, an unexpected
+      // shape. This is the per-source net: it must never propagate, because
+      // one source throwing would strand every row after it.
+      result = {
+        outcome: "fail",
+        rawError: formatProbeError(e),
+        detail: null,
+        visibleElsewhere: false,
+        probe: `${row.source}:probe threw`,
+      };
+    }
+
+    if (result.outcome === "fail") {
+      const verdict = classifyFailure(row.source, result.rawError);
+      if (verdict.scope === "ours") oursCount++;
+      console.log(`  OUTCOME: fail (${verdict.code})`);
+      console.log(`  ${verdict.summary}`);
+      console.log(`  error: ${truncate(result.rawError ?? "(none)", 500)}`);
+      lines.push({ source: row.source, outcome: "fail", scope: verdict.scope });
+      // Stop hammering a source that has just told us it is OUR problem. Every
+      // remaining client would fail identically, so the extra calls buy nothing
+      // and make a quota problem worse.
+      if (abortSources && verdict.scope === "ours" && oursBackoffMinutes(verdict.code) > 0) {
+        abortSources.add(row.source);
+      }
+    } else if (result.outcome === "no_data") {
+      // Spelled out every time on purpose. "No data" is the result most
+      // likely to be misread as a failure, and the misreading costs a client
+      // email asking for access they already granted.
+      console.log("  OUTCOME: no_data — we got IN and the account answered with nothing. The access WORKS. This is not a permission problem and must not be reported as one.");
+      lines.push({ source: row.source, outcome: "no_data" });
+    } else {
+      console.log("  OUTCOME: pass — we read real data.");
+      lines.push({ source: row.source, outcome: "pass" });
+    }
+    if (result.detail) console.log(`  detail: ${result.detail}`);
+    console.log(`  probe: ${result.probe}`);
+
+    if (dryRun) {
+      console.log(`  [dry-run] would write: outcome=${result.outcome}, visible_elsewhere=${result.visibleElsewhere}, raw_error=${result.rawError ? `${result.rawError.length} chars` : "null"}`);
+    } else {
+      const written = await writeResult(db, row, result);
+      toFinalize.delete(row.id);
+      console.log(written ? `  written to connector_tests row ${row.id}.` : `  row ${row.id} was no longer 'running' — left as it was.`);
+    }
+  }
+  return { lines, oursCount };
+}
+
+/** The loudest thing this job can say, and the one that decides whether anybody
+ *  contacts a client at all. */
+function reportOurs(oursCount: number): void {
+  if (oursCount <= 0) return;
+  console.log(
+    "\n!! At least one failure above is OURS, not the client's — our Google API, our service-account key, our quota or our network.\n" +
+      "!! Every client will be failing the same way right now. Fix it on our side and re-test.\n" +
+      "!! Do NOT send an access request to any client on the strength of this run.",
+  );
+}
+
+// ── the scheduled sweep ─────────────────────────────────────────────────────
+
+/**
+ * Who this is written as, in the row. Not a person's name, and not blank:
+ * a blank `requested_by` reads on the client page as "somebody, we forget who",
+ * and a person's name against a test nobody pressed is a small lie that makes
+ * an AM doubt the rest of the page. The dashboard renders this one value as
+ * "checked automatically".
+ */
+const SWEEP_REQUESTED_BY = "auto";
+
+/** One lock id for the whole sweep. Two sweeps probing the same client at once
+ *  would open two rows per connector and race to close them — the second one
+ *  writes nothing (writeResult is scoped to outcome='running') but it spends
+ *  the quota anyway, which is precisely what the budget exists to avoid. The
+ *  per-row in-flight check below catches the common case; this catches the one
+ *  where GitHub's own concurrency group fails us. */
+const SWEEP_LOCK_ID = 0x5c0e_c701;
+
+/**
+ * Everything the sweep needs about every connector, in one query.
+ *
+ * `mid_launch` is read from `client_setup_reminders` — the dashboard's setup
+ * cron inserts a row per unfinished launch and DELETES it the moment nothing is
+ * outstanding, so its presence is already the maintained answer to "is this
+ * client mid-launch". A client still in `launch` status counts too, which
+ * covers the window before the first reminder run has happened — exactly the
+ * brand-new client this feature is for.
+ */
+async function loadSweepCandidates(db: pg.Client): Promise<SweepCandidate[]> {
+  const { rows } = await db.query<{
+    client_id: string;
+    client_name: string | null;
+    source: string;
+    external_id: string | null;
+    enabled: boolean;
+    mid_launch: boolean;
+    outcome: string | null;
+    started_at: Date | null;
+    tested_at: Date | null;
+    raw_error: string | null;
+  }>(
+    `SELECT m.client_id,
+            c.name  AS client_name,
+            m.source,
+            m.external_id,
+            m.enabled,
+            (r.client_id IS NOT NULL OR c.status = 'launch') AS mid_launch,
+            t.outcome, t.started_at, t.tested_at, t.raw_error
+       FROM connector_mappings m
+       JOIN clients c ON c.id = m.client_id
+       LEFT JOIN client_setup_reminders r ON r.client_id = m.client_id
+       LEFT JOIN LATERAL (
+              SELECT outcome, started_at, tested_at, raw_error
+                FROM connector_tests ct
+               WHERE ct.client_id = m.client_id AND ct.source = m.source
+               ORDER BY ct.started_at DESC
+               LIMIT 1
+            ) t ON true
+      WHERE m.source = ANY($1::text[])
+        -- A churned or paused account is not worth a Google call: nobody is
+        -- looking at its dashboard and its access is allowed to have lapsed.
+        AND c.status IN ('launch', 'active')`,
+    [[...PROBEABLE_SOURCES]],
+  );
+  return rows.map((r) => ({
+    clientId: r.client_id,
+    clientName: r.client_name,
+    source: r.source,
+    externalId: r.external_id,
+    enabled: r.enabled,
+    midLaunch: Boolean(r.mid_launch),
+    last: r.outcome
+      ? {
+          outcome: r.outcome,
+          startedAt: new Date(r.started_at ?? Date.now()),
+          testedAt: r.tested_at ? new Date(r.tested_at) : null,
+          rawError: r.raw_error,
+        }
+      : null,
+  }));
+}
+
+/**
+ * The newest failure per source that was OURS, so a source we already know is
+ * refusing us is left alone for a while instead of being asked fifty more
+ * times. Classified with the same `classifyFailure` the log uses — there is no
+ * second opinion about what counts as ours anywhere in this repo.
+ */
+async function loadSourceBackoff(db: pg.Client): Promise<Map<string, { code: FailureVerdict["code"]; at: Date }>> {
+  const { rows } = await db.query<{ source: string; raw_error: string | null; tested_at: Date }>(
+    `SELECT DISTINCT ON (source) source, raw_error, tested_at
+       FROM connector_tests
+      WHERE outcome = 'fail' AND tested_at IS NOT NULL AND source = ANY($1::text[])
+      ORDER BY source, tested_at DESC`,
+    [[...PROBEABLE_SOURCES]],
+  );
+  const out = new Map<string, { code: FailureVerdict["code"]; at: Date }>();
+  for (const r of rows) {
+    const verdict = classifyFailure(r.source, r.raw_error);
+    if (verdict.scope !== "ours") continue;
+    out.set(r.source, { code: verdict.code, at: new Date(r.tested_at) });
+  }
+  return out;
+}
+
+/**
+ * The scheduled run. Nobody pressed anything; this is the job deciding for
+ * itself which connectors have a question worth asking right now.
+ *
+ * Rows are opened ONE AT A TIME, immediately before their own probe, rather
+ * than all up front. That is deliberate: a row is only ever open for the
+ * seconds its own call takes, so a run killed halfway leaves at most one row
+ * stranded instead of thirty — and the same `finalizeStranded` the button path
+ * uses closes that one from the finally block and from the workflow's
+ * always() step.
+ */
+async function runSweep(db: pg.Client, dryRun: boolean, limit: number, toFinalize: Set<string>): Promise<void> {
+  console.log(`═══ Connection sweep${dryRun ? " (DRY RUN — no database write)" : ""} ═══`);
+
+  if (!dryRun) {
+    const { rows } = await db.query<{ locked: boolean }>(`SELECT pg_try_advisory_lock($1) AS locked`, [SWEEP_LOCK_ID]);
+    if (!rows[0]?.locked) {
+      console.log("Another sweep holds the lock — stopping rather than probing the same accounts twice.");
+      return;
+    }
+  }
+
+  const [candidates, backoff] = await Promise.all([loadSweepCandidates(db), loadSourceBackoff(db)]);
+  const plan = planSweep(candidates, {
+    now: new Date(),
+    backoff,
+    maxProbes: limit,
+    maxPerSource: Math.min(SWEEP_MAX_PER_SOURCE, limit),
+  });
+  console.log(`${candidates.length} connector(s) across every live client.`);
+  console.log(summarizeSweep(plan));
+  if (!plan.targets.length) return;
+
+  const abortSources = new Set<string>();
+  const lines: RunLine[] = [];
+  let oursCount = 0;
+
+  for (const d of plan.targets) {
+    const c = d.candidate;
+    if (abortSources.has(c.source)) {
+      console.log(`\n── skipping ${c.source} for ${c.clientName ?? c.clientId}: this run already found that failure to be OURS, so every remaining client would fail the same way.`);
+      continue;
+    }
+    console.log(`\n▸ ${c.clientName ?? c.clientId} · ${c.source} · ${d.state}${c.midLaunch ? " · mid-launch" : ""}${d.ageHours == null ? "" : ` · last answer ${Math.round(d.ageHours)}h ago`}`);
+
+    let row: TestRow;
+    if (dryRun) {
+      row = { id: `dry-run-${c.clientId}-${c.source}`, client_id: c.clientId, source: c.source, external_id: c.externalId, outcome: "running" };
+    } else {
+      // Re-check in-flight at the moment of writing, not only at plan time:
+      // somebody may have pressed Test connection in the seconds since. The
+      // condition is the same one planSweep applies, stated in SQL.
+      const opened = await db.query<{ id: string }>(
+        `INSERT INTO connector_tests (id, client_id, source, outcome, external_id, requested_by, started_at)
+         SELECT $1, $2, $3, 'running', $4, $5, now()
+          WHERE NOT EXISTS (
+                SELECT 1 FROM connector_tests
+                 WHERE client_id = $2 AND source = $3 AND outcome = 'running'
+                   AND started_at > now() - ($6 || ' minutes')::interval)
+         RETURNING id`,
+        [randomUUID(), c.clientId, c.source, c.externalId, SWEEP_REQUESTED_BY, String(IN_FLIGHT_MINUTES)],
+      );
+      const id = opened.rows[0]?.id;
+      if (!id) {
+        console.log("  · a test for this connector is already running — leaving it alone.");
+        continue;
+      }
+      toFinalize.add(id);
+      row = { id, client_id: c.clientId, source: c.source, external_id: c.externalId, outcome: "running" };
+    }
+
+    const res = await probeTargets(db, [row], dryRun, toFinalize, abortSources);
+    lines.push(...res.lines);
+    oursCount += res.oursCount;
+  }
+
+  console.log(`\n${summarizeRun(lines)}`);
+  reportOurs(oursCount);
+}
+
 // ── main ────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -525,6 +820,8 @@ async function main() {
   const sources = list(arg("sources"));
   const dryRun = flag("dry-run");
   const finalizeOnly = flag("finalize-only");
+  const sweep = flag("sweep");
+  const limit = Math.max(1, Math.min(Number(arg("limit") ?? SWEEP_MAX_PROBES) || SWEEP_MAX_PROBES, 200));
   const reason = arg("reason") || "the workflow run failed or was cancelled before the probe wrote a result";
 
   const dbUrl = process.env.DATABASE_URL;
@@ -539,6 +836,11 @@ async function main() {
   // "would close N stranded rows" for rows it deliberately left alone.
   const toFinalize = new Set<string>(dryRun ? [] : requestIds);
   try {
+    if (sweep) {
+      await runSweep(db, dryRun, limit, toFinalize);
+      return;
+    }
+
     if (finalizeOnly) {
       console.log(`═══ test-connections — finalize-only sweep (${requestIds.length} row id(s)) ═══`);
       if (!requestIds.length) {
@@ -614,71 +916,9 @@ async function main() {
       return;
     }
 
-    const lines: RunLine[] = [];
-    let oursCount = 0;
-
-    for (const row of targets) {
-      const label = SOURCE_LABEL[row.source as keyof typeof SOURCE_LABEL] ?? row.source;
-      console.log(`\n── ${label} (${row.source}) ──`);
-      if (!isProbeableSource(row.source)) {
-        console.log(`  ! ${row.source} is not probeable — closing the row rather than leaving it open.`);
-      }
-      const externalId = row.external_id?.trim() ?? "";
-      console.log(`  id on the connector: ${externalId || "(none stored)"}`);
-
-      let result: ProbeResult;
-      try {
-        result = await probe(row.source, externalId);
-      } catch (e) {
-        // Anything the probe threw — a dead token, a timeout, an unexpected
-        // shape. This is the per-source net: it must never propagate, because
-        // one source throwing would strand every row after it.
-        result = {
-          outcome: "fail",
-          rawError: formatProbeError(e),
-          detail: null,
-          visibleElsewhere: false,
-          probe: `${row.source}:probe threw`,
-        };
-      }
-
-      if (result.outcome === "fail") {
-        const verdict = classifyFailure(row.source, result.rawError);
-        if (verdict.scope === "ours") oursCount++;
-        console.log(`  OUTCOME: fail (${verdict.code})`);
-        console.log(`  ${verdict.summary}`);
-        console.log(`  error: ${truncate(result.rawError ?? "(none)", 500)}`);
-        lines.push({ source: row.source, outcome: "fail", scope: verdict.scope });
-      } else if (result.outcome === "no_data") {
-        // Spelled out every time on purpose. "No data" is the result most
-        // likely to be misread as a failure, and the misreading costs a client
-        // email asking for access they already granted.
-        console.log("  OUTCOME: no_data — we got IN and the account answered with nothing. The access WORKS. This is not a permission problem and must not be reported as one.");
-        lines.push({ source: row.source, outcome: "no_data" });
-      } else {
-        console.log("  OUTCOME: pass — we read real data.");
-        lines.push({ source: row.source, outcome: "pass" });
-      }
-      if (result.detail) console.log(`  detail: ${result.detail}`);
-      console.log(`  probe: ${result.probe}`);
-
-      if (dryRun) {
-        console.log(`  [dry-run] would write: outcome=${result.outcome}, visible_elsewhere=${result.visibleElsewhere}, raw_error=${result.rawError ? `${result.rawError.length} chars` : "null"}`);
-      } else {
-        const written = await writeResult(db, row, result);
-        toFinalize.delete(row.id);
-        console.log(written ? `  written to connector_tests row ${row.id}.` : `  row ${row.id} was no longer 'running' — left as it was.`);
-      }
-    }
-
+    const { lines, oursCount } = await probeTargets(db, targets, dryRun, toFinalize);
     console.log(`\n${summarizeRun(lines)}`);
-    if (oursCount > 0) {
-      console.log(
-        "\n!! At least one failure above is OURS, not the client's — our Google API, our service-account key, our quota or our network.\n" +
-          "!! Every client will be failing the same way right now. Fix it on our side and re-test.\n" +
-          "!! Do NOT send an access request to any client on the strength of this run.",
-      );
-    }
+    reportOurs(oursCount);
   } finally {
     // Last line of defence inside this process. The workflow runs the same
     // sweep separately, for the kills this block never sees.

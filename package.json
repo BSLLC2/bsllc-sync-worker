@@ -166,6 +166,7 @@
     "och-revenue-audit": "tsx src/och-revenue-audit.ts",
     "verify-ads-operability": "tsx src/verify-ads-operability.ts",
     "test-connections": "tsx src/test-connections.ts",
+    "sweep-connections": "tsx src/test-connections.ts --sweep",
     "verify-connection-probe": "tsx src/verify-connection-probe.ts"
   },
   "dependencies": {
