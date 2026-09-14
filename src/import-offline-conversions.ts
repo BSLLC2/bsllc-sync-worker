@@ -196,7 +196,17 @@ async function main() {
     const rows: string[][] = values.values ?? [];
     const hIdx = findHeaderRow(rows);
     const header = rows[hIdx] ?? [];
-    const nameCol = findCol(header, ["name"]);
+    // Needle PRIORITY, not column position: a sheet with both "Client ID" and
+    // "Name" must resolve to "Name". findCol is first-matching-COLUMN, so the
+    // synonyms have to be tried one list at a time rather than as one list.
+    // The synonyms exist because a client renaming their own heading is an
+    // ordinary Tuesday, not a fault — but note that none of them can rescue a
+    // heading that has been blanked or truncated to a single letter, which is
+    // the OCH case on 2026-09-14 ("h"). Nothing can: the column no longer says
+    // what it holds, and guessing which column is people's names would put the
+    // wrong names in a conversion upload to Google.
+    const nameCol = [["name"], ["client"], ["patient"], ["resident"], ["member"]]
+      .reduce<number>((found, needles) => (found >= 0 ? found : findCol(header, needles)), -1);
     const phoneCol = findCol(header, ["phone"]);
     const dobCol = findCol(header, ["dob", "birth"]);
     const statusCol = findCol(header, ["status", "admitted", "disposition"]);
@@ -209,7 +219,12 @@ async function main() {
       findCol(header, ["admission date", "admit date"]),
     ].filter((c) => c >= 0).filter((v, i, a) => a.indexOf(v) === i);
     if (!dateCols.length || nameCol < 0 || (phoneCol < 0 && dobCol < 0)) {
-      throw new Error(`Admission Board header not recognized (header row ${hIdx + 1}: ${header.join(" | ").slice(0, 200)}). Need an admission-date column, a name column and a phone or DOB column.`);
+      const missing = [
+        !dateCols.length && "an admission-date column (Scheduled/Projected Admission Date)",
+        nameCol < 0 && "a name column",
+        phoneCol < 0 && dobCol < 0 && "a phone or DOB column",
+      ].filter(Boolean).join(", ");
+      throw new Error(`Admission Board header not recognized on tab "${tab}" (header row ${hIdx + 1}: ${header.join(" | ").slice(0, 200)}). Missing ${missing}. The client renamed or cleared a heading in their own sheet — the account manager asks them to restore it; there is nothing to change here.`);
     }
     console.log(`Columns → date:${dateCols.map((c) => header[c]).join(" / ")} · name:${header[nameCol]} · phone:${phoneCol >= 0 ? header[phoneCol] : "-"} · dob:${dobCol >= 0 ? header[dobCol] : "-"} · status:${statusCol >= 0 ? header[statusCol] : "(none)"}`);
 

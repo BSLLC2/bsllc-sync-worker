@@ -64,8 +64,35 @@ export function cronMaxGapHours(cron: string, from = new Date(Date.UTC(2026, 0, 
   return prev == null ? null : Math.max(maxGap, 60_000) / 3_600_000;
 }
 
+/**
+ * The shortest window a GitHub-Actions-scheduled job can be judged against,
+ * whatever its cron says.
+ *
+ * GitHub does not deliver this repo's schedules on the cron it is given.
+ * Sampled from the Actions API on 2026-09-14, the last 200 SCHEDULED runs of
+ * each of send-sms (`* * * * *`), send-push (`*\/5`), snapshot-plans
+ * (`*\/15`) and monitor-freshness (`0 * * * *`) all landed the same way: about
+ * 9-10 firings a day, arriving in one clump each time, median gap 2.0-2.2h,
+ * p90 ~5h, worst gap 11.6-12.6h over three weeks. Every one of those runs
+ * succeeded. GitHub's own docs say a schedule may be delayed or dropped when
+ * runners are busy, and for a repo with this many scheduled workflows that is
+ * the steady state, not an incident.
+ *
+ * So an SLA of 1.5x a one-minute cron is a window that is missed nearly all
+ * day, every day: on 2026-09-14 it put six healthy drains on Admin -> Data
+ * health as "not flowing" at once. A floor of 14h sits above the worst gap
+ * actually observed and still catches a job that has genuinely stopped inside
+ * the same working day. It is a FLOOR — a daily or weekly job keeps its own,
+ * longer cadence — and it is deliberately a measured number with its
+ * measurement written down, not a guess someone tuned until Slack went quiet.
+ *
+ * The dashboard mirrors this constant in client/src/lib/data-health.ts, so a
+ * worker that has not redeployed yet and the page cannot disagree.
+ */
+export const GITHUB_SCHEDULE_FLOOR_H = 14;
+
 export function slaFromInterval(intervalHours: number): number {
-  return Math.max(intervalHours * 1.5, intervalHours + 2);
+  return Math.max(intervalHours * 1.5, intervalHours + 2, GITHUB_SCHEDULE_FLOOR_H);
 }
 
 /** Heartbeats written by a script itself rather than by a `--job=` step, so

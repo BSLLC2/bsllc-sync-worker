@@ -2,7 +2,7 @@
 import "dotenv/config";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { deriveJobCadences, cronMaxGapHours, slaFromInterval } from "./job-cadence.js";
+import { deriveJobCadences, cronMaxGapHours, slaFromInterval, GITHUB_SCHEDULE_FLOOR_H } from "./job-cadence.js";
 import {
   ADS_JOBS, ADS_JOB_NAMES, adsJobFindings, formatJobSummary, parseSummaryCounts,
   type HeartbeatRow,
@@ -82,6 +82,17 @@ if (WF_DIR) {
   const apply = cad.get("ads_apply_approved")?.slaHours ?? 0;
   ok("the weekly job and the hourly job did NOT collapse to one number", findings > apply * 10, `${Math.round(findings)}h vs ${Math.round(apply)}h`);
   ok("the fortnightly brief cron parses at all", cronMaxGapHours("10 7 1,15 * *") === 17 * 24);
+
+  // GitHub does not deliver this repo's schedules on the cron it is given:
+  // sampled 2026-09-14, the last 200 scheduled runs of every sub-hourly and
+  // hourly workflow here came ~9-10 times a day in clumps, median gap ~2.1h,
+  // worst 12.6h, all succeeding. Judged against a cron-derived 2-3h window,
+  // six healthy drains read as "not flowing" on one screen. The floor is what
+  // stops that; these two lines are what stop someone removing it as noise.
+  ok(`a per-minute cron is judged against ${GITHUB_SCHEDULE_FLOOR_H}h, not 2h — GitHub fires this repo ~9x/day`,
+    slaFromInterval(1 / 60) === GITHUB_SCHEDULE_FLOOR_H, `${slaFromInterval(1 / 60)}h`);
+  ok("the floor is a floor: a weekly job keeps its own, longer window",
+    slaFromInterval(168) === 252, `${slaFromInterval(168)}h`);
 }
 
 // ── 3. Did not run vs ran and found nothing ─────────────────────────────────
