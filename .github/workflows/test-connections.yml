@@ -1,0 +1,116 @@
+name: Test connections (on-demand)
+
+# Fired by the dashboard's "Test connection" button (POST
+# /api/clients/:id/connection-test → GitHub's workflow-dispatch API, ref=main).
+#
+# The dashboard opens one `connector_tests` row per source with
+# outcome='running' and hands us their ids. This job asks Google for the
+# SMALLEST possible real read of that client's account and replaces each row
+# with what it found: pass (we read real data), no_data (we got in and the
+# account is empty — access is FINE) or fail (with the API's error text stored
+# verbatim, for the dashboard to translate into a fix at read time).
+#
+# The rule that governs the whole design: NO ROW MAY BE LEFT 'running'. A row
+# stuck open shows a client page a test we never finished, which is the exact
+# dishonesty this feature exists to remove. Three nets, in order:
+#   1. the script catches per-source failures and writes a terminal row;
+#   2. its own finally block closes anything still open in-process;
+#   3. the "Close any row this run left open" step below runs on always(), for
+#      the kills the process never sees — an OOM, a cancellation, a step
+#      timeout.
+# The one gap left is an install that never completes, in which case nothing
+# can reach the database at all; the dashboard already reports that honestly as
+# "the test never came back" once the row ages past its timeout.
+#
+# Secrets used (all already in use by the importers — this job adds none):
+#   GOOGLE_SERVICE_ACCOUNT_JSON  Search Console + GA4 reads
+#   GOOGLE_ADS_CLIENT_ID / _CLIENT_SECRET / _DEVELOPER_TOKEN / _REFRESH_TOKEN
+#   DATABASE_URL                 to write the connector_tests rows
+# No dashboard checkout: this job writes its own rows directly and never calls
+# `npm run sync` — a probe is not a sync, and it must never touch
+# metric_snapshots (see the connector_tests comment in the dashboard's schema).
+
+on:
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id)"
+        required: true
+      sources:
+        description: "Comma-separated connectors to probe: gsc,ga4,google_ads"
+        required: true
+      request_ids:
+        description: "Comma-separated connector_tests row ids opened by the dashboard"
+        required: true
+      dry_run:
+        description: "Probe for real but write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  # Per client, and NEVER cancel a run in flight: a cancelled run is the one
+  # way a row gets stranded that the script itself cannot catch.
+  group: test-connections-${{ inputs.client_id }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Comfortably under the dashboard's CONNECTION_TEST_TIMEOUT_MINUTES (15),
+    # so a hung run closes its own rows before the UI starts calling them
+    # timed out.
+    timeout-minutes: 10
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        id: install
+        run: npm ci
+
+      - name: Probe the connections
+        id: probe
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          # MCC id (BS LLC · Manager) — not a secret, so it lives here in the
+          # open, same as sync-client-now.yml.
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Dispatch inputs reach the shell as environment variables, never
+          # interpolated into the command line: ${{ }} substitution happens
+          # before bash parses anything, so an input containing shell syntax
+          # would otherwise run as shell.
+          CLIENT_ID: ${{ inputs.client_id }}
+          SOURCES: ${{ inputs.sources }}
+          REQUEST_IDS: ${{ inputs.request_ids }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            npm run test-connections -- --client="$CLIENT_ID" --sources="$SOURCES" --request-ids="$REQUEST_IDS" --dry-run
+          else
+            npm run test-connections -- --client="$CLIENT_ID" --sources="$SOURCES" --request-ids="$REQUEST_IDS"
+          fi
+
+      # The net for everything the script cannot catch from inside itself.
+      # Idempotent by construction: it only touches rows still 'running', so a
+      # successful run above leaves it with nothing to do, and it can never
+      # overwrite a real answer with "the job died".
+      - name: Close any row this run left open
+        if: always() && inputs.dry_run != 'true' && steps.install.outcome == 'success'
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUEST_IDS: ${{ inputs.request_ids }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          npm run test-connections -- --client="$CLIENT_ID" --request-ids="$REQUEST_IDS" --finalize-only \
+            --reason="the test-connections run finished as '$JOB_STATUS' without recording a result for this connector. This says nothing about the client's access - the probe did not complete."

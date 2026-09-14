@@ -164,7 +164,9 @@
     "check-brand-awareness-pmax-assets": "tsx src/check-brand-awareness-pmax-assets.ts",
     "audit-live-campaigns-only": "tsx src/audit-live-campaigns-only.ts",
     "och-revenue-audit": "tsx src/och-revenue-audit.ts",
-    "verify-ads-operability": "tsx src/verify-ads-operability.ts"
+    "verify-ads-operability": "tsx src/verify-ads-operability.ts",
+    "test-connections": "tsx src/test-connections.ts",
+    "verify-connection-probe": "tsx src/verify-connection-probe.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
