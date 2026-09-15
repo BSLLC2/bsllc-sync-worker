@@ -1,0 +1,21 @@
+name: Debug — OCH blank-name duplicate admissions
+
+# Read-only. Counts and lists the nameless admissions rows written while OCH's
+# Admission Board heading was truncated ("Name" → "h"). Deletes nothing.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run debug-och-duplicate-admissions

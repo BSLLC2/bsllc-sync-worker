@@ -4,6 +4,8 @@ import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry, type AdmissionRecord } from "./emit.js";
 import { phone10, lastDobKey, lastNameOf, parseSheetDate, ym as ymOf, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
+import { findHeaderRow, resolveAdmissionColumns, describeColumns, type AdmissionColumns } from "./och-sheet-columns.js";
+import { provenanceOf, backfillExclusionLine } from "./lead-provenance.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
  *  header — the source of truth. Matched to the client by slugified name. */
@@ -53,18 +55,30 @@ function inquiryExplains(list: WebInquiryMatch[] | undefined, admitted: Date): W
  *  in the sheet's free-text Referent column: a patient who really came from
  *  a tracked ad/form/call still counts even if intake logged the CLINICAL
  *  referral partner that processed their case instead of how they first
- *  found OCH. */
+ *  found OCH.
+ *
+ *  LIVE CAPTURES ONLY. A row a person typed in from a client's own export
+ *  (lead-provenance.ts) is skipped: it proves an enquiry happened, never which
+ *  channel produced it, and this index is the thing that turns a channel into
+ *  attributed revenue. */
 async function loadWebInquiryMatchIndex(databaseUrl: string, clientSlug: string): Promise<WebInquiryIndex> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null; submitted_at: Date }>(
-      `SELECT phone, dob, last_name, gclid, utm_source, utm_medium, submitted_at FROM web_inquiries WHERE client_slug = $1`,
+    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null; raw_json: string | null; submitted_at: Date }>(
+      `SELECT phone, dob, last_name, gclid, utm_source, utm_medium, raw_json, submitted_at FROM web_inquiries WHERE client_slug = $1`,
       [clientSlug],
     );
     const byPhone = new Map<string, WebInquiryMatch[]>();
     const byLastDob = new Map<string, WebInquiryMatch[]>();
+    let backfilled = 0;
     for (const r of rows) {
+      // A row somebody typed in from a client's export is a real lead and no
+      // evidence at all about a channel: the export carried no click and no
+      // tracking. Excluded BY NAME rather than by its UTM columns being empty,
+      // because "the columns look blank" is exactly what stopped being true
+      // when an earlier backfill wrote a plausible pair into them.
+      if (provenanceOf(r.raw_json) === "backfilled") { backfilled++; continue; }
       const hasGclid = !!(r.gclid && r.gclid.trim());
       const utmWords = `${r.utm_source ?? ""} ${r.utm_medium ?? ""}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
       const utmAttributable = utmWords.some((w) => ATTRIBUTABLE_UTM_WORDS.has(w));
@@ -75,6 +89,7 @@ async function loadWebInquiryMatchIndex(databaseUrl: string, clientSlug: string)
       const ld = lastDobKey(r.last_name, r.dob);
       if (ld) byLastDob.set(ld, [...(byLastDob.get(ld) ?? []), match]);
     }
+    if (backfilled) console.log(`  ${backfillExclusionLine(backfilled)}`);
     return { byPhone, byLastDob };
   } finally {
     await client.end();
@@ -184,30 +199,6 @@ async function sheetsGet(token: string, path: string): Promise<any> {
   return res.json();
 }
 
-/** Find the first column index whose header matches any of the needles. */
-function findCol(header: string[], needles: string[]): number {
-  const norm = header.map((h) => (h ?? "").toString().trim().toLowerCase());
-  for (let i = 0; i < norm.length; i++) if (needles.some((n) => norm[i]!.includes(n))) return i;
-  return -1;
-}
-
-/** All column indexes matching any needle, left-to-right (for date fallbacks). */
-function findCols(header: string[], needles: string[]): number[] {
-  const norm = header.map((h) => (h ?? "").toString().trim().toLowerCase());
-  const out: number[] = [];
-  for (let i = 0; i < norm.length; i++) if (needles.some((n) => norm[i]!.includes(n))) out.push(i);
-  return out;
-}
-
-/** Pick the header row: the first row (within the first few) with ≥3 non-empty cells. */
-function findHeaderRow(rows: string[][]): number {
-  for (let i = 0; i < Math.min(rows.length, 8); i++) {
-    const filled = (rows[i] ?? []).filter((c) => c && c.toString().trim()).length;
-    if (filled >= 3) return i;
-  }
-  return 0;
-}
-
 /** Statuses isAdmittedStatus couldn't classify this run — printed once at the end. */
 const unrecognizedStatuses = new Set<string>();
 function isAdmitted(statusCell: string | undefined, hasStatusCol: boolean): boolean {
@@ -228,6 +219,41 @@ function monthBounds(ym: string): { start: string; end: string } {
   const start = `${ym}-01`;
   const last = new Date(Date.UTC(y!, m!, 0)).getUTCDate();
   return { start, end: `${ym}-${String(last).padStart(2, "0")}` };
+}
+
+/**
+ * A header we cannot read is a FAILED run, not a quiet one. Report it the way
+ * every other importer reports a failure — one `data_state: "error"` entry with
+ * the message on it — so the connector reads as failing in Admin → Connectors,
+ * the morning audit files it, and the freshness monitor notices. Exiting 0 with
+ * a console line is what let six days of nameless duplicate rows accumulate.
+ *
+ * No metrics ride along: the entry lands as a `_sync.status` row (see the
+ * dashboard's sync.ts), so nothing is overwritten with a made-up number, and
+ * no `external_id` is sent so no connector mapping is touched. A --dry-run
+ * still writes nothing but still exits non-zero.
+ */
+function reportHeaderFailure(args: Args, message: string): never {
+  console.error(`\n✗ ${message}`);
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  const dashboardDir = process.env.DASHBOARD_DIR?.trim();
+  if (!databaseUrl || !dashboardDir) {
+    console.error("Missing DATABASE_URL / DASHBOARD_DIR — could not record the failure on the dashboard.");
+    process.exit(1);
+  }
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const { start, end } = monthBounds(ym);
+  const code = runDashboardSync({ databaseUrl, dashboardDir }, [{
+    client_id: args.client,
+    source: "manual",
+    period_start: start,
+    period_end: end,
+    data_state: "error",
+    error_message: message.slice(0, 300),
+    metrics: {},
+  }], { dryRun: args.dryRun });
+  process.exit(code === 0 ? 1 : code);
 }
 
 async function main() {
@@ -267,22 +293,18 @@ async function main() {
 
   const hIdx = findHeaderRow(rows);
   const header = rows[hIdx]!;
-  // Date: prefer the actual admission date, fall back to projected, then the
-  // inquiry date — resolved per-row (some rows only fill one of them).
-  const dateCols = [
-    ...findCols(header, ["scheduled admission"]),
-    ...findCols(header, ["projected admission", "admission date"]),
-    ...findCols(header, ["admit date"]),
-    ...findCols(header, ["inquiry received", "inquiry"]),
-    ...findCols(header, ["intake"]),
-    ...findCols(header, ["date"]),
-  ].filter((v, i, a) => a.indexOf(v) === i);
-  const refCol = findCol(header, ["referent", "referral", "source", "origin", "channel", "how did", "lead"]);
-  const statusCol = findCol(header, ["status", "disposition", "outcome", "admitted"]);
-  const hasStatusCol = statusCol >= 0 && !dateCols.includes(statusCol);
-  const phoneCol = findCol(header, ["phone"]);
-  const dobCol = findCol(header, ["dob", "birth"]);
-  const nameCol = findCol(header, ["name"]);
+  // Every column this run needs, or a stop. A heading we cannot recognise is
+  // the client editing their own sheet, and there is no safe way to carry on:
+  // a -1 name column wrote an empty name onto every admission for six days and
+  // exited 0 (see och-sheet-columns.ts). The failure is reported to the
+  // dashboard as a failing connector, not just to a log nobody reads.
+  let cols: AdmissionColumns;
+  try {
+    cols = resolveAdmissionColumns(header, { tab, headerRowIndex: hIdx });
+  } catch (e) {
+    return reportHeaderFailure(args, e instanceof Error ? e.message : String(e));
+  }
+  const { dateCols, refCol, statusCol, hasStatusCol, phoneCol, dobCol, nameCol } = cols;
 
   // Cross-check against web_inquiries (real form/gclid captures) so a row can
   // count as attributable even when intake typed the CLINICAL referral
@@ -295,10 +317,7 @@ async function main() {
     : { byPhone: new Map(), byLastDob: new Map() };
   console.log(`Web-inquiry cross-check index: ${webInquiryIndex.byPhone.size} phone(s), ${webInquiryIndex.byLastDob.size} lastname|dob key(s).`);
 
-  console.log(
-    `Columns → date:${dateCols.map((c) => header[c]).join(" / ") || "?"} · referent:${refCol >= 0 ? header[refCol] : "?"} · status:${hasStatusCol ? header[statusCol] : "(none — counting all rows)"}`,
-  );
-  if (!dateCols.length) throw new Error("Could not find a date column in the header row.");
+  console.log(`Columns → ${describeColumns(header, cols)}`);
 
   // Data-quality guard: ignore rows dated in the future (e.g. a "2027" typo for
   // 2026). A future month would otherwise become the "latest" period and skew
@@ -323,6 +342,13 @@ async function main() {
   // doesn't recognize). See DEBUG_MONTH below.
   const referentTallyByMonth = new Map<string, Map<string, number>>();
   let skippedFuture = 0;
+  // Admitted rows the board gives no ADMISSION date for. They used to fall
+  // back to Inquiry Received, which dated the admission to the month the
+  // patient first rang — moving revenue between months without changing the
+  // total, which is the kind of wrong nothing ever catches. An admission we
+  // cannot date belongs to no month; it is counted here and reported, and the
+  // fix is OCH filling the date in, not this importer inventing one.
+  let admittedNoDate = 0;
   let attributedByReferent = 0;
   let attributedByWebInquiryOnly = 0;
   for (let r = hIdx + 1; r < rows.length; r++) {
@@ -334,7 +360,7 @@ async function main() {
       admittedOn = parseSheetDate(row[dc]);
       if (admittedOn) break;
     }
-    if (!admittedOn) continue;
+    if (!admittedOn) { admittedNoDate++; continue; }
     const ym = ymOf(admittedOn);
     // A real future date (a "2027" typo, say) never belongs to any bucket.
     // The CURRENT month is different: it's incomplete, not invalid, so it's
@@ -393,6 +419,12 @@ async function main() {
   const months = [...byMonth.keys()].sort();
   if (!months.length) throw new Error("Parsed 0 admissions — check the date/status columns.");
   if (skippedFuture) console.log(`Skipped ${skippedFuture} future-dated row(s) (likely a year typo).`);
+  if (admittedNoDate) {
+    console.log(
+      `${admittedNoDate} admitted row(s) have no Scheduled/Projected admission date and are in no month's count. ` +
+      `Ask OCH to fill the admission date in — dating them from Inquiry Received would move their revenue into the month they enquired.`,
+    );
+  }
   reportUnrecognizedStatuses(unrecognizedStatuses);
   console.log(`Attributable via Referent text: ${attributedByReferent} · via web_inquiries phone/DOB match only (Referent said no/blank): ${attributedByWebInquiryOnly}`);
 

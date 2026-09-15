@@ -4,25 +4,36 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { phone10 } from "./lead-keys.js";
 import { OCH_FORM_LOG, OCH_FORM_LOG_EXPORTED_AT } from "./och-form-log-2026-08.js";
+import { BACKFILL_SOURCES } from "./lead-provenance.js";
 
 /**
  * ONE-OFF. Lands OCH's hand-exported form log (Jul 1 – Aug 24 2026) in
  * web_inquiries, so the leads the site received through its six unwired forms
- * exist on our side: they show on OCH's board, count in the setup checklist,
- * and — because they carry utm_source=website / utm_medium=form — let the
- * admissions import credit an admission that came through the website even
- * when intake typed the clinical partner into Referent.
+ * exist on our side: they show on OCH's board and count in the setup checklist.
+ * What they cannot do is credit a channel — see the tracking-params paragraph
+ * below.
  *
  * Idempotent: a person whose phone already has a web_inquiries row within 7
  * days of the logged date is skipped. Rows are tagged in raw_json
  * (source: elementor-log-export) so they can be told apart or removed with one
- * query. Tracking params (gclid/UTMs) are unknown for these rows and left
- * blank; the form name is what the export tagged.
+ * query — and that tag is READ downstream now (see lead-provenance.ts), which
+ * is what keeps a typed-in row out of anything that claims a channel.
+ *
+ * Tracking params (gclid/UTMs) are unknown for these rows and left blank. They
+ * really are blank now: this used to write utm_source='website',
+ * utm_medium='form' two lines below the comment saying it did not, and both of
+ * those words are in import-och's ATTRIBUTABLE_UTM_WORDS — so 37 hand-typed
+ * rows sat in the attribution index asserting a marketing channel nobody ever
+ * observed. The export contains a name, a phone, a date and a form name. That
+ * is what gets written.
  *
  *   npm run oneoff-backfill-och-form-log -- --dry-run
  *   npm run oneoff-backfill-och-form-log
  */
 const CLIENT = "ohio-community-health-och";
+/** The one marker every row this script writes carries, and the one
+ *  lead-provenance.ts reads back. Never a literal in two places. */
+const BACKFILL_SOURCE = BACKFILL_SOURCES[0];
 const dryRun = process.argv.includes("--dry-run");
 function env(n: string): string { const v = process.env[n]; if (!v?.trim()) throw new Error(`Missing ${n}`); return v.trim(); }
 
@@ -57,7 +68,7 @@ async function main() {
     for (const s of OCH_FORM_LOG) {
       const p = phone10(s.phone);
       if (!p || !s.email) continue;
-      const row = existing.find((r) => phone10(r.phone) === p && !r.email && r.raw_json?.includes('"elementor-log-export"'));
+      const row = existing.find((r) => phone10(r.phone) === p && !r.email && r.raw_json?.includes(BACKFILL_SOURCE));
       if (!row) continue;
       if (!dryRun) await c.query(`UPDATE web_inquiries SET email = $1 WHERE id = $2 AND email IS NULL`, [s.email, row.id]);
       enriched++;
@@ -81,9 +92,9 @@ async function main() {
         await c.query(
           `INSERT INTO web_inquiries (id, client_slug, first_name, last_name, email, phone, dob, gclid,
              utm_source, utm_medium, utm_campaign, utm_content, utm_term, form_name, page_url, raw_json, submitted_at)
-           VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL,'website','form',NULL,NULL,NULL,$7,NULL,$8,$9)`,
+           VALUES ($1,$2,$3,$4,$5,$6,NULL,NULL,NULL,NULL,NULL,NULL,NULL,$7,NULL,$8,$9)`,
           [randomUUID(), CLIENT, firstName, lastName, s.email || null, s.phone || null, s.via,
-           JSON.stringify({ source: "elementor-log-export", exportedAt: OCH_FORM_LOG_EXPORTED_AT, via: s.via }), at],
+           JSON.stringify({ source: BACKFILL_SOURCE, provenance: "backfilled", exportedAt: OCH_FORM_LOG_EXPORTED_AT, via: s.via }), at],
         );
       }
       if (p) seen.set(p, [...(seen.get(p) ?? []), at]);
