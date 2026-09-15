@@ -4,6 +4,7 @@ import pg from "pg";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { deriveJobCadences, type JobCadence } from "./job-cadence.js";
+import { detectFeedStoppage, stoppageLine, stoppageSignature, type FeedStoppage, type LeadEvent } from "./lead-cadence.js";
 
 /**
  * Watches data freshness and Slack-alerts when a pipeline stops flowing. Reads
@@ -159,9 +160,18 @@ async function main() {
       }
     } catch { /* table not present yet */ }
     const clientNames = new Map<string, string>();
+    // Slugs of the clients we still run. The cadence alarm below is sized to
+    // repeat until it clears, so a churned client whose feed stopped when the
+    // contract did would nag forever; the fixed-window checks age out on their
+    // own and do not need this. Empty = the read failed, so nothing is filtered.
+    const liveSlugs = new Set<string>();
     try {
       const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      for (const r of (await c.query<{ name: string }>(`SELECT name FROM clients`)).rows) clientNames.set(slugify(r.name), r.name);
+      for (const r of (await c.query<{ name: string; status: string | null; is_internal: boolean | null }>(`SELECT name, status, is_internal FROM clients`)).rows) {
+        const slug = slugify(r.name);
+        clientNames.set(slug, r.name);
+        if (!r.is_internal && (r.status === "launch" || r.status === "active")) liveSlugs.add(slug);
+      }
     } catch { /* ignore */ }
     const clientLabel = (slug: string) => clientNames.get(slug) ?? slug;
 
@@ -220,6 +230,40 @@ async function main() {
         if (upAgeH > UPLOAD_SLA_H) noUploads.push({ slug: r.client_slug, gclid30, lastUpload: lu });
       }
     }
+    // A busy feed that STOPS is invisible to the windows above: OCH took 114
+    // leads in ten days and then nothing for five, and 30/45/90 days all read
+    // healthy the whole time. lead-cadence.ts sizes the expectation to each
+    // client's own rate instead, per feed, on a business-day clock.
+    const stoppages: { slug: string; report: FeedStoppage }[] = [];
+    try {
+      const events = new Map<string, LeadEvent[]>();
+      for (const r of (await c.query<{ client_slug: string; form_name: string | null; submitted_at: Date }>(
+        `SELECT client_slug, form_name, submitted_at FROM web_inquiries
+          WHERE submitted_at > now() - interval '70 days'
+            AND (email IS NULL OR (email NOT ILIKE '%@bsllc.biz' AND email NOT IN ('sebastienhue@gmail.com', 'test-inquiry@bsllc.biz')))
+          ORDER BY submitted_at`,
+      )).rows) {
+        const list = events.get(r.client_slug) ?? [];
+        list.push({ at: new Date(r.submitted_at), formName: r.form_name });
+        events.set(r.client_slug, list);
+      }
+      for (const [slug, history] of events) {
+        if (liveSlugs.size && !liveSlugs.has(slug)) continue;
+        const report = detectFeedStoppage(history, new Date(now));
+        if (report) stoppages.push({ slug, report });
+      }
+      stoppages.sort((a, b) => a.slug.localeCompare(b.slug));
+    } catch { /* table not present yet */ }
+
+    // One client, one line. Where the cadence alarm has every feed, it says
+    // everything the fixed-window line would and says it with a rate, so the
+    // older line stands down for that client rather than repeating it.
+    const totallyStopped = new Set(stoppages.filter((x) => x.report.total).map((x) => x.slug));
+    for (let i = noLeads.length - 1; i >= 0; i--) if (totallyStopped.has(noLeads[i]!.slug)) noLeads.splice(i, 1);
+    if (stoppages.length) {
+      console.log("Lead feed stopped (rate derived from the client's own history):");
+      for (const x of stoppages) console.log(`  ${stoppageLine(clientLabel(x.slug), x.report)}`);
+    }
     if (noLeads.length) console.log(`No new website leads: ${noLeads.map((l) => `${clientLabel(l.slug)} (${Math.round(l.ageH / 24)}d)`).join(", ")}`);
     if (trafficNoLeads.length) console.log(`Site traffic but no website leads captured (30d): ${trafficNoLeads.map(clientLabel).join(", ")}`);
     if (noUploads.length) console.log(`Ad-click leads without offline-conversion uploads: ${noUploads.map((u) => `${clientLabel(u.slug)} (${u.gclid30} gclid leads/30d, last upload ${u.lastUpload ? `${Math.round((now - new Date(u.lastUpload).getTime()) / 86_400_000)}d ago` : "never"})`).join(", ")}`);
@@ -240,6 +284,7 @@ async function main() {
       ...erroring.map((e) => `E:${e.src}`),
       ...coiAlerts.map((r) => `C:${r.name}:${r.days < 0 ? "exp" : r.days <= 7 ? "7" : "30"}`),
       ...noLeads.map((l) => `L:${l.slug}`),
+      ...stoppages.map((x) => stoppageSignature(x.slug, x.report)),
       ...noUploads.map((u) => `U:${u.slug}`),
       ...trafficNoLeads.map((s) => `W:${s}`),
     ].sort().join(",");
@@ -255,7 +300,7 @@ async function main() {
     const REMIND_AFTER_H = 24;
     const prevAgeH = prevRow?.ran_at ? (now - new Date(prevRow.ran_at).getTime()) / 3_600_000 : Infinity;
     const unchanged = signature === prev;
-    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0 || noLeads.length > 0 || noUploads.length > 0 || trafficNoLeads.length > 0;
+    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0 || noLeads.length > 0 || noUploads.length > 0 || trafficNoLeads.length > 0 || stoppages.length > 0;
     const dueForReminder = unchanged && stillDown && prevAgeH >= REMIND_AFTER_H;
     if (unchanged && !dueForReminder) { console.log("No change — no alert."); return; }
 
@@ -264,8 +309,10 @@ async function main() {
       : "";
 
     let text: string | null = null;
-    if (down.length || erroring.length || coiAlerts.length || noLeads.length || noUploads.length || trafficNoLeads.length) {
+    if (down.length || erroring.length || coiAlerts.length || noLeads.length || noUploads.length || trafficNoLeads.length || stoppages.length) {
       const parts: string[] = [];
+      // First, because a feed that was producing and stopped is losing leads now.
+      for (const x of stoppages) parts.push(`:rotating_light: *Lead feed stopped:* ${stoppageLine(clientLabel(x.slug), x.report)}`);
       if (down.length) parts.push(`:red_circle: *Not flowing:* ${down.map(label).join(", ")}`);
       if (erroring.length) parts.push(`:large_orange_circle: *Account errors:* ${erroring.map((e) => `${label(e.src)} (${e.n}/${e.m})`).join(", ")}`);
       if (noLeads.length) parts.push(`:mailbox_with_no_mail: *No new website leads:* ${noLeads.map((l) => `${clientLabel(l.slug)} (last ${Math.round(l.ageH / 24)}d ago — check every form on the site still posts to the webhook)`).join(", ")}`);
