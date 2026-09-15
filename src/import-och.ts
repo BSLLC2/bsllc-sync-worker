@@ -4,8 +4,9 @@ import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry, type AdmissionRecord } from "./emit.js";
 import { phone10, lastDobKey, lastNameOf, parseSheetDate, ym as ymOf, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
-import { findHeaderRow, resolveAdmissionColumns, describeColumns, type AdmissionColumns } from "./och-sheet-columns.js";
+import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote, type AdmissionColumns } from "./och-sheet-columns.js";
 import { provenanceOf, backfillExclusionLine } from "./lead-provenance.js";
+import { isAttributable, referentVerdict } from "./och-attribution.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
  *  header — the source of truth. Matched to the client by slugified name. */
@@ -24,7 +25,7 @@ async function customerValueFromDb(databaseUrl: string, slug: string): Promise<n
   }
 }
 
-// Same "is this a marketing channel" word-set as isAttributable below, applied
+// Same "is this a marketing channel" word-set as isAttributable (och-attribution.ts), applied
 // to a web_inquiries row's own utm_source/utm_medium instead of the sheet's
 // hand-typed Referent -- a gclid alone already implies paid search, so any
 // gclid counts regardless of utm text.
@@ -128,16 +129,9 @@ async function loadWebInquiryMatchIndex(databaseUrl: string, clientSlug: string)
 const DEFAULT_SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
 const DEFAULT_CLIENT = "ohio-community-health-och";
 
-// Referent/origin values we count as driven by our marketing. Matched on WHOLE
-// WORDS (not loose substrings — otherwise "Crossroads" trips on "ads" and a
-// referral center gets miscredited to us). Covers search, web, and paid social.
-// Everything else (professional referrals, past clients, word of mouth, walk-in,
-// insurance lists, …) is a real admission but not attributable to our efforts.
-const ATTRIBUTABLE_WORDS = new Set([
-  "google", "adwords", "ads", "ppc", "sem", "seo", "organic", "search",
-  "web", "webform", "website", "online", "form", "landing",
-  "facebook", "fb", "meta", "instagram", "ig", "social", "paid",
-]);
+// The Referent rule — which hand-typed origin values count as ours — lives in
+// och-attribution.ts, so import-och and debug-och-month can never disagree
+// about what "ours" means. See verify-och-attribution.ts.
 
 interface Args {
   sheetId: string;
@@ -206,13 +200,6 @@ function isAdmitted(statusCell: string | undefined, hasStatusCol: boolean): bool
   return isAdmittedStatus(statusCell, unrecognizedStatuses); // shared with import-offline-conversions
 }
 
-function isAttributable(referent: string | undefined): boolean {
-  const s = (referent ?? "").toString().trim().toLowerCase();
-  if (!s) return false;
-  if (s.includes("web form") || s.includes("paid search")) return true;
-  const tokens = s.split(/[^a-z0-9]+/).filter(Boolean);
-  return tokens.some((t) => ATTRIBUTABLE_WORDS.has(t));
-}
 
 function monthBounds(ym: string): { start: string; end: string } {
   const [y, m] = ym.split("-").map(Number);
@@ -293,18 +280,23 @@ async function main() {
 
   const hIdx = findHeaderRow(rows);
   const header = rows[hIdx]!;
-  // Every column this run needs, or a stop. A heading we cannot recognise is
-  // the client editing their own sheet, and there is no safe way to carry on:
-  // a -1 name column wrote an empty name onto every admission for six days and
-  // exited 0 (see och-sheet-columns.ts). The failure is reported to the
-  // dashboard as a failing connector, not just to a log nobody reads.
+  // Every column this run needs, or a stop. The columns are resolved from the
+  // headings AND from the data under them (och-sheet-columns.ts): the sheet is
+  // the client's, they rename their own headings, and an importer that stops
+  // dead on a retitled column is our fragility, not their mistake. What still
+  // stops the run is a board no signal can read — a -1 name column wrote an
+  // empty name onto every admission for six days and exited 0. The Referent
+  // column is required here (it is not for the conversions importer): without
+  // it every admission silently reads as not ours, which is a wrong number
+  // rather than a missing one. The failure is reported to the dashboard as a
+  // failing connector, not just to a log nobody reads.
   let cols: AdmissionColumns;
   try {
-    cols = resolveAdmissionColumns(header, { tab, headerRowIndex: hIdx });
+    cols = resolveAdmissionColumns(rows, { tab, headerRowIndex: hIdx }, { require: ["name", "date", "contact", "referent"] });
   } catch (e) {
     return reportHeaderFailure(args, e instanceof Error ? e.message : String(e));
   }
-  const { dateCols, refCol, statusCol, hasStatusCol, phoneCol, dobCol, nameCol } = cols;
+  const { dateCols, inquiryCols, refCol, statusCol, hasStatusCol, phoneCol, dobCol, nameCol } = cols;
 
   // Cross-check against web_inquiries (real form/gclid captures) so a row can
   // count as attributable even when intake typed the CLINICAL referral
@@ -318,6 +310,8 @@ async function main() {
   console.log(`Web-inquiry cross-check index: ${webInquiryIndex.byPhone.size} phone(s), ${webInquiryIndex.byLastDob.size} lastname|dob key(s).`);
 
   console.log(`Columns → ${describeColumns(header, cols)}`);
+  const resolvedNote = contentResolvedNote(cols);
+  if (resolvedNote) console.log(resolvedNote);
 
   // Data-quality guard: ignore rows dated in the future (e.g. a "2027" typo for
   // 2026). A future month would otherwise become the "latest" period and skew
@@ -336,11 +330,6 @@ async function main() {
   // includes a partial month.
   const currentMonthBucket = { total: 0, attributable: 0 };
   const referentTally = new Map<string, number>();
-  // Per-month breakdown too -- an all-months tally can hide a month where
-  // attribution silently collapsed to 0 even though every other month has
-  // some (e.g. a new Referent label started appearing that ATTRIBUTABLE_WORDS
-  // doesn't recognize). See DEBUG_MONTH below.
-  const referentTallyByMonth = new Map<string, Map<string, number>>();
   let skippedFuture = 0;
   // Admitted rows the board gives no ADMISSION date for. They used to fall
   // back to Inquiry Received, which dated the admission to the month the
@@ -351,10 +340,27 @@ async function main() {
   let admittedNoDate = 0;
   let attributedByReferent = 0;
   let attributedByWebInquiryOnly = 0;
+  // --debug-month=YYYY-MM prints that month row by row at the end of the run:
+  // what intake actually typed in Referent, verbatim, rather than a tally of
+  // what our word list matched. Redacted — no name, no DOB, phone as the last
+  // four digits only — because this goes in a run log a person reads.
+  const debugMonth = process.argv.find((a) => a.startsWith("--debug-month="))?.slice("--debug-month=".length);
+  interface DebugRow { admitted: string; inquiry: string; status: string; phone: string; referent: string; ours: boolean; lead: string }
+  const debugRows: DebugRow[] = [];
+  let debugNotAdmitted = 0;
+  const last4 = (v: unknown) => { const d = String(v ?? "").replace(/[^0-9]/g, ""); return d ? `…${d.slice(-4)}` : "—"; };
+  const cellOf = (row: string[], i: number) => (i >= 0 ? (row[i] ?? "").toString().replace(/\s+/g, " ").trim() : "");
   for (let r = hIdx + 1; r < rows.length; r++) {
     const row = rows[r] ?? [];
     if (!row.some((c) => c && c.toString().trim())) continue; // blank row
-    if (!isAdmitted(row[statusCol], hasStatusCol)) continue;
+    if (!isAdmitted(row[statusCol], hasStatusCol)) {
+      if (debugMonth) {
+        let d: Date | null = null;
+        for (const dc of dateCols) { d = parseSheetDate(row[dc]); if (d) break; }
+        if (d && ymOf(d) === debugMonth) debugNotAdmitted++;
+      }
+      continue;
+    }
     let admittedOn: Date | null = null;
     for (const dc of dateCols) {
       admittedOn = parseSheetDate(row[dc]);
@@ -374,9 +380,6 @@ async function main() {
     bucket.total += 1;
     const ref = (row[refCol] ?? "").toString().trim() || "(blank)";
     referentTally.set(ref, (referentTally.get(ref) ?? 0) + 1);
-    const monthTally = referentTallyByMonth.get(ym) ?? new Map<string, number>();
-    monthTally.set(ref, (monthTally.get(ref) ?? 0) + 1);
-    referentTallyByMonth.set(ym, monthTally);
     const referentSaysYes = isAttributable(row[refCol]);
     let webInquiryMatch = false;
     let webInquiryMatchVia: "web_inquiry_phone" | "web_inquiry_dob" | null = null;
@@ -404,6 +407,17 @@ async function main() {
     }
     if (attributable) bucket.attributable += 1;
     if (!isCurrentMonth) byMonth.set(ym, bucket);
+    if (debugMonth && ym === debugMonth) {
+      debugRows.push({
+        admitted: admittedOn.toISOString().slice(0, 10),
+        inquiry: inquiryCols.map((c) => cellOf(row, c)).find((v) => v) ?? "—",
+        status: cellOf(row, statusCol) || "—",
+        phone: phoneCol >= 0 ? last4(row[phoneCol]) : "—",
+        referent: ref === "(blank)" ? "" : ref,
+        ours: attributable,
+        lead: webInquiryMatch ? (webInquiryMatchedGclid ? "our lead, ad click" : "our lead, captured form") : "—",
+      });
+    }
     admissionRecords.push({
       client_id: args.client,
       admitted_on: admittedOn.toISOString().slice(0, 10),
@@ -428,17 +442,40 @@ async function main() {
   reportUnrecognizedStatuses(unrecognizedStatuses);
   console.log(`Attributable via Referent text: ${attributedByReferent} · via web_inquiries phone/DOB match only (Referent said no/blank): ${attributedByWebInquiryOnly}`);
 
-  // Debug aid: print the referent breakdown for a specific month (set via
-  // --debug-month=YYYY-MM) so a month whose attributable count looks wrong
-  // can be diagnosed without guessing from the all-months tally.
-  const debugMonth = process.argv.find((a) => a.startsWith("--debug-month="))?.slice("--debug-month=".length);
+  // The month, row by row. The owner's question is always about THIS month:
+  // how many admissions, how many of them ours, and — because the rule reads a
+  // free-text cell somebody typed — what that cell actually says on each one.
   if (debugMonth) {
-    const monthTally = referentTallyByMonth.get(debugMonth);
-    console.log(`\nReferent breakdown for ${debugMonth}:`);
-    if (!monthTally) console.log(`  (no admitted rows found for this month)`);
-    else for (const [ref, n] of [...monthTally.entries()].sort((a, b) => b[1] - a[1])) {
-      console.log(`  ${isAttributable(ref) ? "✓" : " "} ${ref}: ${n}`);
+    const ours = debugRows.filter((d) => d.ours).length;
+    const byReferent = debugRows.filter((d) => referentVerdict(d.referent) === "ours").length;
+    const unknownRef = debugRows.filter((d) => referentVerdict(d.referent) === "unrecognised").length;
+    const blankRef = debugRows.filter((d) => referentVerdict(d.referent) === "blank").length;
+    console.log(`\n${debugMonth}: ${debugRows.length} admission(s) on the board.`);
+    console.log(`  ours                                 ${ours} (${byReferent} by the Referent text, ${ours - byReferent} by a lead we captured)`);
+    console.log(`  Referent the rule does not recognise ${unknownRef}`);
+    console.log(`  Referent blank                       ${blankRef}`);
+    console.log(`\n  Every admission dated in ${debugMonth}   (✓ ours · ? referent not recognised · – referent blank)`);
+    if (!debugRows.length) console.log(`    (none)`);
+    for (const d of debugRows.sort((a, b) => a.admitted.localeCompare(b.admitted))) {
+      const mark = d.ours ? "✓" : referentVerdict(d.referent) === "unrecognised" ? "?" : "–";
+      console.log(
+        `    ${mark} admitted ${d.admitted} · inquiry ${d.inquiry.padEnd(10)} · ${d.status.slice(0, 16).padEnd(16)} · ` +
+        `${d.phone.padEnd(6)} · ${d.lead.padEnd(22)} · referent: "${d.referent.slice(0, 120)}"`,
+      );
     }
+    if (unknownRef) {
+      const tally = new Map<string, number>();
+      for (const d of debugRows) if (referentVerdict(d.referent) === "unrecognised") tally.set(d.referent, (tally.get(d.referent) ?? 0) + 1);
+      console.log(`\n  Referent values the rule does not recognise (verbatim):`);
+      for (const [ref, n] of [...tally].sort((a, b) => b[1] - a[1])) console.log(`    ${n} × "${ref}"`);
+    }
+    if (debugNotAdmitted) console.log(`\n  ${debugNotAdmitted} further row(s) are dated in ${debugMonth} but their status is not an admission.`);
+    console.log(`\n  What this does not tell you`);
+    console.log(`    ${unknownRef} row(s) carry a Referent nobody here recognises. That number is the size of the doubt:`);
+    console.log(`    any of them could be a lead of ours under a label intake made up, and only intake can say.`);
+    console.log(`    A lead of ours captured against the row proves it was ours; nothing here proves the reverse,`);
+    console.log(`    and OCH's form capture went quiet on 2026-09-10, so a lead we sent may not have been captured.`);
+    if (debugMonth === currentYm) console.log(`    ${debugMonth} is still open — these are the admissions so far, not the month's final count.`);
   }
 
   console.log(`\nAdmissions by referent (admitted rows):`);

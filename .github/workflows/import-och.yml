@@ -14,7 +14,7 @@ on:
         required: false
         default: "false"
       debug_month:
-        description: "Optional YYYY-MM to print that month's referent breakdown (diagnostic only)."
+        description: "Optional YYYY-MM to print that month admission by admission, with the Referent text verbatim."
         required: false
         default: ""
 
