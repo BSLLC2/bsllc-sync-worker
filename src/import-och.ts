@@ -4,8 +4,13 @@ import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry, type AdmissionRecord } from "./emit.js";
 import { phone10, lastDobKey, lastNameOf, parseSheetDate, ym as ymOf, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
+// The rescue: an admission intake labelled with a word our list does not
+// know can still be ours if a lead we captured carries the same phone (or
+// surname + DOB). It is the only path that catches those, so it is pure and
+// tested rather than inline here — see och-lead-match.ts.
+import { buildLeadIndex, matchAdmission, leadLine, MATCH_WINDOW_DAYS, type LeadIndex } from "./och-lead-match.js";
 import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote, type AdmissionColumns } from "./och-sheet-columns.js";
-import { provenanceOf, backfillExclusionLine } from "./lead-provenance.js";
+import { backfillExclusionLine } from "./lead-provenance.js";
 import { isAttributable, referentVerdict } from "./och-attribution.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
@@ -25,44 +30,18 @@ async function customerValueFromDb(databaseUrl: string, slug: string): Promise<n
   }
 }
 
-// Same "is this a marketing channel" word-set as isAttributable (och-attribution.ts), applied
-// to a web_inquiries row's own utm_source/utm_medium instead of the sheet's
-// hand-typed Referent -- a gclid alone already implies paid search, so any
-// gclid counts regardless of utm text.
-const ATTRIBUTABLE_UTM_WORDS = new Set([
-  "google", "adwords", "ads", "ppc", "sem", "cpc", "search",
-  "web", "webform", "website", "online", "form", "organic",
-  "facebook", "fb", "meta", "instagram", "ig", "social", "paid", "gbp", "gmb",
-]);
-
-interface WebInquiryMatch { source: string; submittedAt: Date }
-type WebInquiryIndex = { byPhone: Map<string, WebInquiryMatch[]>; byLastDob: Map<string, WebInquiryMatch[]> };
-
-// A web lead only explains an admission that came AFTER it and reasonably
-// soon after it — an inquiry from a year earlier doesn't make this month's
-// professional referral "ours".
-const MATCH_WINDOW_DAYS = 180;
-function inquiryExplains(list: WebInquiryMatch[] | undefined, admitted: Date): WebInquiryMatch | null {
-  if (!list?.length) return null;
-  const t = admitted.getTime();
-  return list.find((m) => m.submittedAt.getTime() <= t + 86_400_000 && m.submittedAt.getTime() >= t - MATCH_WINDOW_DAYS * 86_400_000) ?? null;
-}
-
-/** Every web_inquiries row for this client that carries a gclid OR a
- *  recognizable marketing utm_source, indexed by phone (last 10 digits) and
- *  by lastname|dob -- the same two keys import-offline-conversions.ts
- *  already trusts to tie a Google Ads click to a real admission. Used here
- *  to grow "attributable" beyond whatever the intake team happened to type
- *  in the sheet's free-text Referent column: a patient who really came from
- *  a tracked ad/form/call still counts even if intake logged the CLINICAL
- *  referral partner that processed their case instead of how they first
- *  found OCH.
+/** Every `web_inquiries` row for this client, handed to the pure matcher.
+ *  The query selects only what a match needs — no name, no email.
  *
- *  LIVE CAPTURES ONLY. A row a person typed in from a client's own export
- *  (lead-provenance.ts) is skipped: it proves an enquiry happened, never which
- *  channel produced it, and this index is the thing that turns a channel into
- *  attributed revenue. */
-async function loadWebInquiryMatchIndex(databaseUrl: string, clientSlug: string): Promise<WebInquiryIndex> {
+ *  Which of those rows may ATTRIBUTE an admission is och-lead-match.ts's
+ *  decision, not this function's: live captures carrying a gclid or a
+ *  marketing UTM. A row typed in from the client's own export is kept as a
+ *  lead and excluded from attribution, because the export never held a click
+ *  (lead-provenance.ts). That exclusion is what moved lifetime attribution
+ *  from 51 to 49 on 2026-09-15; the two admissions it dropped were credited
+ *  to us on the strength of rows a person typed in.
+ */
+async function loadLeadIndex(databaseUrl: string, clientSlug: string): Promise<LeadIndex> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
@@ -70,28 +49,13 @@ async function loadWebInquiryMatchIndex(databaseUrl: string, clientSlug: string)
       `SELECT phone, dob, last_name, gclid, utm_source, utm_medium, raw_json, submitted_at FROM web_inquiries WHERE client_slug = $1`,
       [clientSlug],
     );
-    const byPhone = new Map<string, WebInquiryMatch[]>();
-    const byLastDob = new Map<string, WebInquiryMatch[]>();
-    let backfilled = 0;
-    for (const r of rows) {
-      // A row somebody typed in from a client's export is a real lead and no
-      // evidence at all about a channel: the export carried no click and no
-      // tracking. Excluded BY NAME rather than by its UTM columns being empty,
-      // because "the columns look blank" is exactly what stopped being true
-      // when an earlier backfill wrote a plausible pair into them.
-      if (provenanceOf(r.raw_json) === "backfilled") { backfilled++; continue; }
-      const hasGclid = !!(r.gclid && r.gclid.trim());
-      const utmWords = `${r.utm_source ?? ""} ${r.utm_medium ?? ""}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-      const utmAttributable = utmWords.some((w) => ATTRIBUTABLE_UTM_WORDS.has(w));
-      if (!hasGclid && !utmAttributable) continue; // not a marketing-tracked lead
-      const match: WebInquiryMatch = { source: hasGclid ? "gclid" : `utm:${r.utm_source ?? r.utm_medium}`, submittedAt: new Date(r.submitted_at) };
-      const p = phone10(r.phone);
-      if (p) byPhone.set(p, [...(byPhone.get(p) ?? []), match]);
-      const ld = lastDobKey(r.last_name, r.dob);
-      if (ld) byLastDob.set(ld, [...(byLastDob.get(ld) ?? []), match]);
-    }
-    if (backfilled) console.log(`  ${backfillExclusionLine(backfilled)}`);
-    return { byPhone, byLastDob };
+    const index = buildLeadIndex(rows.map((r) => ({
+      phone: r.phone, dob: r.dob, lastName: r.last_name, gclid: r.gclid,
+      utmSource: r.utm_source, utmMedium: r.utm_medium, rawJson: r.raw_json,
+      submittedAt: new Date(r.submitted_at),
+    })));
+    if (index.counts.typedIn) console.log(`  ${backfillExclusionLine(index.counts.typedIn)}`);
+    return index;
   } finally {
     await client.end();
   }
@@ -298,16 +262,19 @@ async function main() {
   }
   const { dateCols, inquiryCols, refCol, statusCol, hasStatusCol, phoneCol, dobCol, nameCol } = cols;
 
-  // Cross-check against web_inquiries (real form/gclid captures) so a row can
-  // count as attributable even when intake typed the CLINICAL referral
-  // partner into Referent instead of how the patient actually found OCH —
-  // see loadWebInquiryMatchIndex's comment.
+  // Cross-check against web_inquiries so a row can count as ours even when
+  // intake typed the CLINICAL referral partner into Referent instead of how
+  // the patient actually found OCH — see och-lead-match.ts.
   // Not caught either (see customerValueFromDb above): an empty index would
   // silently drop every web-inquiry-only attribution for the month.
-  const webInquiryIndex: WebInquiryIndex = dbUrlForValue
-    ? await loadWebInquiryMatchIndex(dbUrlForValue, args.client)
-    : { byPhone: new Map(), byLastDob: new Map() };
-  console.log(`Web-inquiry cross-check index: ${webInquiryIndex.byPhone.size} phone(s), ${webInquiryIndex.byLastDob.size} lastname|dob key(s).`);
+  const leadIndex: LeadIndex = dbUrlForValue
+    ? await loadLeadIndex(dbUrlForValue, args.client)
+    : buildLeadIndex([]);
+  console.log(
+    `Web-inquiry cross-check index: ${leadIndex.attributing.byPhone.size} phone(s), ${leadIndex.attributing.byLastDob.size} lastname|dob key(s) ` +
+    `— from ${leadIndex.counts.attributing} lead(s) carrying channel evidence of ${leadIndex.counts.total} held` +
+    `${leadIndex.counts.typedIn ? ` (${leadIndex.counts.typedIn} typed in, which prove an enquiry and no channel)` : ""}.`,
+  );
 
   console.log(`Columns → ${describeColumns(header, cols)}`);
   const resolvedNote = contentResolvedNote(cols);
@@ -340,12 +307,14 @@ async function main() {
   let admittedNoDate = 0;
   let attributedByReferent = 0;
   let attributedByWebInquiryOnly = 0;
+  // Every rescue this run, current month included — the canary below reads it.
+  let rescuedByLead = 0;
   // --debug-month=YYYY-MM prints that month row by row at the end of the run:
   // what intake actually typed in Referent, verbatim, rather than a tally of
   // what our word list matched. Redacted — no name, no DOB, phone as the last
   // four digits only — because this goes in a run log a person reads.
   const debugMonth = process.argv.find((a) => a.startsWith("--debug-month="))?.slice("--debug-month=".length);
-  interface DebugRow { admitted: string; inquiry: string; status: string; phone: string; referent: string; ours: boolean; lead: string }
+  interface DebugRow { admitted: string; inquiry: string; status: string; phone: string; referent: string; ours: boolean; by: "referent" | "lead" | null; lead: string }
   const debugRows: DebugRow[] = [];
   let debugNotAdmitted = 0;
   const last4 = (v: unknown) => { const d = String(v ?? "").replace(/[^0-9]/g, ""); return d ? `…${d.slice(-4)}` : "—"; };
@@ -381,26 +350,22 @@ async function main() {
     const ref = (row[refCol] ?? "").toString().trim() || "(blank)";
     referentTally.set(ref, (referentTally.get(ref) ?? 0) + 1);
     const referentSaysYes = isAttributable(row[refCol]);
-    let webInquiryMatch = false;
-    let webInquiryMatchVia: "web_inquiry_phone" | "web_inquiry_dob" | null = null;
+    // Run the match on every admission, not only the ones the Referent text
+    // gives up on: a row the text already claims still deserves to say whether
+    // we hold the lead behind it, and the readout prints it.
+    const verdict = matchAdmission(leadIndex, {
+      phone: phoneCol >= 0 ? phone10(row[phoneCol]) : null,
+      lastDob: nameCol >= 0 && dobCol >= 0 ? lastDobKey(lastNameOf(row[nameCol]), row[dobCol]) : null,
+    }, admittedOn);
+    const webInquiryMatch = !referentSaysYes && !!verdict.attributing;
+    const webInquiryMatchVia = webInquiryMatch ? verdict.via : null;
     // A gclid match means this specific admission came from an actual Google
     // Ads click, not just some marketing-tracked form fill (utm text) — kept
     // as its own attribution_source value so the dashboard's Google Ads
     // "See who" only ever shows people who really clicked an ad.
-    let webInquiryMatchedGclid = false;
-    if (!referentSaysYes) {
-      const p = phoneCol >= 0 ? phone10(row[phoneCol]) : null;
-      const ld = nameCol >= 0 && dobCol >= 0 ? lastDobKey(lastNameOf(row[nameCol]), row[dobCol]) : null;
-      const byPhone = p ? inquiryExplains(webInquiryIndex.byPhone.get(p), admittedOn) : null;
-      const byDob = !byPhone && ld ? inquiryExplains(webInquiryIndex.byLastDob.get(ld), admittedOn) : null;
-      const matched = byPhone ?? byDob;
-      if (matched) {
-        webInquiryMatch = true;
-        webInquiryMatchVia = byPhone ? "web_inquiry_phone" : "web_inquiry_dob";
-        webInquiryMatchedGclid = matched.source === "gclid";
-      }
-    }
+    const webInquiryMatchedGclid = webInquiryMatch && verdict.attributing?.evidence === "gclid";
     const attributable = referentSaysYes || webInquiryMatch;
+    if (webInquiryMatch) rescuedByLead++;
     if (!isCurrentMonth) {
       if (referentSaysYes) attributedByReferent++;
       else if (webInquiryMatch) attributedByWebInquiryOnly++;
@@ -415,7 +380,11 @@ async function main() {
         phone: phoneCol >= 0 ? last4(row[phoneCol]) : "—",
         referent: ref === "(blank)" ? "" : ref,
         ours: attributable,
-        lead: webInquiryMatch ? (webInquiryMatchedGclid ? "our lead, ad click" : "our lead, captured form") : "—",
+        by: referentSaysYes ? "referent" : webInquiryMatch ? "lead" : null,
+        // "—" has to mean we hold nothing for this person. A lead we typed in
+        // from their own export is not a channel, but it is not nothing
+        // either, and printing a dash for both hides the difference.
+        lead: leadLine(verdict),
       });
     }
     admissionRecords.push({
@@ -441,26 +410,41 @@ async function main() {
   }
   reportUnrecognizedStatuses(unrecognizedStatuses);
   console.log(`Attributable via Referent text: ${attributedByReferent} · via web_inquiries phone/DOB match only (Referent said no/blank): ${attributedByWebInquiryOnly}`);
+  // A path that quietly stops matching looks exactly like a month with nothing
+  // to match. Say which it is: this rescue is the ONLY thing that catches an
+  // admission intake labelled with a word och-attribution.ts does not know, so
+  // a run where it fires zero times is worth a person's attention even when
+  // nothing is broken.
+  if (leadIndex.counts.attributing > 0 && rescuedByLead === 0) {
+    console.log(
+      `The captured-lead rescue matched nothing this run: ${leadIndex.counts.attributing} lead(s) carry channel evidence and none of them ` +
+      `matched an admission by phone or surname+DOB within ${MATCH_WINDOW_DAYS} days. Either no lead of ours admitted, or the keys stopped lining up.`,
+    );
+  }
 
   // The month, row by row. The owner's question is always about THIS month:
   // how many admissions, how many of them ours, and — because the rule reads a
   // free-text cell somebody typed — what that cell actually says on each one.
   if (debugMonth) {
     const ours = debugRows.filter((d) => d.ours).length;
-    const byReferent = debugRows.filter((d) => referentVerdict(d.referent) === "ours").length;
+    const byReferent = debugRows.filter((d) => d.by === "referent").length;
+    const byLead = debugRows.filter((d) => d.by === "lead").length;
+    const leadHeld = debugRows.filter((d) => d.lead !== "—").length;
     const unknownRef = debugRows.filter((d) => referentVerdict(d.referent) === "unrecognised").length;
     const blankRef = debugRows.filter((d) => referentVerdict(d.referent) === "blank").length;
     console.log(`\n${debugMonth}: ${debugRows.length} admission(s) on the board.`);
-    console.log(`  ours                                 ${ours} (${byReferent} by the Referent text, ${ours - byReferent} by a lead we captured)`);
+    console.log(`  ours                                 ${ours} (${byReferent} by the Referent text, ${byLead} by a lead we captured)`);
     console.log(`  Referent the rule does not recognise ${unknownRef}`);
     console.log(`  Referent blank                       ${blankRef}`);
+    console.log(`  we hold a lead for                   ${leadHeld} of them (a typed-in lead proves the enquiry, never the channel)`);
     console.log(`\n  Every admission dated in ${debugMonth}   (✓ ours · ? referent not recognised · – referent blank)`);
     if (!debugRows.length) console.log(`    (none)`);
     for (const d of debugRows.sort((a, b) => a.admitted.localeCompare(b.admitted))) {
       const mark = d.ours ? "✓" : referentVerdict(d.referent) === "unrecognised" ? "?" : "–";
+      const path = d.by === "referent" ? "ours: referent" : d.by === "lead" ? "ours: lead" : "";
       console.log(
         `    ${mark} admitted ${d.admitted} · inquiry ${d.inquiry.padEnd(10)} · ${d.status.slice(0, 16).padEnd(16)} · ` +
-        `${d.phone.padEnd(6)} · ${d.lead.padEnd(22)} · referent: "${d.referent.slice(0, 120)}"`,
+        `${d.phone.padEnd(6)} · ${path.padEnd(14)} · ${d.lead.padEnd(21)} · referent: "${d.referent.slice(0, 120)}"`,
       );
     }
     if (unknownRef) {

@@ -253,10 +253,10 @@ console.log("\n6. A backfilled row can prove an enquiry and never a channel");
   ok("the backfill asserts no utm_source and no utm_medium", insert.length > 0 && !/'website'|'form'/.test(insert));
   ok("  …and tags every row with the provenance marker", /BACKFILL_SOURCE/.test(insert));
 
-  const importer = read("import-och.ts");
-  ok("the attribution index excludes backfilled rows by NAME, not by empty columns",
-    /provenanceOf\(r\.raw_json\) === "backfilled"/.test(importer));
-  ok("  …and selects raw_json so it can", /SELECT [^`]*raw_json[^`]*FROM web_inquiries/.test(importer));
+  ok("the lead index excludes backfilled rows by NAME, not by empty columns",
+    /provenanceOf\(row\.rawJson\) === "backfilled"/.test(read("och-lead-match.ts")));
+  ok("  …and import-och selects raw_json so it can",
+    /SELECT [^`]*raw_json[^`]*FROM web_inquiries/.test(read("import-och.ts")));
 }
 
 if (failures > 0) {
