@@ -1,0 +1,30 @@
+name: CI
+
+# Every push and every pull request. Nothing here touches a credential, a
+# client account or the database — it typechecks the worker and runs the pure
+# guards, so it can run on every commit without a single secret. A guard
+# nothing runs is a guard nobody knows is asleep.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lead cadence guard
+        run: npm run verify:lead-cadence
+      - name: Ads findings guard
+        run: npm run verify-ads-findings
