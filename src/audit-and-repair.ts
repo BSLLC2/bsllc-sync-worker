@@ -175,7 +175,12 @@ async function main() {
       `SELECT client_slug, max(submitted_at) AS last_lead,
               count(*) FILTER (WHERE submitted_at > now() - interval '90 days')::text AS n90,
               count(*) FILTER (WHERE submitted_at > now() - interval '30 days')::text AS n30
-         FROM web_inquiries WHERE email IS NULL OR (email NOT ILIKE '%@bsllc.biz' AND email NOT IN ('sebastienhue@gmail.com','test-inquiry@bsllc.biz'))
+         FROM web_inquiries
+        WHERE (email IS NULL OR (email NOT ILIKE '%@bsllc.biz' AND email NOT IN ('sebastienhue@gmail.com','test-inquiry@bsllc.biz')))
+          -- A tracked phone call carries no email, so our own test calls
+          -- passed the email tests above. "internal_test" is the marker a
+          -- person sets on the Website Leads page; same teeth as junk.
+          AND status <> ALL(ARRAY['junk','internal_test'])
         GROUP BY client_slug`)).rows;
     const clients = (await c.query<{ id: string; name: string; status: string; contract_start: string | null; customer_value_cents: number | null; close_rate_pct: number | null; revenue_model: string | null; is_internal: boolean }>(
       `SELECT id, name, status, contract_start, customer_value_cents, close_rate_pct, revenue_model, coalesce(is_internal, false) AS is_internal FROM clients WHERE status IN ('launch','active')`)).rows;

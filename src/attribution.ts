@@ -47,6 +47,9 @@ export interface WebInquiryIndex { byEmail: Map<string, WebInquiryHit>; byPhone:
 
 /** Internal tests never count as leads we sent (same filter as the morning audit). */
 const INTERNAL_TEST_EMAILS = new Set(["sebastienhue@gmail.com", "test-inquiry@bsllc.biz"]);
+/** web_inquiries.status values that take a row out of every count and every
+ *  match — the dashboard's WEB_INQUIRY_EXCLUDED_STATUSES. */
+export const EXCLUDED_INQUIRY_STATUSES = new Set(["junk", "internal_test"]);
 
 export async function loadWebInquiryIndex(c: pg.Client, clientSlug: string, since: string | null): Promise<WebInquiryIndex> {
   const { rows } = await c.query<{ id: string; email: string | null; phone: string | null; gclid: string | null; submitted_at: Date; status: string }>(
@@ -58,7 +61,12 @@ export async function loadWebInquiryIndex(c: pg.Client, clientSlug: string, sinc
   let count = 0;
   for (const r of rows) {
     const email = (r.email ?? "").trim().toLowerCase();
-    if (r.status === "junk" || email.endsWith("@bsllc.biz") || INTERNAL_TEST_EMAILS.has(email)) continue;
+    // "internal_test" is the marker a person sets on the Website Leads page for
+    // a call OUR OWN team placed to test a client's tracking number. The email
+    // tests below cannot see it: a CallRail / CallTrackingMetrics row carries
+    // no email at all, so our own test calls sat here as live match candidates
+    // that CRM deals could be attributed to. Same teeth as "junk".
+    if (EXCLUDED_INQUIRY_STATUSES.has(r.status) || email.endsWith("@bsllc.biz") || INTERNAL_TEST_EMAILS.has(email)) continue;
     count++;
     const hit: WebInquiryHit = { id: r.id, submittedAt: new Date(r.submitted_at).toISOString().slice(0, 10), gclid: r.gclid?.trim() || null };
     // First submission wins so the match points at the earliest lead we sent.
@@ -102,11 +110,65 @@ export function hubspotBucket(source: string | null | undefined): Bucket {
   if (HS_MANUAL.has(s)) return "manual";
   return "other";
 }
-/** The rule as the dashboard applies it: the CRM's own source wins; where it
- *  has none, a match to our web lead is the source. */
-export function isAttributed(bucket: Bucket, matched: boolean, isSample: boolean): boolean {
-  if (isSample) return false;
-  return bucket === "bsllc" || (bucket === "unknown" && matched);
+/**
+ * OUR LEAD HAS TO COME FIRST.
+ *
+ * The `unknown` bucket is the CRM saying nothing about where a record came
+ * from, and the rule that rescues it is "where the CRM has no source, a match
+ * to a web lead we captured IS the source". That claim only holds while the
+ * lead actually predates the record it is being credited with, and nothing
+ * checked. A D365 opportunity is matched through its parent CONTACT on phone or
+ * email, and `classify()` returns "unknown" for any contact created before the
+ * first-touch field went live (2026-08-13) — so ONE tracked call from a repeat
+ * customer attributed every deal on that contact, including deals closed long
+ * before we were engaged. `webInquiryAt` was already on the row and compared to
+ * nothing. For a client with 10–20% repeat business at a ~$35k median deal this
+ * was the largest over-credit mechanism in the chain.
+ *
+ * WHICH DATE ON EACH SIDE. Our side has one honest date: when the lead was
+ * submitted. Their side has three, and the choice decides whether this closes
+ * the hole or throws away real attribution:
+ *
+ *  - the CONTACT's created date is too strict. An existing customer who
+ *    searched, clicked and enquired again is demand we generated; a contact
+ *    record older than our lead does not change that.
+ *  - the CLOSE date is too loose — it is the end of the story, not the start.
+ *    A deal opened a year before our lead and signed last week sails through,
+ *    which is the exact over-credit this exists to stop.
+ *  - the RECORD'S OWN created date answers the question actually being asked.
+ *    The claim is "this record exists because of our lead". If the record
+ *    already existed when the lead arrived, the lead cannot be why.
+ *
+ * Same-day passes (both sides are YYYY-MM-DD, and a CRM row is usually written
+ * from the enquiry within hours). A missing date on either side is UNKNOWN, not
+ * a pass: an unsourced record we cannot place in time is precisely the record
+ * nobody should be counting. `bucket === "bsllc"` is untouched — that is the
+ * CRM's own source field and needs no help from a date.
+ *
+ * The dashboard applies the identical rule when it renders the chain
+ * (shared/case-study.ts `isAttributed`), so the card and the figure agree.
+ * `npm run verify-attribution-dates` fails if this stops comparing dates.
+ */
+export function leadPredatesRecord(webInquiryAt: string | null | undefined, recordCreatedOn: string | null | undefined): boolean {
+  if (!webInquiryAt || !recordCreatedOn) return false;
+  return webInquiryAt.slice(0, 10) <= recordCreatedOn.slice(0, 10);
+}
+
+/** What one record is worth to the attribution chain. The CRM's own source
+ *  wins; where it has none, a match to a web lead that PREDATES the record is
+ *  the source (see `leadPredatesRecord`). */
+export interface AttributionCandidate {
+  bucket: Bucket;
+  isSample: boolean;
+  /** YYYY-MM-DD of the web inquiry we matched, or null when nothing matched. */
+  webInquiryAt: string | null;
+  /** YYYY-MM-DD the CRM record itself was created. */
+  recordCreatedOn: string | null;
+}
+export function isAttributed(r: AttributionCandidate): boolean {
+  if (r.isSample) return false;
+  if (r.bucket === "bsllc") return true;
+  return r.bucket === "unknown" && leadPredatesRecord(r.webInquiryAt, r.recordCreatedOn);
 }
 
 // ── HubSpot: deals with their contacts (shared by the two HubSpot jobs) ──
