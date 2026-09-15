@@ -132,7 +132,10 @@ async function main() {
                 COUNT(*) FILTER (WHERE submitted_at > now() - interval '30 days') AS n30,
                 COUNT(*) FILTER (WHERE gclid IS NOT NULL AND gclid <> '' AND submitted_at > now() - interval '30 days') AS gclid30
            FROM web_inquiries
-          WHERE email IS NULL OR (email NOT ILIKE '%@bsllc.biz' AND email NOT IN ('sebastienhue@gmail.com', 'test-inquiry@bsllc.biz'))
+          WHERE (email IS NULL OR (email NOT ILIKE '%@bsllc.biz' AND email NOT IN ('sebastienhue@gmail.com', 'test-inquiry@bsllc.biz')))
+            -- A tracked phone call has no email to test. "internal_test" is
+            -- the marker a person sets for a call our own team placed.
+            AND status <> ALL(ARRAY['junk','internal_test'])
           GROUP BY client_slug`,
       )).rows;
     } catch { /* table not present yet */ }
@@ -246,6 +249,7 @@ async function main() {
         `SELECT client_slug, form_name, submitted_at FROM web_inquiries
           WHERE submitted_at > now() - interval '70 days'
             AND (email IS NULL OR (email NOT ILIKE '%@bsllc.biz' AND email NOT IN ('sebastienhue@gmail.com', 'test-inquiry@bsllc.biz')))
+            AND status <> ALL(ARRAY['junk','internal_test'])
           ORDER BY submitted_at`,
       )).rows) {
         const list = events.get(r.client_slug) ?? [];

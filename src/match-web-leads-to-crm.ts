@@ -215,12 +215,22 @@ async function hubspotRows(token: string, client: ClientRow, idx: Awaited<Return
 
 function summarize(rows: AttributionRow[], webCount: number, crm: "d365" | "hubspot"): string {
   const floor = crm === "d365" ? BILLABLE_CLOSED_WON_SINCE : null;
-  const attributed = (r: AttributionRow) => isAttributed(r.bucket, !!r.webInquiryId, r.isSample);
-  const won = rows.filter((r) => r.stage === "won" && attributed(r) && (!floor || !r.wonOn || r.wonOn >= floor));
+  const attributed = (r: AttributionRow) => isAttributed(r);
+  // A record with no close date is UNKNOWN, not inside the window. `|| !r.wonOn`
+  // read it the other way and let every Closed Won with a null actualclosedate
+  // walk straight through the billable floor — the one filter separating the
+  // client's pre-existing pipeline from the business we were engaged to drive.
+  const won = rows.filter((r) => r.stage === "won" && attributed(r) && (!floor || (!!r.wonOn && r.wonOn >= floor)));
   const pipeline = rows.filter((r) => r.recordType !== "lead" && (r.stage === "open" || r.stage === "qualified") && attributed(r));
   const matched = new Set(rows.filter((r) => r.webInquiryId && !r.isSample).map((r) => r.webInquiryId)).size;
   const leadsOurs = rows.filter((r) => r.recordType === "lead" && attributed(r)).length;
   const unsourced = rows.filter((r) => r.stage === "won" && !r.isSample && r.bucket === "unknown" && !r.webInquiryId).length;
+  // Matched, unsourced, and the record already existed when our lead arrived —
+  // a repeat customer who happened to touch a tracked channel. Counted by
+  // nothing, and said out loud so the drop is never mistaken for a lost match.
+  const predatedByRecord = rows.filter(
+    (r) => !r.isSample && r.bucket === "unknown" && r.webInquiryId && !attributed(r),
+  ).length;
   const conflicts = rows.filter((r) => !r.isSample && r.webInquiryId && (r.bucket === "other" || r.bucket === "manual")).length;
   const samples = rows.filter((r) => r.isSample).length;
   // Suspected-import rows are INSIDE the won figure above on purpose — this
@@ -234,6 +244,7 @@ function summarize(rows: AttributionRow[], webCount: number, crm: "d365" | "hubs
     `web inquiries in window: ${webCount} · found in CRM: ${matched} · CRM leads attributed to us: ${leadsOurs}`,
     `won attributed${floor ? ` (closed ≥ ${floor})` : ""}: ${won.length} deal(s) ${usd(sum(won))} · open attributed pipeline: ${pipeline.length} ${usd(sum(pipeline))}`,
     `won with no source and no match: ${unsourced} · matched but CRM says other/manual: ${conflicts} · sample records: ${samples}`,
+    `matched but our lead came AFTER the record existed (not counted): ${predatedByRecord}`,
     ...(suspicion ? [suspicion] : []),
   ].join("\n    ");
 }

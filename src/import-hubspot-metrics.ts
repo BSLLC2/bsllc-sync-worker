@@ -147,10 +147,19 @@ async function main() {
       // web inquiry we captured (see attribution.ts — one rule for both jobs).
       const { value: source, contact } = hubspotDealSource(d, contactsById);
       const bucket = hubspotBucket(source);
-      const matched = !!matchWebInquiry(webIdx, { emails: [contact?.properties.email], phones: [contact?.properties.phone, contact?.properties.mobilephone], gclid: contact?.properties.hs_google_click_id });
+      const match = matchWebInquiry(webIdx, { emails: [contact?.properties.email], phones: [contact?.properties.phone, contact?.properties.mobilephone], gclid: contact?.properties.hs_google_click_id });
       const sample = looksLikeSample(d.properties.dealname, contact?.properties.email);
       if (sample) { samples++; continue; }
-      const ours = isAttributed(bucket, matched, sample);
+      // A deal with no original source only counts as ours when the lead we
+      // matched PREDATES the deal — see attribution.ts. A HubSpot deal is
+      // matched through its contact, so without this one repeat customer who
+      // filled in a form makes every deal they have ever had ours.
+      const ours = isAttributed({
+        bucket,
+        isSample: sample,
+        webInquiryAt: match?.hit.submittedAt ?? null,
+        recordCreatedOn: (d.properties.createdate ?? "").slice(0, 10) || null,
+      });
       if (ours && bucket !== "bsllc") matchedAsSource++;
       const slot: Bucket = ours ? "bsllc" : bucket;
       e.cw[slot] += cents;

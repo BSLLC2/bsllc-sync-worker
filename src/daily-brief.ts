@@ -42,7 +42,8 @@ async function main() {
                 count(*) FILTER (WHERE coalesce(form_name,'') LIKE 'Phone:%')::text AS calls,
                 max(submitted_at)::text AS last
            FROM web_inquiries WHERE client_slug = $1 AND submitted_at >= date_trunc('month', now())
-             AND coalesce(email,'') NOT ILIKE '%@bsllc.biz'`, [s]);
+             AND coalesce(email,'') NOT ILIKE '%@bsllc.biz'
+             AND status <> ALL(ARRAY['junk','internal_test'])`, [s]);
       const { rows: conv } = await c.query<{ metric_key: string; v: number }>(
         `SELECT DISTINCT ON (metric_key) metric_key, value_numeric AS v FROM metric_snapshots
           WHERE client_id = $1 AND data_state = 'live' AND value_numeric IS NOT NULL AND metric_key = ANY($2)
