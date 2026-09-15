@@ -5,6 +5,10 @@ import { JWT } from "google-auth-library";
 import { GoogleAdsApi } from "google-ads-api";
 import pg from "pg";
 import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
+// One resolver, two callers: this job and import-och read the same tab and
+// must agree about who a row is about. It resolves each column from the
+// heading and, when the client has renamed one, from the data underneath.
+import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote } from "./och-sheet-columns.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -114,17 +118,6 @@ async function sheetsGet(token: string, path: string): Promise<any> {
     throw new Error(`Sheets GET ${path} → ${res.status} ${body.slice(0, 300)}`);
   }
 }
-function findCol(header: string[], needles: string[]): number {
-  const norm = header.map((h) => (h ?? "").toString().trim().toLowerCase());
-  for (let i = 0; i < norm.length; i++) if (needles.some((n) => norm[i]!.includes(n))) return i;
-  return -1;
-}
-function findHeaderRow(rows: string[][]): number {
-  for (let i = 0; i < Math.min(rows.length, 8); i++) {
-    if ((rows[i] ?? []).filter((c) => c && c.toString().trim()).length >= 3) return i;
-  }
-  return 0;
-}
 /** Statuses isAdmittedStatus couldn't classify this run — printed once after the scan. */
 const unrecognizedStatuses = new Set<string>();
 function isAdmitted(cell: string | undefined): boolean {
@@ -196,44 +189,25 @@ async function main() {
     const rows: string[][] = values.values ?? [];
     const hIdx = findHeaderRow(rows);
     const header = rows[hIdx] ?? [];
-    // Needle PRIORITY, not column position: a sheet with both "Client ID" and
-    // "Name" must resolve to "Name". findCol is first-matching-COLUMN, so the
-    // synonyms have to be tried one list at a time rather than as one list.
-    // The synonyms exist because a client renaming their own heading is an
-    // ordinary Tuesday, not a fault — but note that none of them can rescue a
-    // heading that has been blanked or truncated to a single letter, which is
-    // the OCH case on 2026-09-14 ("h"). Nothing can: the column no longer says
-    // what it holds, and guessing which column is people's names would put the
-    // wrong names in a conversion upload to Google.
-    const nameCol = [["name"], ["client"], ["patient"], ["resident"], ["member"]]
-      .reduce<number>((found, needles) => (found >= 0 ? found : findCol(header, needles)), -1);
-    const phoneCol = findCol(header, ["phone"]);
-    const dobCol = findCol(header, ["dob", "birth"]);
-    const statusCol = findCol(header, ["status", "admitted", "disposition"]);
-    // Admission-date columns only, per row (intake fills whichever they have).
-    // Never the inquiry-received date: that can precede the ad click, and
-    // Google rejects a conversion timed before its click.
-    const dateCols = [
-      findCol(header, ["scheduled admission"]),
-      findCol(header, ["projected admission"]),
-      findCol(header, ["admission date", "admit date"]),
-    ].filter((c) => c >= 0).filter((v, i, a) => a.indexOf(v) === i);
-    if (!dateCols.length || nameCol < 0 || (phoneCol < 0 && dobCol < 0)) {
-      const missing = [
-        !dateCols.length && "an admission-date column (Scheduled/Projected Admission Date)",
-        nameCol < 0 && "a name column",
-        phoneCol < 0 && dobCol < 0 && "a phone or DOB column",
-      ].filter(Boolean).join(", ");
-      throw new Error(`Admission Board header not recognized on tab "${tab}" (header row ${hIdx + 1}: ${header.join(" | ").slice(0, 200)}). Missing ${missing}. The client renamed or cleared a heading in their own sheet — the account manager asks them to restore it; there is nothing to change here.`);
-    }
-    console.log(`Columns → date:${dateCols.map((c) => header[c]).join(" / ")} · name:${header[nameCol]} · phone:${phoneCol >= 0 ? header[phoneCol] : "-"} · dob:${dobCol >= 0 ? header[dobCol] : "-"} · status:${statusCol >= 0 ? header[statusCol] : "(none)"}`);
+    if (!tab) throw new Error("No sheets found in the spreadsheet.");
+    // Columns come from the shared resolver: headings where the client's
+    // wording still says what a column holds, the column's own data where it
+    // does not. A name here goes into a conversion upload to Google, so a
+    // board no signal can read still stops the run with the same message it
+    // always printed — but a retitled or truncated heading no longer does.
+    // This job needs no Referent column; attribution is not its question.
+    const cols = resolveAdmissionColumns(rows, { tab, headerRowIndex: hIdx });
+    const { dateCols, statusCol, hasStatusCol, phoneCol, dobCol, nameCol } = cols;
+    console.log(`Columns → ${describeColumns(header, cols)}`);
+    const resolvedNote = contentResolvedNote(cols);
+    if (resolvedNote) console.log(resolvedNote);
 
     const cutoff = Date.now() - args.lookbackDays * 86_400_000;
     const admissions: Admission[] = [];
     let admittedNoDate = 0;
     for (let r = hIdx + 1; r < rows.length; r++) {
       const row = rows[r] ?? [];
-      if (statusCol >= 0 && !isAdmitted(row[statusCol])) continue;
+      if (hasStatusCol && !isAdmitted(row[statusCol])) continue;
       let date: Date | null = null;
       for (const dc of dateCols) { date = parseSheetDate(row[dc]); if (date) break; }
       if (!date) { admittedNoDate++; continue; }

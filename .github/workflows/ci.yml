@@ -38,3 +38,5 @@ jobs:
         run: npm run verify-ads-operability
       - name: OCH admissions import guard
         run: npm run verify-och-import
+      - name: OCH attribution guard
+        run: npm run verify-och-attribution
