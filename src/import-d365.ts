@@ -3,6 +3,7 @@ import "dotenv/config";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { monthSnapshot } from "./dates.js";
 import { loadD365Config, fetchClosedWon, classify, type Bucket } from "./d365.js";
+import { detectSampleRecords, suspicionLine, verdictFor, type CrmRecordShape } from "./sample-detect.js";
 
 /**
  * D365 → dashboard: Closed Won revenue for DPG, attributed off the Contact's
@@ -25,6 +26,30 @@ import { loadD365Config, fetchClosedWon, classify, type Bucket } from "./d365.js
 const DEFAULT_SLUG = "diesel-power-group";
 
 
+/**
+ * A run that produced no figures, planted anyway, for the current month.
+ *
+ * `no_data` is a first-class state across this system (see `_sync.status` in
+ * the dashboard's sync, and the connector-failing rule: newest error strictly
+ * newer than newest live/no_data). It means "the pipeline worked and the
+ * account was empty" — which is a real, reportable answer about a CRM, and
+ * the opposite of never having run. The GSC and Search importers already
+ * plant it on an empty window; this matches them.
+ */
+function emptyRun(slug: string, state: "no_data" | "error", error: string | null): SyncEntry {
+  const { start, end, syncedAt } = monthSnapshot(new Date().toISOString().slice(0, 7));
+  return {
+    client_id: slug,
+    source: "d365",
+    period_start: start,
+    period_end: end,
+    synced_at: syncedAt,
+    data_state: state,
+    error_message: error,
+    metrics: {},
+  };
+}
+
 interface Agg { revCents: Record<Bucket, number>; deals: Record<Bucket, number> }
 function emptyAgg(): Agg {
   return {
@@ -45,16 +70,56 @@ async function main() {
   const cfg = loadD365Config();
   console.log(`D365 import — Closed Won for ${slug}${dryRun ? " (dry-run)" : ""}`);
 
-  const opps = await fetchClosedWon(cfg);
+  // Every run ends on the record, in one of three states, because the app
+  // cannot tell them apart from the outside: live (figures), no_data (we got
+  // in, nothing has closed) or error (we did not get in). Before this, a
+  // successful empty read planted NOTHING, so a connector that authenticated
+  // and answered every single morning was indistinguishable from one that had
+  // never run — which is also why this client's CRM launch step read as not
+  // connected while the connection worked perfectly.
+  let opps: Awaited<ReturnType<typeof fetchClosedWon>>;
+  try {
+    opps = await fetchClosedWon(cfg);
+  } catch (e) {
+    const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+    console.error(`  FAILED to read D365: ${msg}`);
+    const code = runDashboardSync({ databaseUrl, dashboardDir }, [emptyRun(slug, "error", msg)], { dryRun });
+    process.exit(code || 1);
+  }
   console.log(`  fetched ${opps.length} Closed Won opportunit${opps.length === 1 ? "y" : "ies"}.`);
+
+  // Demo data the CRM shipped with is revenue that never happened, and until
+  // now nothing here looked for it at all — every stock record in the org went
+  // straight into the monthly totals. The detector works on how a row ARRIVED
+  // rather than on a list of stock company names, because the name list is
+  // what failed: an org whose demo records carried no catalogue word in any
+  // field read as entirely genuine. See src/sample-detect.ts.
+  const verdicts = detectSampleRecords(
+    opps.map((o): CrmRecordShape => ({
+      id: o.opportunityid,
+      text: [o.name, o.parentcontactid?.fullname],
+      writtenAt: o.createdon ?? null,
+      writtenBy: o._createdby_value ?? null,
+      importSequenceNumber: o.importsequencenumber ?? null,
+      overriddenCreatedOn: o.overriddencreatedon ?? null,
+      businessDate: (o.actualclosedate ?? o.overriddencreatedon ?? o.createdon ?? "").slice(0, 10) || null,
+    })),
+  );
 
   const byMonth = new Map<string, Agg>();
   const dealSyncs: SyncEntry[] = [];
-  let noCloseDate = 0, noContact = 0;
+  let noCloseDate = 0, noContact = 0, confirmedSamples = 0, suspectDeals = 0, suspectCents = 0;
   const bucketTotals: Record<Bucket, number> = { bsllc: 0, other: 0, manual: 0, unknown: 0 };
 
   for (const o of opps) {
     if (!o.actualclosedate) { noCloseDate++; continue; }
+    const verdict = verdictFor(verdicts, o.opportunityid);
+    // Confirmed demo data is dropped from every total. A SUSPECTED row is
+    // kept: it is equally the shape of a client migrating their own history,
+    // and quietly deleting a client's real revenue is the same size of
+    // mistake as quietly counting demo data. It is counted and said out loud.
+    if (verdict.confirmed) { confirmedSamples++; continue; }
+    if (verdict.suspect) { suspectDeals++; suspectCents += Math.round((o.actualvalue ?? 0) * 100); }
     const contact = o.parentcontactid ?? null;
     if (!contact) noContact++;
     const bucket = classify(contact?.new_firsttouchsource ?? null, contact?.createdon ?? null);
@@ -94,8 +159,11 @@ async function main() {
     `  classified: ${bucketTotals.bsllc} BS LLC · ${bucketTotals.other} other · ` +
       `${bucketTotals.unknown} unknown(pre-field) · ${bucketTotals.manual} manual(excluded)` +
       `${noContact ? ` · ${noContact} with no Contact` : ""}` +
-      `${noCloseDate ? ` · ${noCloseDate} skipped (no close date)` : ""}`,
+      `${noCloseDate ? ` · ${noCloseDate} skipped (no close date)` : ""}` +
+      `${confirmedSamples ? ` · ${confirmedSamples} skipped (confirmed sample/demo record)` : ""}`,
   );
+  const suspicion = suspicionLine(suspectDeals, suspectCents, opps.length);
+  if (suspicion) console.log(`  ${suspicion}`);
 
   const syncs: SyncEntry[] = [];
   for (const [ym, a] of Array.from(byMonth.entries()).sort()) {
@@ -126,8 +194,11 @@ async function main() {
 
   const allSyncs = syncs.concat(dealSyncs);
   if (!allSyncs.length) {
-    console.log("No Closed Won opportunities with a close date — nothing to plant.");
-    process.exit(0);
+    console.log(
+      "No Closed Won opportunities with a close date — planting a no_data snapshot for this month so that a connector which works and has nothing to report is not read as one that has never run.",
+    );
+    const code = runDashboardSync({ databaseUrl, dashboardDir }, [emptyRun(slug, "no_data", null)], { dryRun });
+    process.exit(code);
   }
   console.log(`\nPlanting ${syncs.length} monthly snapshot(s) + ${dealSyncs.length} per-deal row(s).`);
   const code = runDashboardSync({ databaseUrl, dashboardDir }, allSyncs, { dryRun });

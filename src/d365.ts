@@ -124,6 +124,13 @@ export interface OppRow {
   name: string | null;
   actualvalue: number | null;
   actualclosedate: string | null;
+  // How the row ARRIVED, which is what separates demo data from business
+  // without knowing a single name (src/sample-detect.ts). Absent on an org
+  // that rejects the columns — the query degrades rather than failing.
+  createdon?: string | null;
+  importsequencenumber?: number | null;
+  overriddencreatedon?: string | null;
+  _createdby_value?: string | null;
   parentcontactid?: {
     contactid: string;
     fullname: string | null;
@@ -137,8 +144,11 @@ export interface OppRow {
  * related Contact's createdon + first-touch source. Follows @odata.nextLink
  * paging and refreshes the token between pages if it's near expiry.
  */
-export async function fetchClosedWon(cfg: D365Config): Promise<OppRow[]> {
-  const select = "opportunityid,name,actualvalue,actualclosedate";
+export async function fetchClosedWon(cfg: D365Config, opts: { arrivalFields?: boolean } = {}): Promise<OppRow[]> {
+  const arrival = opts.arrivalFields !== false;
+  const select =
+    "opportunityid,name,actualvalue,actualclosedate" +
+    (arrival ? ",createdon,importsequencenumber,overriddencreatedon,_createdby_value" : "");
   const expand = "parentcontactid($select=contactid,fullname,createdon,new_firsttouchsource)";
   const filter = `statecode eq 1 and actualvalue ne null and actualclosedate ge ${BILLABLE_CLOSED_WON_SINCE}T00:00:00Z`;
   let url =
@@ -163,7 +173,14 @@ export async function fetchClosedWon(cfg: D365Config): Promise<OppRow[]> {
           "dpg-prod likely lacks read access on Opportunity/Contact. Flag to the D365 admin.",
       );
     }
-    if (!res.ok) throw new Error(`D365 query failed (${res.status}): ${await res.text()}`);
+    if (!res.ok) {
+      const body = await res.text();
+      // An org that does not expose one of the arrival columns would otherwise
+      // lose the whole import over a detection nicety. Retry without them once
+      // and carry on with name-only sample detection.
+      if (res.status === 400 && arrival) return fetchClosedWon(cfg, { arrivalFields: false });
+      throw new Error(`D365 query failed (${res.status}): ${body}`);
+    }
     const j = (await res.json()) as { value?: OppRow[]; ["@odata.nextLink"]?: string };
     out.push(...(j.value ?? []));
     url = j["@odata.nextLink"] ?? "";

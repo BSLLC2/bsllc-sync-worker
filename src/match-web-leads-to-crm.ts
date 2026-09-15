@@ -7,6 +7,7 @@ import {
   fetchHubspotDealsWithContacts, hsFetchAll, HS_CONTACT_PROPS, hubspotDealStage, hubspotDealSource, resolveHubspotToken,
   ensureLeadAttributionsTable, writeAttributions, ymd,
 } from "./attribution.js";
+import { detectSampleRecords, suspicionLine, verdictFor, type CrmRecordShape } from "./sample-detect.js";
 
 /**
  * Daily: tie the leads WE captured (web_inquiries) to the client's CRM, and
@@ -70,14 +71,56 @@ const d365Stage = (statecode: number | null, kind: "lead" | "opportunity"): Stag
 async function d365Rows(cfg: D365Config, client: ClientRow, idx: Awaited<ReturnType<typeof loadWebInquiryIndex>>, since: string): Promise<AttributionRow[]> {
   const base = `${cfg.resourceUrl}/api/data/v9.2`;
   const labels = await leadSourceLabels(cfg);
-  const leads = await odata(cfg,
-    `${base}/leads?$select=leadid,fullname,companyname,emailaddress1,telephone1,mobilephone,leadsourcecode,createdon,statecode,_qualifyingopportunityid_value` +
-    `&$filter=${encodeURIComponent(`createdon ge ${since}T00:00:00Z`)}`);
-  const opps = await odata(cfg,
-    `${base}/opportunities?$select=opportunityid,name,statecode,estimatedvalue,actualvalue,actualclosedate,createdon,_originatingleadid_value` +
-    `&$expand=parentcontactid($select=contactid,fullname,emailaddress1,telephone1,mobilephone,createdon,new_firsttouchsource)` +
-    `&$filter=${encodeURIComponent(`(createdon ge ${since}T00:00:00Z) or (statecode eq 1 and actualclosedate ge ${BILLABLE_CLOSED_WON_SINCE}T00:00:00Z)`)}`);
+  // ARRIVAL_FIELDS say how a row got into the CRM rather than what it says —
+  // the only thing that separates demo data from business without knowing a
+  // single name (sample-detect.ts). They are standard Dynamics columns, but an
+  // org that rejects one would fail the whole query, so the request degrades
+  // to the original $select on a 400 rather than losing the run: shape-based
+  // detection is a bonus, the attribution chain is the job.
+  const ARRIVAL_FIELDS = ",importsequencenumber,overriddencreatedon,_createdby_value";
+  const askTwice = async (withFields: string, without: string): Promise<any[]> => {
+    try { return await odata(cfg, withFields); }
+    catch (e) {
+      if (!/\(400\)/.test(e instanceof Error ? e.message : "")) throw e;
+      console.log("  D365: this org does not expose the import/creation columns — falling back to name-only sample detection.");
+      return await odata(cfg, without);
+    }
+  };
+  const leadSelect = `${base}/leads?$select=leadid,fullname,companyname,emailaddress1,telephone1,mobilephone,leadsourcecode,createdon,statecode,_qualifyingopportunityid_value`;
+  const leadFilter = `&$filter=${encodeURIComponent(`createdon ge ${since}T00:00:00Z`)}`;
+  const oppSelect = `${base}/opportunities?$select=opportunityid,name,statecode,estimatedvalue,actualvalue,actualclosedate,createdon,_originatingleadid_value`;
+  const oppRest = `&$expand=parentcontactid($select=contactid,fullname,emailaddress1,telephone1,mobilephone,createdon,new_firsttouchsource)` +
+    `&$filter=${encodeURIComponent(`(createdon ge ${since}T00:00:00Z) or (statecode eq 1 and actualclosedate ge ${BILLABLE_CLOSED_WON_SINCE}T00:00:00Z)`)}`;
+  const leads = await askTwice(leadSelect + ARRIVAL_FIELDS + leadFilter, leadSelect + leadFilter);
+  const opps = await askTwice(oppSelect + ARRIVAL_FIELDS + oppRest, oppSelect + oppRest);
   console.log(`  D365: ${leads.length} lead(s) since ${since}, ${opps.length} opportunit${opps.length === 1 ? "y" : "ies"} (created since ${since}, or won since ${BILLABLE_CLOSED_WON_SINCE})`);
+
+  // Leads and opportunities are classified in ONE pool: a stock sample install
+  // plants both in the same minute, and splitting them is what would put a
+  // small entity under the batch threshold. `businessDate` is the date the CRM
+  // DISPLAYS (the overridden one where there is one) — that is the date that
+  // gets spread across years while every row was written in a single minute.
+  const shapes: CrmRecordShape[] = [
+    ...leads.map((l): CrmRecordShape => ({
+      id: l.leadid,
+      text: [l.fullname, l.companyname, l.emailaddress1],
+      writtenAt: l.createdon ?? null,
+      writtenBy: l._createdby_value ?? null,
+      importSequenceNumber: l.importsequencenumber ?? null,
+      overriddenCreatedOn: l.overriddencreatedon ?? null,
+      businessDate: ymd(l.overriddencreatedon ?? l.createdon),
+    })),
+    ...opps.map((o): CrmRecordShape => ({
+      id: o.opportunityid,
+      text: [o.name, o.parentcontactid?.fullname, o.parentcontactid?.emailaddress1],
+      writtenAt: o.createdon ?? null,
+      writtenBy: o._createdby_value ?? null,
+      importSequenceNumber: o.importsequencenumber ?? null,
+      overriddenCreatedOn: o.overriddencreatedon ?? null,
+      businessDate: ymd(o.actualclosedate ?? o.overriddencreatedon ?? o.createdon),
+    })),
+  ];
+  const verdicts = detectSampleRecords(shapes);
 
   const rows: AttributionRow[] = [];
   const leadMatch = new Map<string, ReturnType<typeof matchWebInquiry>>();
@@ -93,7 +136,9 @@ async function d365Rows(cfg: D365Config, client: ClientRow, idx: Awaited<ReturnT
       sourceValue: code != null ? `leadsourcecode=${code} ${label}` : null, bucket,
       matchMethod: m?.method ?? null, webInquiryId: m?.hit.id ?? null, webInquiryAt: m?.hit.submittedAt ?? null, gclid: m?.hit.gclid ?? null,
       stage: d365Stage(l.statecode, "lead"), wonOn: null, valueCents: null,
-      isSample: looksLikeSample(l.fullname, l.companyname, l.emailaddress1),
+      isSample: verdictFor(verdicts, l.leadid).confirmed,
+      sampleSuspect: verdictFor(verdicts, l.leadid).suspect,
+      sampleReason: verdictFor(verdicts, l.leadid).reason,
     });
   }
   for (const o of opps) {
@@ -110,7 +155,9 @@ async function d365Rows(cfg: D365Config, client: ClientRow, idx: Awaited<ReturnT
       sourceValue: fts != null ? `first touch = ${FTS_LABEL.get(fts) ?? fts} (${fts})` : ct ? (bucket === "unknown" ? "first touch blank (contact predates the field)" : "first touch blank") : "no contact on the opportunity",
       bucket, matchMethod: m?.method ?? null, webInquiryId: m?.hit.id ?? null, webInquiryAt: m?.hit.submittedAt ?? null, gclid: m?.hit.gclid ?? null,
       stage, wonOn: stage === "won" ? ymd(o.actualclosedate) : null, valueCents: value != null ? Math.round(Number(value) * 100) : null,
-      isSample: looksLikeSample(o.name, ct?.fullname, ct?.emailaddress1),
+      isSample: verdictFor(verdicts, o.opportunityid).confirmed,
+      sampleSuspect: verdictFor(verdicts, o.opportunityid).suspect,
+      sampleReason: verdictFor(verdicts, o.opportunityid).reason,
     });
   }
   return rows;
@@ -138,7 +185,13 @@ async function hubspotRows(token: string, client: ClientRow, idx: Awaited<Return
       sourceValue: source ? `original source = ${source}${p.hs_analytics_source_data_1 ? ` / ${p.hs_analytics_source_data_1}` : ""}` : null, bucket: hubspotBucket(source),
       matchMethod: m?.method ?? null, webInquiryId: m?.hit.id ?? null, webInquiryAt: m?.hit.submittedAt ?? null, gclid: contact?.properties.hs_google_click_id?.trim() || m?.hit.gclid || null,
       stage, wonOn: stage === "won" ? closed : null, valueCents: Number.isFinite(amount) ? Math.round(amount * 100) : null,
+      // HubSpot exposes no separate "written to the CRM at" timestamp —
+      // createdate IS the business date — so the batch rule in sample-detect.ts
+      // has nothing to read here and only the name check applies. Said out
+      // loud rather than left as an apparent clean bill of health.
       isSample: looksLikeSample(p.dealname, contact?.properties.email),
+      sampleSuspect: false,
+      sampleReason: null,
     });
   }
   // Contacts are HubSpot's leads; keep only the ones that are OUR web leads so
@@ -154,6 +207,7 @@ async function hubspotRows(token: string, client: ClientRow, idx: Awaited<Return
       sourceValue: source ? `original source = ${source}` : null, bucket: hubspotBucket(source),
       matchMethod: m.method, webInquiryId: m.hit.id, webInquiryAt: m.hit.submittedAt, gclid: p.hs_google_click_id?.trim() || m.hit.gclid || null,
       stage: "open", wonOn: null, valueCents: null, isSample: looksLikeSample(p.email, p.lastname),
+      sampleSuspect: false, sampleReason: null,
     });
   }
   return rows;
@@ -169,11 +223,18 @@ function summarize(rows: AttributionRow[], webCount: number, crm: "d365" | "hubs
   const unsourced = rows.filter((r) => r.stage === "won" && !r.isSample && r.bucket === "unknown" && !r.webInquiryId).length;
   const conflicts = rows.filter((r) => !r.isSample && r.webInquiryId && (r.bucket === "other" || r.bucket === "manual")).length;
   const samples = rows.filter((r) => r.isSample).length;
+  // Suspected-import rows are INSIDE the won figure above on purpose — this
+  // never silently subtracts a client's own migrated history. What it does is
+  // refuse to let the total pass without saying so.
+  const suspectWon = won.filter((r) => r.sampleSuspect);
+  const suspects = rows.filter((r) => r.sampleSuspect).length;
   const sum = (xs: AttributionRow[]) => xs.reduce((s, r) => s + (r.valueCents ?? 0), 0);
+  const suspicion = suspicionLine(suspects, suspectWon.reduce((s, r) => s + (r.valueCents ?? 0), 0), rows.length);
   return [
     `web inquiries in window: ${webCount} · found in CRM: ${matched} · CRM leads attributed to us: ${leadsOurs}`,
     `won attributed${floor ? ` (closed ≥ ${floor})` : ""}: ${won.length} deal(s) ${usd(sum(won))} · open attributed pipeline: ${pipeline.length} ${usd(sum(pipeline))}`,
     `won with no source and no match: ${unsourced} · matched but CRM says other/manual: ${conflicts} · sample records: ${samples}`,
+    ...(suspicion ? [suspicion] : []),
   ].join("\n    ");
 }
 
@@ -211,7 +272,7 @@ async function main() {
           console.log(`  ${crm}: ${rows.length} row(s)\n    ${summarize(rows, idx.count, crm)}`);
           if (dryRun) {
             for (const r of rows.filter((x) => x.stage === "won" || x.webInquiryId).slice(0, 25)) {
-              console.log(`    · ${r.recordType} ${r.stage.padEnd(12)} ${(r.recordName ?? "(unnamed)").slice(0, 40).padEnd(40)} ${r.valueCents != null ? usd(r.valueCents).padStart(10) : "".padStart(10)}  ${r.sourceValue ?? "no source"}${r.webInquiryId ? ` · matched by ${r.matchMethod} (${r.webInquiryAt})` : ""}${r.isSample ? " · SAMPLE" : ""}`);
+              console.log(`    · ${r.recordType} ${r.stage.padEnd(12)} ${(r.recordName ?? "(unnamed)").slice(0, 40).padEnd(40)} ${r.valueCents != null ? usd(r.valueCents).padStart(10) : "".padStart(10)}  ${r.sourceValue ?? "no source"}${r.webInquiryId ? ` · matched by ${r.matchMethod} (${r.webInquiryAt})` : ""}${r.isSample ? " · SAMPLE" : ""}${r.sampleSuspect ? " · LOOKS IMPORTED — counted, needs a ruling" : ""}`);
             }
             continue;
           }

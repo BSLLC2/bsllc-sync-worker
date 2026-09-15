@@ -30,7 +30,15 @@ export interface AttributionRow {
   stage: Stage;
   wonOn: string | null;
   valueCents: number | null;
+  /** Confirmed demo/sample data. Never counted anywhere. */
   isSample: boolean;
+  /** It ARRIVED like an import (see sample-detect.ts). Still counted — but
+   *  every figure it is inside says so until a person rules on it. Silently
+   *  dropping a client's migrated real history is the same size of mistake as
+   *  silently counting demo data, so neither happens quietly. */
+  sampleSuspect: boolean;
+  /** One plain sentence naming what was seen. Null when nothing was. */
+  sampleReason: string | null;
 }
 
 // ── Web-inquiry index: the leads WE captured, by the keys a CRM record can carry ──
@@ -73,18 +81,13 @@ export function matchWebInquiry(idx: WebInquiryIndex, ident: { emails?: (string 
 }
 
 // ── Sample / demo records ──
-// Dynamics ships sample data (Fabrikam, Contoso, …) and DPG's org still has
-// it. Rows that look like it are kept for the audit trail but never counted.
-const SAMPLE_WORDS = [
-  "fabrikam", "contoso", "litware", "adventure works", "alpine ski", "coho winery", "fourth coffee", "blue yonder", "city power",
-  "northwind", "trey research", "a. datum", "adatum", "humongous insurance", "lucerne publishing", "margie's travel", "proseware",
-  "school of fine art", "southridge video", "tailspin", "wide world importers", "wingtip", "woodgrove", "relecloud", "bellows college",
-  "best for you organics", "munson", "sample", "test lead", "test opportunity", "example.com",
-];
-export function looksLikeSample(...fields: (string | null | undefined)[]): boolean {
-  const text = fields.filter(Boolean).join(" ").toLowerCase();
-  return SAMPLE_WORDS.some((w) => text.includes(w));
-}
+// A CRM ships sample data and an org can still be carrying it years later.
+// The NAME check below is one signal and the weakest one — it catches only
+// the records somebody remembered to name, and an org whose stock records
+// carried none of the catalogue words in any field read as entirely genuine
+// for months. See sample-detect.ts for what the detection actually rests on
+// (how a row ARRIVED) and for the confirmed / suspected split.
+export { matchesSampleName as looksLikeSample } from "./sample-detect.js";
 
 // ── HubSpot original-source buckets ──
 // Channels BS LLC runs for the client. Everything else is a real source but
@@ -192,6 +195,10 @@ export async function ensureLeadAttributionsTable(c: pg.Client): Promise<void> {
     bucket TEXT NOT NULL DEFAULT 'unknown', match_method TEXT, web_inquiry_id TEXT, web_inquiry_at TEXT, gclid TEXT,
     stage TEXT NOT NULL DEFAULT 'open', won_on TEXT, value_cents INTEGER, is_sample BOOLEAN NOT NULL DEFAULT false,
     synced_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+  // Added after the table existed, so ALTER as well as CREATE (the dashboard's
+  // ensureSchema carries the same two columns).
+  await c.query(`ALTER TABLE lead_attributions ADD COLUMN IF NOT EXISTS sample_suspect BOOLEAN NOT NULL DEFAULT false`);
+  await c.query(`ALTER TABLE lead_attributions ADD COLUMN IF NOT EXISTS sample_reason TEXT`);
   await c.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_lead_attributions_record ON lead_attributions (client_id, crm, record_type, record_id)`);
   await c.query(`CREATE INDEX IF NOT EXISTS idx_lead_attributions_client ON lead_attributions (client_id, stage)`);
 }
@@ -203,15 +210,16 @@ export async function writeAttributions(c: pg.Client, clientId: string, crm: "d3
   for (const r of rows) {
     await c.query(
       `INSERT INTO lead_attributions (id, client_id, client_slug, crm, record_type, record_id, record_name, record_created_on, source_value, bucket,
-         match_method, web_inquiry_id, web_inquiry_at, gclid, stage, won_on, value_cents, is_sample, synced_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, now())
+         match_method, web_inquiry_id, web_inquiry_at, gclid, stage, won_on, value_cents, is_sample, sample_suspect, sample_reason, synced_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20, now())
        ON CONFLICT (client_id, crm, record_type, record_id) DO UPDATE SET
          record_name = EXCLUDED.record_name, record_created_on = EXCLUDED.record_created_on, source_value = EXCLUDED.source_value,
          bucket = EXCLUDED.bucket, match_method = EXCLUDED.match_method, web_inquiry_id = EXCLUDED.web_inquiry_id,
          web_inquiry_at = EXCLUDED.web_inquiry_at, gclid = EXCLUDED.gclid, stage = EXCLUDED.stage, won_on = EXCLUDED.won_on,
-         value_cents = EXCLUDED.value_cents, is_sample = EXCLUDED.is_sample, synced_at = now()`,
+         value_cents = EXCLUDED.value_cents, is_sample = EXCLUDED.is_sample,
+         sample_suspect = EXCLUDED.sample_suspect, sample_reason = EXCLUDED.sample_reason, synced_at = now()`,
       [randomUUID(), r.clientId, r.clientSlug, r.crm, r.recordType, r.recordId, r.recordName, r.recordCreatedOn, r.sourceValue, r.bucket,
-        r.matchMethod, r.webInquiryId, r.webInquiryAt, r.gclid, r.stage, r.wonOn, r.valueCents, r.isSample],
+        r.matchMethod, r.webInquiryId, r.webInquiryAt, r.gclid, r.stage, r.wonOn, r.valueCents, r.isSample, r.sampleSuspect, r.sampleReason],
     );
     upserted++;
   }

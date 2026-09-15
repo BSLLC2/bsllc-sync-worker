@@ -4,6 +4,7 @@ import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { monthSnapshot } from "./dates.js";
+import { evidencedMetric } from "./metric-evidence.js";
 
 /**
  * GA4 → dashboard conversions importer. For clients where we have no CRM to
@@ -199,7 +200,25 @@ async function main() {
       continue;
     }
     const rows: any[] = report.rows ?? [];
+    // What this property demonstrably reports, read off its OWN history before
+    // any month is planted. GA4 answers 0 both for "nobody converted" and for
+    // "no key event is configured on this property", and the API never says
+    // which — so a live 0 is only honest where the property has reported a
+    // non-zero figure for that metric at some point in the window. Everywhere
+    // else the metric goes in as null, which the dashboard's sync records as
+    // no_data for that one key: the run happened, the metric has nothing
+    // behind it. See metric-evidence.ts for why this is not read from the
+    // Admin API, and for how it corrects itself the moment one event fires.
+    //
+    // Revenue was already held back this way (an unconfigured property answers
+    // $0 forever and a live $0 would land in every revenue breakdown); it was
+    // OMITTED rather than nulled, which left no row at all and so read as
+    // "never imported". Both metrics now take the same route, and the run is
+    // always on the record.
+    const convWindow = rows.map((r: any) => Number(r.metricValues?.[1]?.value ?? 0));
+    const revWindow = rows.map((r: any) => Number(r.metricValues?.[2]?.value ?? 0));
     let planted = 0;
+    let convUnevidenced = 0;
     for (const row of rows) {
       const ym = row.dimensionValues?.[0]?.value; // "YYYYMM"
       if (!ym || !/^\d{6}$/.test(ym)) continue;
@@ -209,13 +228,13 @@ async function main() {
       // GA4 reports the CURRENT, in-progress month too — monthSnapshot caps
       // it at today so period_end/synced_at never land in the future.
       const { start, end, syncedAt } = monthSnapshot(ym);
-      const metrics: Record<string, number> = { "ga4.conversions": conv, "ga4.sessions": sessions };
-      // Only plant ga4.revenue_cents when there's an actual figure. Most
-      // clients have no e-commerce tracking configured at all, so GA4 always
-      // answers 0 — planting that as a "live" $0 would add a spurious zero
-      // row to every revenue-by-channel breakdown, not just the clients (like
-      // Tablespoon) that genuinely track purchases in GA4.
-      if (revenueCents > 0) metrics["ga4.revenue_cents"] = revenueCents;
+      const convValue = evidencedMetric(conv, convWindow);
+      if (convValue == null) convUnevidenced++;
+      const metrics: Record<string, number | null> = {
+        "ga4.conversions": convValue,
+        "ga4.sessions": sessions,
+        "ga4.revenue_cents": evidencedMetric(revenueCents, revWindow),
+      };
       syncs.push({
         client_id: slug,
         source: "ga4",
@@ -230,7 +249,12 @@ async function main() {
       });
       planted++;
     }
-    console.log(`  ${slug} (property ${propertyId}) — ${planted} months via ${convMetric} (+sessions)`);
+    console.log(
+      `  ${slug} (property ${propertyId}) — ${planted} months via ${convMetric} (+sessions)` +
+        (convUnevidenced === planted && planted > 0
+          ? ` · ${convMetric} recorded as no data, not as zeros: this property has never reported one, so there is probably no key event configured on it`
+          : ""),
+    );
   }
 
   // The denied list is deliberately printed AFTER the sync summary, below.
