@@ -1,0 +1,57 @@
+name: Clear stale review queue
+
+# Runs the dashboard's `npm run reviews:clear` against the live database.
+# Dry by default: it PRINTS the split -- which completed tasks the review gate
+# would never have routed to an AM, and which ones it keeps and why -- and
+# writes nothing. Set apply=true only after reading a dry run's output.
+#
+# It lives in the worker because DATABASE_URL is an Actions secret here, and
+# the worker already checks the dashboard out for `npm run sync`.
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Write am_review_state = 'none' for the clearable rows (true/false)."
+        required: false
+        default: "false"
+      limit:
+        description: "Rows to print per group (blank = the script's default)."
+        required: false
+        default: ""
+
+concurrency:
+  group: reviews-clear
+  cancel-in-progress: false
+
+jobs:
+  clear:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the dashboard
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Report the split
+        working-directory: dashboard
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APPLY: ${{ inputs.apply }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          args=""
+          if [ "$APPLY" = "true" ]; then args="$args --apply"; fi
+          if [ -n "$LIMIT" ]; then args="$args --limit=$LIMIT"; fi
+          echo "Running: npm run reviews:clear --$args"
+          npm run reviews:clear -- $args
