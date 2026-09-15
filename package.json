@@ -167,7 +167,8 @@
     "verify-ads-operability": "tsx src/verify-ads-operability.ts",
     "test-connections": "tsx src/test-connections.ts",
     "sweep-connections": "tsx src/test-connections.ts --sweep",
-    "verify-connection-probe": "tsx src/verify-connection-probe.ts"
+    "verify-connection-probe": "tsx src/verify-connection-probe.ts",
+    "verify-zero-vs-nothing": "tsx src/verify-zero-vs-nothing.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
