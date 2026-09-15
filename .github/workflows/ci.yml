@@ -36,3 +36,5 @@ jobs:
         run: npm run verify-connection-probe
       - name: Ads operability guard
         run: npm run verify-ads-operability
+      - name: OCH admissions import guard
+        run: npm run verify-och-import

@@ -170,7 +170,9 @@
     "sweep-connections": "tsx src/test-connections.ts --sweep",
     "verify-connection-probe": "tsx src/verify-connection-probe.ts",
     "verify-zero-vs-nothing": "tsx src/verify-zero-vs-nothing.ts",
-    "verify-attribution-dates": "tsx src/verify-attribution-dates.ts"
+    "verify-attribution-dates": "tsx src/verify-attribution-dates.ts",
+    "verify-och-import": "tsx src/verify-och-import.ts",
+    "debug-och-duplicate-admissions": "tsx src/debug-och-duplicate-admissions.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
