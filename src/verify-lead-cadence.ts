@@ -193,6 +193,27 @@ if (split) {
   const line = stoppageLine("Some Client", split);
   check("the message says the other feed is still arriving", /calls still arriving/.test(line), line);
 }
+
+// The first live run of this rule said "calls stopped ... forms still arriving"
+// about OCH while the forms feed had ALSO been silent since 2026-09-10 — it was
+// simply too slow to cross the alarm threshold. An alert that states something
+// false is worse than no alert, so a silent-but-under-threshold feed is now
+// reported as quiet and never as arriving.
+console.log("\nA feed that is quiet but under the threshold is never called arriving");
+const slowForms = [
+  ...dailyFeed("2026-08-10", "2026-09-10", 14, "Phone: CallTrackingMetrics"),
+  // Under one form a business day: silent since the same day, far under the bar.
+  ...dailyFeed("2026-08-10", "2026-09-10", 1, "Contact Us").filter((_, i) => i % 2 === 0),
+];
+const mixed = detectFeedStoppage(slowForms, NOW);
+check("the loud feed is the one reported stopped", mixed?.stopped.map((c) => c.feed).join() === "calls", String(mixed?.stopped.map((c) => c.feed)));
+check("the slow feed is not counted as running", (mixed?.running.length ?? -1) === 0, String(mixed?.running.map((c) => c.feed)));
+check("the slow feed is reported as quiet", mixed?.quiet.map((c) => c.feed).join() === "forms", String(mixed?.quiet.map((c) => c.feed)));
+if (mixed) {
+  const mline = stoppageLine("Some Client", mixed);
+  check("the message never claims the quiet feed is arriving", !/forms still arriving/.test(mline), mline);
+  check("the message says the quiet feed is quiet too", /forms quiet too/.test(mline), mline);
+}
 check("a tracked call is classified as a call", feedOf("Phone: CallTrackingMetrics") === "calls" && feedOf("Phone: ctm") === "calls");
 check("an unnamed form is still a form", feedOf(null) === "forms" && feedOf("Admissions Inquiry") === "forms");
 

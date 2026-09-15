@@ -60,8 +60,15 @@ export interface FeedCadence {
 export interface FeedStoppage {
   /** Feeds that were producing and have gone silent. Never empty. */
   stopped: FeedCadence[];
-  /** Feeds with a baseline that are still arriving. */
+  /** Feeds with a baseline that are genuinely still producing — a lead within
+   *  the last business day. A feed that is ALSO silent but has not crossed the
+   *  alarm threshold is not one of these: saying "forms still arriving" about a
+   *  feed whose last lead was five days ago is a false statement in an alert,
+   *  and the first OCH run made exactly that claim. */
   running: FeedCadence[];
+  /** Feeds with a baseline that are silent too, but too slow for the rule to
+   *  call it a stoppage yet. Reported as quiet, never as arriving. */
+  quiet: FeedCadence[];
   /** True when every feed with a baseline has stopped. */
   total: boolean;
   /** Newest lead across the stopped feeds, and the business days since it. */
@@ -191,9 +198,11 @@ export function detectFeedStoppage(history: LeadEvent[], now: Date): FeedStoppag
   const stopped = cadences.filter((c) => c.stopped);
   if (!stopped.length) return null;
   const withBaseline = cadences.filter((c) => c.hasBaseline);
-  const running = withBaseline.filter((c) => !c.stopped);
+  const others = withBaseline.filter((c) => !c.stopped);
+  const running = others.filter((c) => c.businessDaysSilent < MIN_SILENT_BUSINESS_DAYS);
+  const quiet = others.filter((c) => c.businessDaysSilent >= MIN_SILENT_BUSINESS_DAYS);
   const newest = stopped.reduce((a, c) => (c.lastAt > a.lastAt ? c : a), stopped[0]!);
-  return { stopped, running, total: running.length === 0, lastAt: newest.lastAt, businessDaysSilent: newest.businessDaysSilent };
+  return { stopped, running, quiet, total: running.length === 0, lastAt: newest.lastAt, businessDaysSilent: newest.businessDaysSilent };
 }
 
 /** Stable per-client entry for the monitor's alert signature, so this alarm
@@ -215,7 +224,13 @@ export function stoppageLine(label: string, report: FeedStoppage): string {
   const rate = report.stopped.reduce((n, c) => n + c.perBusinessDay, 0);
   const rateText = rate < 1 ? rate.toFixed(1) : String(Math.round(rate));
   const days = Math.round(report.businessDaysSilent);
-  const still = report.running.length ? ` ${report.running.map((c) => FEED_WORD[c.feed]).join(" and ")} still arriving.` : "";
+  const arriving = report.running.length
+    ? ` ${report.running.map((c) => FEED_WORD[c.feed]).join(" and ")} still arriving.`
+    : "";
+  const alsoQuiet = report.quiet.length
+    ? ` ${report.quiet.map((c) => FEED_WORD[c.feed]).join(" and ")} quiet too, too slow to call it yet.`
+    : "";
+  const still = `${arriving}${alsoQuiet}`;
   return (
     `${label} — ${feeds} stopped. Last one ${dayKey(report.lastAt)}, ${days} business days ago; it was running about ${rateText} a business day.${still}` +
     " Check the webform key first (`npm run debug-och-webform-key-rotation-check`): a rotated key turns every post into a 401 and nothing here errors." +
