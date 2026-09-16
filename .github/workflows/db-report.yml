@@ -1,0 +1,69 @@
+name: Read the database
+
+# Runs one of the dashboard's named read-only reports (`npm run db:report`)
+# against the live database and prints it. There is no --sql input on purpose:
+# a workflow input carrying arbitrary SQL is a write primitive with a text box
+# in front of it, and no reviewer ever sees the statement. Every query lands
+# through a commit in scripts/db-report.ts and is refused if it is not a plain
+# read.
+#
+# It lives in the worker because DATABASE_URL is an Actions secret here.
+# Prefers DATABASE_URL_READONLY when that secret exists, so the connection
+# physically cannot write; falls back to DATABASE_URL and says so.
+on:
+  workflow_dispatch:
+    inputs:
+      report:
+        description: "Report name. Leave blank to list what there is."
+        required: false
+        default: ""
+      limit:
+        description: "Max rows (default 40, cap 200)."
+        required: false
+        default: ""
+
+concurrency:
+  group: db-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the dashboard
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run the report
+        working-directory: dashboard
+        env:
+          READONLY_URL: ${{ secrets.DATABASE_URL_READONLY }}
+          FULL_URL: ${{ secrets.DATABASE_URL }}
+          REPORT: ${{ inputs.report }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          if [ -n "$READONLY_URL" ]; then
+            export DATABASE_URL="$READONLY_URL"
+            echo "Connected with the read-only role."
+          else
+            export DATABASE_URL="$FULL_URL"
+            echo "NOTE: DATABASE_URL_READONLY is not set, so this ran as the full role."
+            echo "      The script still refuses anything that is not a plain read, but a"
+            echo "      read-only Postgres role would make that structural. Worth adding."
+          fi
+          args=""
+          if [ -n "$REPORT" ]; then args="$args --report=$REPORT"; else args="$args --list"; fi
+          if [ -n "$LIMIT" ]; then args="$args --limit=$LIMIT"; fi
+          npm run db:report -- $args
