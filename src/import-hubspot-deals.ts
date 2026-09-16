@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { resolveAllowedPipelines, pipelineVerdict, PIPELINE_ENV_VAR } from "./deal-pipeline";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -103,10 +104,42 @@ async function main() {
     const si = stageMap.get(d.properties.dealstage ?? "");
     return !si ? true : !si.isClosed;
   };
-  const openDeals = deals.filter(isOpen);
+  // Only deals from a SALES pipeline. This importer is the scheduled path
+  // (11:00 and 23:00 UTC) and writes raw SQL straight into `deals`, so the
+  // app's crm-import filter never sees these rows — without this, forty-six
+  // delivery sign-offs from the "Contracts" pipeline keep arriving in the
+  // sales forecast as $0 deals however many times somebody deletes them.
+  // src/deal-pipeline.ts is a byte-for-byte copy of the app's authority; the
+  // rule reads the pipeline id and nothing else, and a deal reporting no
+  // pipeline is kept.
+  const allowed = resolveAllowedPipelines(process.env[PIPELINE_ENV_VAR]);
+  const skipped = new Map<string, { label: string; why: string; names: string[] }>();
+  const salesDeals = deals.filter((d) => {
+    const v = pipelineVerdict(d.properties.pipeline ?? null, allowed);
+    if (v.keep) return true;
+    const key = v.pipelineId ?? "(none)";
+    const entry = skipped.get(key) ?? { label: v.label, why: v.why, names: [] };
+    entry.names.push(`${d.properties.dealname || "(unnamed)"} [${d.id}]`);
+    skipped.set(key, entry);
+    return false;
+  });
+
+  // Never silently. A filter nobody can see the effect of is how a real deal
+  // goes missing without anyone noticing for a quarter.
+  if (skipped.size > 0) {
+    const total = Array.from(skipped.values()).reduce((n, e) => n + e.names.length, 0);
+    console.log(`  Skipped ${total} deal(s) from ${skipped.size} non-sales pipeline(s) (${PIPELINE_ENV_VAR}=* imports everything):`);
+    for (const [id, e] of skipped) {
+      console.log(`    ${e.label} (${id}) — ${e.names.length}: ${e.why}`);
+      for (const n of e.names.slice(0, 20)) console.log(`      · ${n}`);
+      if (e.names.length > 20) console.log(`      … and ${e.names.length - 20} more`);
+    }
+  }
+
+  const openDeals = salesDeals.filter(isOpen);
 
   if (dryRun) {
-    console.log(`  ${openDeals.length} OPEN deals to reconcile (of ${deals.length} total; closed left untouched); ${companyIds.length} companies referenced`);
+    console.log(`  ${openDeals.length} OPEN deals to reconcile (of ${salesDeals.length} from a sales pipeline, ${deals.length} pulled; closed left untouched); ${companyIds.length} companies referenced`);
     return;
   }
 

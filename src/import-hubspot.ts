@@ -150,6 +150,14 @@ async function main() {
     return {
       hubspotId: d.id,
       companyHubspotId: assocFirst(d, "companies"),
+      // Which HubSpot pipeline this came from. We have always ASKED for this
+      // property (see the fetch list above) and always dropped it before the
+      // app saw it, which is how forty-six delivery sign-offs from the
+      // "Contracts" pipeline ended up in the sales forecast as $0 deals. The
+      // app's shared/deal-pipeline.ts does the rest: allowlist, report, and
+      // marking anything already on the board. Null is fine and means "keep",
+      // so nothing changes for a payload that predates this.
+      pipeline: d.properties.pipeline || null,
       name: d.properties.dealname || "(unnamed deal)",
       stage,
       status,
