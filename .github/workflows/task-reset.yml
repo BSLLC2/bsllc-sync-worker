@@ -1,0 +1,128 @@
+name: Start a board again
+
+# Archives an account's open tasks so its board can be rebuilt projects-first,
+# and puts a batch back if that was the wrong call. Runs the dashboard's
+# `npm run tasks:reset`; `shared/task-reset.ts` there is the whole decision.
+#
+# DRY BY DEFAULT. With apply=false — which is what you get unless you type
+# otherwise — it prints what WOULD change and writes nothing. Read that output
+# before running it for real; the first thing it prints is the split between
+# work a person typed and findings a check will simply file again tomorrow.
+#
+# It ARCHIVES, it does not delete. Every row keeps its comments, its vendor's
+# work log, the bills costed against it and its task number, and `undo` puts a
+# batch back exactly as it was, including the review state it had.
+#
+# It lives in the worker because DATABASE_URL is an Actions secret here, the
+# same as db-report.yml and clear-stale-reviews.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Account name or id (e.g. LBL Law). Leave blank only if you tick all_clients."
+        required: false
+        default: ""
+      all_clients:
+        description: "Every account at once. With apply this ALSO needs yes_all_accounts."
+        type: boolean
+        required: false
+        default: false
+      apply:
+        description: "Write the change. Leave OFF first and read the dry run."
+        type: boolean
+        required: false
+        default: false
+      by:
+        description: "Who is doing this. Required to apply — nothing archives work with nobody's name on it."
+        required: false
+        default: ""
+      reason:
+        description: "Why. Required to apply; it is written onto every row and is the only record of why the board was cleared."
+        required: false
+        default: ""
+      include:
+        description: "Holds to release, comma separated (e.g. machine,client_facing). The dry run lists what is held and what each release costs. Blank = release none."
+        required: false
+        default: ""
+      undo:
+        description: "Put a batch back. 'newest' for the last one, or an ISO timestamp the run printed. Leave blank for an ordinary reset."
+        required: false
+        default: ""
+      yes_all_accounts:
+        description: "Second confirmation, required only to APPLY across every account."
+        type: boolean
+        required: false
+        default: false
+      limit:
+        description: "Example rows to print per group (default 12)."
+        required: false
+        default: ""
+
+concurrency:
+  group: task-reset
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the dashboard
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run it
+        working-directory: dashboard
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLIENT: ${{ inputs.client }}
+          ALL_CLIENTS: ${{ inputs.all_clients }}
+          APPLY: ${{ inputs.apply }}
+          BY: ${{ inputs.by }}
+          REASON: ${{ inputs.reason }}
+          INCLUDE: ${{ inputs.include }}
+          UNDO: ${{ inputs.undo }}
+          YES_ALL: ${{ inputs.yes_all_accounts }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$ALL_CLIENTS" = "true" ]; then
+            args+=(--all-clients)
+          else
+            args+=(--client="$CLIENT")
+          fi
+          # 'newest' is this workflow's word for "the last batch"; the script
+          # takes a bare --undo for that and --undo=<iso> for an older one.
+          if [ -n "$UNDO" ]; then
+            if [ "$UNDO" = "newest" ]; then args+=(--undo); else args+=(--undo="$UNDO"); fi
+          fi
+          if [ -n "$INCLUDE" ]; then args+=(--include="$INCLUDE"); fi
+          if [ -n "$LIMIT" ]; then args+=(--limit="$LIMIT"); fi
+          if [ "$APPLY" = "true" ]; then
+            args+=(--apply)
+            # The script refuses without these; say so here rather than making
+            # somebody read a stack trace to find out.
+            if [ -z "$BY" ] || { [ -z "$REASON" ] && [ -z "$UNDO" ]; }; then
+              echo "To apply, fill in 'by' and 'reason'. They are written onto every row."
+              exit 1
+            fi
+            if [ -n "$BY" ]; then args+=(--by="$BY"); fi
+            if [ -n "$REASON" ]; then args+=(--reason="$REASON"); fi
+            if [ "$YES_ALL" = "true" ]; then args+=(--yes-all-accounts); fi
+          else
+            echo "DRY RUN — nothing will be written. Tick 'apply' once you have read this."
+            echo
+          fi
+          npm run tasks:reset -- "${args[@]}"
