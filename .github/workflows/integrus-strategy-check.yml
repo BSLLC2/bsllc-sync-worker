@@ -1,0 +1,27 @@
+name: Integrus strategy deck check (READ ONLY)
+
+# Read-only DataForSEO validation of the Integrus strategy deck: domain and
+# competitor standing, the deck's volume claims re-priced, BOFU/MOFU demand by
+# vertical, live top-10 SERPs, keyword gaps, and the live site inventory.
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run keyword audit
+        env:
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run integrus-strategy-check 2>&1 | tee integrus-check.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integrus-check
+          path: integrus-check.txt

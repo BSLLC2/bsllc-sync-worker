@@ -173,7 +173,8 @@
     "verify-attribution-dates": "tsx src/verify-attribution-dates.ts",
     "verify-och-import": "tsx src/verify-och-import.ts",
     "verify-och-attribution": "tsx src/verify-och-attribution.ts",
-    "debug-och-duplicate-admissions": "tsx src/debug-och-duplicate-admissions.ts"
+    "debug-och-duplicate-admissions": "tsx src/debug-och-duplicate-admissions.ts",
+    "integrus-strategy-check": "tsx src/integrus-strategy-check.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
