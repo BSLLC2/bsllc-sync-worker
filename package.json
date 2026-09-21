@@ -174,7 +174,8 @@
     "verify-och-import": "tsx src/verify-och-import.ts",
     "verify-och-attribution": "tsx src/verify-och-attribution.ts",
     "debug-och-duplicate-admissions": "tsx src/debug-och-duplicate-admissions.ts",
-    "integrus-strategy-check": "tsx src/integrus-strategy-check.ts"
+    "integrus-strategy-check": "tsx src/integrus-strategy-check.ts",
+    "integrus-strategy-check-2": "tsx src/integrus-strategy-check-2.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
