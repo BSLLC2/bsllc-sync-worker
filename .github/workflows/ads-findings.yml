@@ -66,7 +66,17 @@ jobs:
         # scheduled job, and stamping a fresh heartbeat from a hand-dispatched
         # dry run would hide a schedule that has stopped firing — the exact
         # failure this heartbeat exists to expose.
-        if: always() && inputs.dry_run != 'true'
+        #
+        # A SCOPED RUN is excluded for the same reason, one step further on.
+        # The `ads_findings` heartbeat is ONE row for the whole book, so a run
+        # that read a single account and stamped it would claim every other
+        # account was checked today. That matters more now that the dashboard
+        # can dispatch this on demand per client (POST /api/ads-findings/refresh):
+        # without this line, one person pressing "Check now" on one account
+        # would reset the freshness clock for all of them and hide a Monday
+        # cron that never fired. A blank `client` is the scheduled job and the
+        # whole-book hand run, and both legitimately stamp it.
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npm run heartbeat -- --job=ads_findings --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log
