@@ -93,7 +93,7 @@ jobs:
           case "$SCRIPT" in
             monitor-freshness|dump-client-metrics|debug-september-coverage|debug-client-cltv|debug-data-health|debug-all-clients-gap-status|sync-slack-users) ;;
             ads-audit|verify-ads-findings) ;;
-            ads-findings|ads-apply-approved|ads-vendor-briefs) EXTRA_ARGS="$EXTRA_ARGS --dry-run" ;;
+            ads-findings|ads-apply-approved) EXTRA_ARGS="$EXTRA_ARGS --dry-run" ;;
             import-*|oneoff-*|audit-and-repair) EXTRA_ARGS="$EXTRA_ARGS --dry-run" ;;
             *) echo "script '$SCRIPT' is not on the read-only allowlist"; exit 1 ;;
           esac

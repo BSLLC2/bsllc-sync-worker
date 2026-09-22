@@ -189,13 +189,22 @@ async function fileUrgentTasks(c: pg.Client, clientId: string, clientName: strin
           WHERE client_id = $1 AND source = 'ads-audit' AND external_id = $2 AND status <> 'complete'`,
         [clientId, key, title, description],
       );
+      // The finding has always carried a `task_id` column and this job never
+      // wrote it, so the task it filed was only ever derivable by rebuilding
+      // the external_id. The dashboard's queue reads `task_id` to say who is
+      // holding the work, so a row filed before this stamp reads as never
+      // written up. Backfilled here on every run rather than migrated.
+      await c.query(`UPDATE ads_findings SET task_id = $2 WHERE id = $1 AND task_id IS DISTINCT FROM $2`,
+        [r.id, (exists[0] as { id: string }).id]);
       continue;
     }
+    const taskId = randomUUID();
     await c.query(
       `INSERT INTO commitments (id, client_id, priority, title, description, owner_type, owner_name, status, category, workstream, due_date, source, external_id)
        VALUES ($1, $2, 'P1', $3, $4, 'bs_llc', 'BS LLC', 'not_started', 'ongoing', 'Paid Search', to_char(now() + interval '5 days', 'YYYY-MM-DD'), 'ads-audit', $5)`,
-      [randomUUID(), clientId, title, description, key],
+      [taskId, clientId, title, description, key],
     );
+    await c.query(`UPDATE ads_findings SET task_id = $2 WHERE id = $1`, [r.id, taskId]);
     filed++;
   }
 

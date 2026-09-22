@@ -140,7 +140,6 @@
     "ads-findings": "tsx src/ads-findings-run.ts",
     "ads-apply-approved": "tsx src/ads-apply-approved.ts",
     "ads-verify-outcomes": "tsx src/ads-verify-outcomes.ts",
-    "ads-vendor-briefs": "tsx src/ads-vendor-briefs.ts",
     "verify-ads-change-history": "tsx src/verify-ads-change-history.ts",
     "verify-ads-findings": "tsx src/verify-ads-findings.ts",
     "verify-ads-write": "tsx src/verify-ads-write.ts",
