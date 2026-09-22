@@ -1,6 +1,10 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
-import { evaluate, evidenceHash, materiallyChanged, ADS_RULESET_VERSION, THRESHOLDS, type AuditInput } from "./ads/rules.js";
+import {
+  evaluate, evidenceHash, materiallyChanged, trackingReading, costTargets, governingTarget,
+  ADS_RULESET_VERSION, THRESHOLDS,
+  type AuditInput, type TrackingFacts, type ClientEconomics,
+} from "./ads/rules.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { applyChangeSet, rollbackChangeSet, type ChangeSet, type PriorValue } from "./apply-ads-changes.js";
 
@@ -62,6 +66,17 @@ const FIXTURE: AuditInput = {
       costMicros: 910_000_000, clicks: 640, impressions: 88_000, conversions: 0,
       impressionShare: 0.19, budgetLostShare: 0.04, rankLostShare: 0.62,
     },
+    // Converts, is not budget-capped, is not rank-limited, and every metric on
+    // it reads healthy — and each of those four conversions costs $150 against
+    // a $95 ceiling. This is the campaign the old engine had nothing to say
+    // about: at identical impression-share numbers it looked like the one above
+    // it that converts at $67.
+    {
+      id: "300", name: "Search — Competitor Conquest", channelType: "SEARCH",
+      dailyBudgetMicros: 30_000_000, budgetResourceName: "customers/1234567890/campaignBudgets/902",
+      costMicros: 600_000_000, clicks: 300, impressions: 12_000, conversions: 4,
+      impressionShare: 0.55, budgetLostShare: 0.02, rankLostShare: 0.11,
+    },
   ],
   searchTerms: [
     { term: "emergency service near me", campaignId: "200", campaignName: "Search — Broad Prospecting", adGroupName: "Broad", costMicros: 142_000_000, clicks: 96, conversions: 0, allConversions: 0 },
@@ -85,7 +100,37 @@ const FIXTURE: AuditInput = {
   ],
   existingNegatives: new Set(["service jobs"]),
   protectedPatterns: ["northgate clinic"],
+  // A healthy conversion column: tracking configured, one action switched on,
+  // counting toward the goal, categorised by the platform as a lead form, and
+  // recording the conversions the campaigns report. Every rule that argues
+  // from a nought needs this to be true before it may argue.
+  tracking: {
+    status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
+    actions: [
+      { id: "500", name: "Contact form", status: "ENABLED", category: "SUBMIT_LEAD_FORM", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: 40 },
+      { id: "501", name: "Newsletter signup", status: "ENABLED", category: "ENGAGEMENT", actionType: "WEBPAGE", primaryForGoal: false, conversionsInWindow: 310 },
+    ],
+  },
+  // What the client has recorded about what a customer is worth. A $95
+  // cost-per-lead ceiling they stated, plus the two figures a modelled
+  // break-even is built from.
+  economics: {
+    customerValueCents: 240_000,       // $2,400 a customer
+    customerValueFromClient: true,
+    closeRatePct: 5,                   // → $120 a lead, modelled
+    cplCeilingCents: 9_500,            // $95, stated
+    cplCeilingMonth: "2026-09",
+  },
 };
+
+/** The same account with one thing changed. Used to drive the tracking rules
+ *  without a second fixture drifting away from the first. */
+function withTracking(tracking: TrackingFacts | null): AuditInput {
+  return { ...FIXTURE, tracking };
+}
+function withEconomics(economics: ClientEconomics | null): AuditInput {
+  return { ...FIXTURE, economics };
+}
 
 /**
  * A recording Google Ads client.
@@ -285,6 +330,198 @@ async function main() {
   const xPv = xOut.priorValues.filter((p) => p.kind === "budget");
   ok("a stale item is skipped without costing a current one in the same set",
     xPv.length === 1, `${xPv.length} budget prior value(s)`);
+
+
+  // ── 7. The conversion column, and what it licenses ────────────────────────
+  // Every rule in the engine judges a campaign, a term or a keyword on
+  // "converted" or "converted nothing". This section is about what happens
+  // when that column cannot be trusted, which until rules v2 was nothing at
+  // all: the engine argued from noughts it had never checked.
+  console.log("\n7. Conversion tracking decides what the rest of the engine may say");
+
+  const totals = { costMicros: 3_910_000_000, clicks: 2_120, conversions: 40 };
+  const healthy = trackingReading(FIXTURE.tracking, totals);
+  ok("a configured, counting, lead-shaped column is trusted for both questions",
+    healthy.countsAnything === "yes" && healthy.countsOutcomes === "yes" && healthy.defects.length === 0);
+
+  const notTracked = trackingReading({ status: "NOT_CONVERSION_TRACKED", actions: [] }, totals);
+  ok("an account with no conversion tracking is read as counting nothing",
+    notTracked.countsAnything === "no" && notTracked.defects[0]?.key === "not_tracked");
+
+  const noneEnabled = trackingReading({
+    status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
+    actions: [{ id: "1", name: "Old form", status: "REMOVED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: 0 }],
+  }, totals);
+  ok("an account whose only conversion action is switched off counts nothing",
+    noneEnabled.countsAnything === "no" && noneEnabled.defects[0]?.key === "not_tracked");
+
+  const noPrimary = trackingReading({
+    status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
+    actions: [
+      { id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: false, conversionsInWindow: 120 },
+      { id: "2", name: "Phone click", status: "ENABLED", category: "PHONE_CALL_LEAD", actionType: "WEBPAGE", primaryForGoal: false, conversionsInWindow: 60 },
+    ],
+  }, totals);
+  ok("actions that all count as secondary leave the conversion column at nought",
+    noPrimary.countsAnything === "no" && noPrimary.defects[0]?.key === "no_primary",
+    "180 conversions recorded and none of them reaches the column every rule reads");
+
+  const silent = trackingReading({
+    status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
+    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: 0 }],
+  }, totals);
+  ok("a counting action that has recorded nothing on real spend reads as a broken tag",
+    silent.countsAnything === "no" && silent.defects[0]?.key === "primary_silent");
+
+  const quiet = trackingReading({
+    status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
+    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: 0 }],
+  }, { costMicros: 20_000_000, clicks: 40, conversions: 0 });
+  ok("…but the same silence under the spend floor is unknown, not a defect",
+    quiet.countsAnything === "unknown" && quiet.defects.length === 0 && quiet.unread.length > 0,
+    `floor ${usd(THRESHOLDS.trackingSilenceMinSpendMicros)}/window`);
+
+  const pageViews = trackingReading({
+    status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
+    actions: [{ id: "1", name: "Thank you page", status: "ENABLED", category: "PAGE_VIEW", actionType: "GOOGLE_ANALYTICS_4_CUSTOM", primaryForGoal: true, conversionsInWindow: 900 }],
+  }, totals);
+  ok("a column counting page views records something but records no outcome",
+    pageViews.countsAnything === "yes" && pageViews.countsOutcomes === "no"
+      && pageViews.defects[0]?.key === "primary_not_an_outcome",
+    "the category is the platform's own, not a guess at the action's name");
+
+  const everyEvent = trackingReading({
+    status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
+    actions: [{ id: "1", name: "GA4 import", status: "ENABLED", category: "DEFAULT", actionType: "GOOGLE_ANALYTICS_4_CUSTOM", primaryForGoal: true, conversionsInWindow: 5_000 }],
+  }, { costMicros: 900_000_000, clicks: 2_000, conversions: 5_000 });
+  ok("more conversions than clicks is read as a column counting events",
+    everyEvent.countsOutcomes === "no" && everyEvent.defects[0]?.key === "implausible_rate",
+    "the fallback signal, used only where the category says nothing");
+
+  const unread = trackingReading({ status: null, actions: null }, totals);
+  ok("a failed read is unknown on both questions and never a defect",
+    unread.countsAnything === "unknown" && unread.countsOutcomes === "unknown"
+      && unread.defects.length === 0 && unread.unread.length === 1);
+
+  const countsUnread = trackingReading({
+    status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
+    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: null }],
+  }, totals);
+  ok("an action whose recorded count was not read is unknown, never a silent tag",
+    countsUnread.countsAnything === "unknown" && countsUnread.defects.length === 0,
+    "a null count arriving as a nought would invent a broken tag on a working account");
+
+  // ── 8. What a broken column stops the engine proposing ────────────────────
+  // The money question in this whole section: the waste rules select on "this
+  // converted nothing", and on a broken account everything converted nothing.
+  console.log("\n8. A broken conversion column holds back the proposals that argue from a nought");
+
+  const brokenRun = evaluate(withTracking({ status: "NOT_CONVERSION_TRACKED", actions: [] }));
+  const brokenNegatives = brokenRun.filter((f) => f.findingType === "wasted_search_term");
+  ok("no negative keyword is proposed on an account with no working conversion column",
+    brokenNegatives.length === 0,
+    "the same terms are proposed on the healthy fixture — the account did not change, the trust in its noughts did");
+  ok("no dead-keyword row either, for the same reason",
+    brokenRun.every((f) => f.findingType !== "dead_keyword"));
+  ok("and nothing anywhere in the broken run carries a change to apply",
+    brokenRun.every((f) => f.changePayload === null),
+    "including the budget increase, which would be spending more on an account nobody can read");
+
+  const trackingRows = brokenRun.filter((f) => f.findingType === "conversion_tracking_gap");
+  ok("the account gets a tracking finding instead", trackingRows.length === 1, trackingRows[0]?.title ?? "none");
+  const held = trackingRows[0];
+  ok("…which NAMES what was held back and what it is worth, rather than the money vanishing",
+    Boolean(held) && (held!.evidence.metrics.heldBackItems ?? 0) > 0
+      && (held!.evidence.metrics.heldBackMicros ?? 0) > 0
+      && held!.summary.includes("negative keywords"),
+    `${held?.evidence.metrics.heldBackItems} item(s), ${usd(held?.evidence.metrics.heldBackMicros ?? 0)}`);
+  ok("the tracking finding claims no dollar impact",
+    held?.estImpactCents === 0,
+    "what a false conversion count costs is the decisions taken on it, which nothing here can price");
+  ok("no 'converting nothing' row is raised on an account that records nothing",
+    brokenRun.every((f) => f.findingType !== "no_conversions"),
+    "it would be a second row saying what the tracking row says, with a worse explanation");
+
+  const unreadRun = evaluate(withTracking(null));
+  ok("an adapter that never read the tracking is held back the same way",
+    unreadRun.every((f) => f.findingType !== "wasted_search_term"),
+    "'we did not look' is not 'we looked and it is fine'");
+  const unreadRow = unreadRun.find((f) => f.findingType === "conversion_tracking_gap");
+  ok("…and the run says so on its own row rather than reading as a clean account",
+    Boolean(unreadRow) && unreadRow!.title.includes("could not be read"),
+    unreadRow?.title ?? "none");
+
+  // ── 9. The client's own goal ──────────────────────────────────────────────
+  // Until rules v2 no rule read any of this, so a campaign hitting the target
+  // and one running at three times it produced the identical recommendation.
+  console.log("\n9. The rules read what the client said a lead may cost");
+
+  const stated = costTargets(FIXTURE.economics);
+  ok("a stated ceiling and a modelled break-even are both produced, and kept apart",
+    stated.length === 2 && stated[0]!.basis === "stated" && stated[1]!.basis === "modelled",
+    stated.map((t) => `${t.basis} $${(t.cents / 100).toFixed(2)}`).join(" · "));
+  ok("the client's own instruction decides the verdict, never the estimate",
+    governingTarget(stated)?.basis === "stated");
+  ok("the modelled figure says 'estimated' in the sentence it is printed in",
+    stated[1]!.line.startsWith("Estimated"),
+    "the label is part of the number, not a caveat elsewhere");
+  ok("a nought ceiling is never read as a ceiling of nothing",
+    costTargets({ ...FIXTURE.economics!, cplCeilingCents: null }).every((t) => t.basis !== "stated"),
+    "client_targets.cpl_ceiling_cents is DEFAULT 0 and its dialog says to leave it at 0 to skip");
+  ok("half a customer value is no modelled figure at all",
+    costTargets({ ...FIXTURE.economics!, closeRatePct: null, cplCeilingCents: null }).length === 0,
+    "leads x an assumed rate is a figure that renders identically to a measured one");
+
+  const overTargetRow = a.find((f) => f.findingType === "cpa_above_target");
+  ok("a campaign converting above the client's ceiling is a finding of its own",
+    Boolean(overTargetRow), overTargetRow?.title ?? "none");
+  ok("…and it proposes nothing automatic",
+    overTargetRow?.changePayload === null && overTargetRow?.applicability === "vendor");
+  ok("…and its figure is the gap, stated as a gap rather than a saving",
+    (overTargetRow?.estImpactCents ?? 0) > 0
+      && /not a saving/.test(overTargetRow?.impactAssumption ?? ""),
+    `$${Math.round((overTargetRow?.estImpactCents ?? 0) / 100)}/mo`);
+
+  // The one the owner asked for: identical impression-share numbers, opposite
+  // recommendations, decided by the client's own target.
+  const cheapCeiling = evaluate(withEconomics({ ...FIXTURE.economics!, cplCeilingCents: 2_000, cplCeilingMonth: "2026-09" }));
+  const cappedUnderCheap = cheapCeiling.find((f) => f.findingType === "budget_limited" && f.entityName === "Search — Core Services");
+  const cappedAtTarget = a.find((f) => f.findingType === "budget_limited" && f.entityName === "Search — Core Services");
+  ok("the SAME budget-capped campaign is proposed budget under one ceiling and refused it under another",
+    cappedAtTarget?.applicability === "api" && cappedUnderCheap?.applicability === "vendor"
+      && cappedUnderCheap?.changePayload === null,
+    "$95 ceiling → raise it; $20 ceiling → it already costs too much, so more budget buys more of the same");
+  ok("…and the refusal says which, rather than going quiet",
+    /over its cost target/.test(cappedUnderCheap?.guardNote ?? ""),
+    cappedUnderCheap?.title ?? "none");
+
+  const noGoal = evaluate(withEconomics(null));
+  const cappedNoGoal = noGoal.find((f) => f.findingType === "budget_limited" && f.entityName === "Search — Core Services");
+  ok("with no goal recorded the budget increase is still proposed",
+    cappedNoGoal?.applicability === "api", "a missing target is not a reason to stop working the account");
+  ok("…but it claims no money and says which figure is missing",
+    cappedNoGoal?.estImpactCents === 0
+      && /nothing on this client's record says what one is worth/.test(cappedNoGoal?.impactAssumption ?? ""),
+    "spending more is not a benefit, and without a customer value there is nothing to price the extra conversions against");
+  ok("…and the evidence names the gap where the figure would have been",
+    (cappedNoGoal?.evidence.lines ?? []).some((l) => l.includes("No cost-per-lead ceiling")),
+    "silence is never a pass");
+  ok("no cost-target row is raised on a client who set no target",
+    noGoal.every((f) => f.findingType !== "cpa_above_target"),
+    "a target nobody stated is never invented");
+
+  // ── 10. An account-level row needs a reason to exist ──────────────────────
+  console.log("\n10. Account-level rows carry a spend floor");
+  const parked: AuditInput = {
+    ...FIXTURE,
+    campaigns: FIXTURE.campaigns.map((c) => ({ ...c, costMicros: 20_000_000, clicks: 12, conversions: 0 })),
+  };
+  const parkedRun = evaluate(parked);
+  ok("a parked account raises no quality-score, thin-ad-group or ad-strength row",
+    parkedRun.every((f) => !["low_quality_score", "thin_ad_group", "weak_ad_strength"].includes(f.findingType)),
+    `floor ${usd(THRESHOLDS.accountMinSpendMicros)}/window — three rows on every mapped account is how a class of finding gets scrolled past`);
+  ok("the same three rows DO appear on the account that is actually spending",
+    ["low_quality_score", "thin_ad_group", "weak_ad_strength"].every((t) => a.some((f) => f.findingType === t)));
 
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

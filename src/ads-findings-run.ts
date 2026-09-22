@@ -8,7 +8,7 @@ import { evaluate, ADS_RULESET_VERSION, type DerivedFinding } from "./ads/rules.
 import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
-import { upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor } from "./ads/store.js";
+import { upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor, clientEconomicsFor } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 
@@ -56,8 +56,26 @@ async function auditOne(
   console.log(`\n${"═".repeat(72)}\n${clientName} · ${platform} [${accountId}]\n${"═".repeat(72)}`);
   if (protectedPatterns.length) console.log(`  protected terms: ${protectedPatterns.join(", ")}`);
 
-  const input = await adapter.read({ accountId, windowStart: start, windowEnd: end, protectedPatterns });
-  console.log(`  read: ${input.campaigns.length} campaigns · ${input.searchTerms.length} search terms · ${input.keywords.length} keywords · ${input.ads.length} ads · ${input.existingNegatives.size} negatives in place`);
+  const platformInput = await adapter.read({ accountId, windowStart: start, windowEnd: end, protectedPatterns });
+  console.log(`  read: ${platformInput.campaigns.length} campaigns · ${platformInput.searchTerms.length} search terms · ${platformInput.keywords.length} keywords · ${platformInput.ads.length} ads · ${platformInput.existingNegatives.size} negatives in place`);
+
+  // What the CLIENT has recorded about what a customer is worth. The adapter
+  // does not read it and should not: it is not the ad platform's to know, and
+  // keeping it out of the adapter keeps that file one vendor's API. Merged on
+  // here so the rules see one input, which is what keeps them pure.
+  const economics = await clientEconomicsFor(c, clientId, end);
+  const input = { ...platformInput, economics };
+  console.log(
+    `  goal: ${economics.cplCeilingCents != null ? `$${(economics.cplCeilingCents / 100).toFixed(2)} cost-per-lead ceiling (${economics.cplCeilingMonth})` : "no cost-per-lead ceiling recorded"}`
+    + ` · ${economics.customerValueCents != null ? `$${(economics.customerValueCents / 100).toFixed(2)} a customer` : "no customer value recorded"}`
+    + ` · ${economics.closeRatePct != null ? `${economics.closeRatePct}% close rate` : "no close rate recorded"}`,
+  );
+  const t = platformInput.tracking;
+  console.log(
+    `  tracking: ${t == null
+      ? "not read by this adapter"
+      : `${t.status ?? "status unread"} · ${t.actions == null ? "conversion actions unread" : `${t.actions.length} conversion action(s)`}`}`,
+  );
 
   // Deterministic first. The rules decide everything true about the account.
   const rulesFindings = evaluate(input);

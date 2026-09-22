@@ -23,7 +23,7 @@
 
 import type pg from "pg";
 import { randomUUID } from "node:crypto";
-import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding } from "./rules.js";
+import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics } from "./rules.js";
 
 export type Actor = string;
 
@@ -321,4 +321,82 @@ export async function adsWriteAuthorityFor(
     /* column not deployed yet → unrecorded → read-only */
   }
   return { allowed: value === "changes", value, clientName };
+}
+
+/**
+ * What the client has recorded about what a customer is worth to them.
+ *
+ * This is the half of the rules engine nothing was feeding: every threshold in
+ * it was a flat number, so a campaign read identically whether it was hitting
+ * the client's cost-per-lead target or running at three times it.
+ *
+ * Read defensively, column by column, so a worker deploy is never lock-stepped
+ * with a dashboard deploy — and read as NULL rather than nought wherever the
+ * answer is missing.
+ *
+ * THE ONE TRAP IS `client_targets.cpl_ceiling_cents`. That column is
+ * `DEFAULT 0`, the dialog that writes it says "leave a field at 0 to skip it",
+ * and the health score already reads a nought there as "no target set". So a
+ * nought is resolved to null HERE, once, and nothing downstream ever sees it —
+ * a ceiling of nothing is a sentence somebody could mean and this is not how
+ * they would say it.
+ *
+ * The month is the newest row at or before the window's end, matching the
+ * dashboard's own `getTargetForMonthOrLatestBefore`: nobody retypes these
+ * monthly, so the effective record is whatever was last typed. The month comes
+ * back with the figure so a finding can say how old the number it used is.
+ */
+export async function clientEconomicsFor(
+  c: pg.Client,
+  clientId: string,
+  windowEnd: string,
+): Promise<ClientEconomics> {
+  const out: ClientEconomics = {
+    customerValueCents: null,
+    customerValueFromClient: false,
+    closeRatePct: null,
+    cplCeilingCents: null,
+    cplCeilingMonth: null,
+  };
+
+  try {
+    const { rows } = await c.query<{
+      customer_value_cents: number | null;
+      customer_value_source: string | null;
+      close_rate_pct: number | null;
+    }>(
+      `SELECT customer_value_cents, customer_value_source, close_rate_pct
+         FROM clients WHERE id = $1`,
+      [clientId],
+    );
+    const r = rows[0];
+    if (r) {
+      out.customerValueCents = r.customer_value_cents != null && r.customer_value_cents > 0
+        ? Number(r.customer_value_cents) : null;
+      out.customerValueFromClient = Boolean((r.customer_value_source ?? "").trim());
+      out.closeRatePct = r.close_rate_pct != null && Number(r.close_rate_pct) > 0
+        ? Number(r.close_rate_pct) : null;
+    }
+  } catch {
+    /* column not deployed → unanswered, which is the safe reading */
+  }
+
+  try {
+    const month = windowEnd.slice(0, 7);
+    const { rows } = await c.query<{ month: string; cpl_ceiling_cents: number | null }>(
+      `SELECT month, cpl_ceiling_cents FROM client_targets
+        WHERE client_id = $1 AND month <= $2
+        ORDER BY month DESC LIMIT 1`,
+      [clientId, month],
+    );
+    const r = rows[0];
+    if (r && r.cpl_ceiling_cents != null && Number(r.cpl_ceiling_cents) > 0) {
+      out.cplCeilingCents = Number(r.cpl_ceiling_cents);
+      out.cplCeilingMonth = r.month;
+    }
+  } catch {
+    /* table not deployed → unanswered */
+  }
+
+  return out;
 }
