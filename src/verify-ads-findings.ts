@@ -16,6 +16,7 @@ import {
 import {
   spendVisibility, LOW_COVERAGE_SHARE, BARELY_COVERED_SHARE,
 } from "./ads/spend-visibility.js";
+import { ADVERTISING_CHANNEL_TYPE } from "./ads/google-ads-adapter.js";
 import {
   findTrackingOutage, dataExclusionProposal, MAX_DATA_EXCLUSION_DAYS,
   type DailyConversionRow,
@@ -1276,6 +1277,17 @@ async function main() {
     "which is why the adapter decodes: a campaign that needs the gate would otherwise never get it");
   ok("an undecoded lag bucket is counted as unmapped rather than guessed at",
     lagReading([{ campaignId: "1", bucket: "18", conversions: 100 }]).unmapped === 100);
+  // A Search campaign arrives from the REST API as "2". Undecoded it matched no
+  // channel name, so the coverage check treated every search campaign as one
+  // with no search-terms report and skipped itself, while printing "no
+  // search-terms report exists for a 2 campaign" on a real finding.
+  ok("an undecoded channel type is not read as a campaign kind",
+    enumName(ADVERTISING_CHANNEL_TYPE, 2) === "SEARCH" && enumName(ADVERTISING_CHANNEL_TYPE, "10") === "PERFORMANCE_MAX");
+  ok("a search campaign gets its coverage measured rather than skipped",
+    spendVisibility({ campaignId: "c1", campaignName: "Treatment Center Search", channelType: enumName(ADVERTISING_CHANNEL_TYPE, 2), campaignCostMicros: 100_000_000, reportedTermCostMicros: 80_000_000 }).verdict !== "not_applicable");
+  ok("the platform declining to name the channel reads as unread, never as not applicable",
+    spendVisibility({ campaignId: "c1", campaignName: "Treatment Center Search", channelType: "UNKNOWN", campaignCostMicros: 100_000_000, reportedTermCostMicros: null }).verdict === "unread");
+
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);
   console.log(`${"─".repeat(72)}\n`);

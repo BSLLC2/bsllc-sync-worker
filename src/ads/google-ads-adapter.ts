@@ -81,6 +81,19 @@ export const BIDDING_STRATEGY_TYPE: Record<string, string> = {
   "16": "COMMISSION", "17": "INVALID", "18": "MANUAL_CPA", "19": "FIXED_CPM",
   "20": "TARGET_CPV", "21": "TARGET_CPC", "22": "FIXED_SHARE_OF_VOICE",
 };
+/**
+ * What kind of campaign it is. Undecoded, a Search campaign arrives as "2",
+ * which matches no channel name — so the coverage reading treated EVERY search
+ * campaign as one with no search-terms report and skipped the check entirely,
+ * while printing "no search-terms report exists for a 2 campaign". Same defect
+ * as the conversion-action enums, one field along.
+ */
+export const ADVERTISING_CHANNEL_TYPE: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "SEARCH", "3": "DISPLAY", "4": "SHOPPING",
+  "5": "HOTEL", "6": "VIDEO", "7": "MULTI_CHANNEL", "8": "LOCAL", "9": "SMART",
+  "10": "PERFORMANCE_MAX", "11": "LOCAL_SERVICES", "12": "DISCOVERY", "13": "TRAVEL",
+  "14": "DEMAND_GEN",
+};
 /** How long after the click a conversion arrived, as the platform buckets it. */
 export const CONVERSION_LAG_BUCKET: Record<string, string> = {
   "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "LESS_THAN_ONE_DAY", "3": "ONE_TO_TWO_DAYS",
@@ -210,7 +223,11 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     const campaigns: CampaignRow[] = campaignRows.map((r: any) => ({
       id: String(r.campaign?.id ?? ""),
       name: String(r.campaign?.name ?? ""),
-      channelType: r.campaign?.advertising_channel_type != null ? String(r.campaign.advertising_channel_type) : null,
+      // Decoded, not stringified: see ADVERTISING_CHANNEL_TYPE. enumName returns
+      // null for a value the map does not know, and null reads as "not read"
+      // rather than as "not a search campaign" — an unknown channel must not
+      // silently switch the coverage check off.
+      channelType: enumName(ADVERTISING_CHANNEL_TYPE, r.campaign?.advertising_channel_type),
       dailyBudgetMicros: Number(r.campaign_budget?.amount_micros ?? 0),
       budgetResourceName: r.campaign_budget?.resource_name ?? null,
       costMicros: Number(r.metrics?.cost_micros ?? 0),

@@ -36,6 +36,8 @@
 
 /** Channel types that have a search-terms report worth measuring against. */
 const SEARCHING_CHANNELS = new Set(["SEARCH", "SHOPPING", "PERFORMANCE_MAX", "MULTI_CHANNEL"]);
+/** Not a kind of campaign — the platform declining to say which kind it is. */
+const UNREAD_CHANNELS = new Set(["UNSPECIFIED", "UNKNOWN"]);
 
 /**
  * Below this share of a campaign's spend showing up in the report, a finding
@@ -99,7 +101,11 @@ export function spendVisibility(v: CampaignSpendVisibility): SpendVisibility {
   const channel = String(v.channelType ?? "").toUpperCase();
   const base = { campaignId: v.campaignId, share: null, unseenMicros: null };
 
-  if (channel && !SEARCHING_CHANNELS.has(channel)) {
+  // The platform's own words for "I did not say". They are NOT a channel that
+  // happens to have no search-terms report — they are an unread field, and
+  // reading them as not-applicable switches this check off in silence, which
+  // is exactly what an undecoded enum did before the adapter decoded one.
+  if (channel && !UNREAD_CHANNELS.has(channel) && !SEARCHING_CHANNELS.has(channel)) {
     return {
       ...base, verdict: "not_applicable",
       line: `No search-terms report exists for a ${channel.toLowerCase().replace(/_/g, " ")} campaign, so there is no coverage to measure here.`,
