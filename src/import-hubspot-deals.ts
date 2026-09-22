@@ -167,6 +167,7 @@ async function main() {
 
     // 6) Upsert OPEN deals by hubspot_id (closed history already loaded, untouched).
     let created = 0, updated = 0;
+    const heldLines: string[] = [];
     for (const d of openDeals) {
       const p = d.properties;
       const si = stageMap.get(p.dealstage ?? "");
@@ -182,14 +183,44 @@ async function main() {
 
       // Only touch a deal if it's new, or the existing one is still OPEN — never
       // reopen or overwrite a deal already marked won/lost in the app.
-      const existing = await c.query<{ id: string; status: string }>(`SELECT id, status FROM deals WHERE hubspot_id = $1 LIMIT 1`, [d.id]);
+      const existing = await c.query<{ id: string; status: string; pipeline_set_at: Date | null; pipeline_set_by: string | null }>(
+        `SELECT id, status, pipeline_set_at, pipeline_set_by FROM deals WHERE hubspot_id = $1 LIMIT 1`,
+        [d.id],
+      );
       if (existing.rows[0]) {
         if (existing.rows[0].status !== "open") continue; // leave closed app deals alone
+        // ── A decision somebody made in the app is held here too (app v192).
+        //
+        // The status guard above was only ever half the rule: it stops this
+        // run reopening a deal marked won or lost, and then overwrites stage,
+        // amount, close date and owner on every deal that is still open. So a
+        // stage moved on the app's pipeline board went back to HubSpot's
+        // answer twice a day, silently -- the same defect the app's own
+        // crm-import.ts had, one status along.
+        //
+        // deals.pipeline_set_at is stamped by the app's storage.updateDeal
+        // when a person there actually MOVES one of those fields. It is NULL
+        // on every deal nobody has touched, which is the ordinary state of an
+        // imported deal, so those take HubSpot's values exactly as before.
+        //
+        // Per field rather than skipping the row, so name, company, source and
+        // last-contacted keep refreshing on a held deal.
+        const held = existing.rows[0].pipeline_set_at !== null;
         await c.query(
-          `UPDATE deals SET name=$1, company_id=COALESCE($2, company_id), stage=$3, status='open', amount_cents=$4,
-             close_date=$5, owner_name=$6, source=COALESCE(source,'hubspot'), closed_at=NULL, last_contacted_at=$7 WHERE id=$8`,
+          `UPDATE deals SET name=$1, company_id=COALESCE($2, company_id),
+             stage        = CASE WHEN pipeline_set_at IS NULL THEN $3 ELSE stage END,
+             status='open',
+             amount_cents = CASE WHEN pipeline_set_at IS NULL THEN $4 ELSE amount_cents END,
+             close_date   = CASE WHEN pipeline_set_at IS NULL THEN $5 ELSE close_date END,
+             owner_name   = CASE WHEN pipeline_set_at IS NULL THEN $6 ELSE owner_name END,
+             source=COALESCE(source,'hubspot'), closed_at=NULL, last_contacted_at=$7 WHERE id=$8`,
           [name, companyId, stage, amountCents, closeDate, ownerName, lastContacted, existing.rows[0].id],
         );
+        if (held) {
+          // Named, never counted silently: a hold nobody can see is the same
+          // silence one field along.
+          heldLines.push(`  · ${name} [${d.id}] — ${existing.rows[0].pipeline_set_by ?? "somebody in the app"} moved it; HubSpot says stage "${stage}", ${(amountCents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" })}, owner ${ownerName ?? "(none)"}`);
+        }
         updated++;
       } else {
         await c.query(
@@ -201,7 +232,12 @@ async function main() {
         created++;
       }
     }
-    console.log(`Done: ${created} created, ${updated} updated, ${appCompanyId.size} companies linked.`);
+    if (heldLines.length) {
+      console.log(`\nHeld ${heldLines.length} open deal(s) at the value somebody set in the app — HubSpot's is shown beside each.`);
+      console.log(`Nothing else on these rows was held: name, company, source and last-contacted all refreshed.`);
+      for (const line of heldLines) console.log(line);
+    }
+    console.log(`Done: ${created} created, ${updated} updated${heldLines.length ? `, ${heldLines.length} held at a decision made in the app` : ""}, ${appCompanyId.size} companies linked.`);
   } finally {
     await c.end();
   }
