@@ -3,9 +3,11 @@ import "dotenv/config";
 import {
   evaluate, evidenceHash, materiallyChanged, trackingReading, costTargets, governingTarget,
   outcomeReadiness, MIN_MONTHLY_OUTCOMES_FOR_BIDDING,
+  learningReading, platformSignals, PLATFORM_SIGNALS, LEARNING_EVENTS_CONVENTION,
   ADS_RULESET_VERSION, THRESHOLDS,
-  type AuditInput, type TrackingFacts, type ClientEconomics,
+  type AuditInput, type TrackingFacts, type ClientEconomics, type AdSetRow,
 } from "./ads/rules.js";
+import { countMetaConversions } from "./ads/meta-adapter.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { applyChangeSet, rollbackChangeSet, type ChangeSet, type PriorValue } from "./apply-ads-changes.js";
 import { enumName, CONVERSION_CATEGORY, TRACKING_STATUS } from "./ads/google-ads-adapter.js";
@@ -631,6 +633,187 @@ async function main() {
       && /would be a claim/.test(feedback?.impactAssumption ?? ""));
   ok("no row at all where nothing was gathered",
     evaluate(FIXTURE).every((f) => f.findingType !== "outcome_feedback_gap"));
+
+
+  // ── 12. Meta — what the engine may and may not say about another platform ─
+  // The rules are platform-neutral and two of the account-level ones were not:
+  // they made a Google claim on any platform whose adapter supplies no Google
+  // input. This section drives a Meta account and asserts the engine is SILENT
+  // where it has nothing to say, rather than silent because nothing is wrong.
+  console.log("\n12. Meta — a platform declares what its adapter supplies");
+
+  /** A Meta account. No search terms, no keywords, no ads, no impression
+   *  share, no conversion-action configuration, no click id on any lead — and
+   *  one ad set the platform itself says will not settle. SYNTHETIC. */
+  const META_ADSETS: AdSetRow[] = [
+    {
+      id: "as-1", name: "Prospecting — Broad", campaignId: "mc-1", campaignName: "Leads — Always on",
+      optimizationGoal: "OFFSITE_CONVERSIONS",
+      learningStatus: "LEARNING_LIMITED", learningEvents: 9, learningThreshold: 50,
+      costMicros: 900_000_000, effectiveStatus: "ACTIVE",
+    },
+    {
+      id: "as-2", name: "Retargeting — Site visitors", campaignId: "mc-1", campaignName: "Leads — Always on",
+      optimizationGoal: "OFFSITE_CONVERSIONS",
+      learningStatus: "SUCCESS", learningEvents: 140, learningThreshold: 50,
+      costMicros: 600_000_000, effectiveStatus: "ACTIVE",
+    },
+    {
+      // The ordinary state of a new ad set: still learning, and it resolves by
+      // itself. A row on this fires on every launch and teaches people to
+      // scroll past the one that matters.
+      id: "as-4", name: "Prospecting — Lookalike", campaignId: "mc-1", campaignName: "Leads — Always on",
+      optimizationGoal: "OFFSITE_CONVERSIONS",
+      learningStatus: "LEARNING", learningEvents: 21, learningThreshold: 50,
+      costMicros: 400_000_000, effectiveStatus: "ACTIVE",
+    },
+    {
+      // Under the ad-set spend floor. The platform says LEARNING_LIMITED and it
+      // is true and it is not a finding — $12 of spend says the budget is small,
+      // which the person who set the budget already knows.
+      id: "as-3", name: "Test — new creative", campaignId: "mc-1", campaignName: "Leads — Always on",
+      optimizationGoal: "OFFSITE_CONVERSIONS",
+      learningStatus: "LEARNING_LIMITED", learningEvents: 1, learningThreshold: 50,
+      costMicros: 12_000_000, effectiveStatus: "ACTIVE",
+    },
+  ];
+  const META: AuditInput = {
+    platform: "meta",
+    accountId: "act_synthetic",
+    windowStart: FIXTURE.windowStart, windowEnd: FIXTURE.windowEnd,
+    campaigns: [{
+      id: "mc-1", name: "Leads — Always on", channelType: "OUTCOME_LEADS",
+      dailyBudgetMicros: 60_000_000, budgetResourceName: null,
+      costMicros: 1_512_000_000, clicks: 2_100, impressions: 310_000, conversions: 24,
+      impressionShare: null, budgetLostShare: null, rankLostShare: null,
+      specialAdCategories: [],
+    }],
+    adSets: META_ADSETS,
+    searchTerms: [], keywords: [], ads: [],
+    existingNegatives: new Set(), protectedPatterns: [],
+    economics: FIXTURE.economics,
+  };
+
+  const metaFindings = evaluate(META);
+
+  ok("a platform nobody has declared is asked for nothing",
+    platformSignals("tiktok").clickIdOnLead === null
+      && platformSignals("tiktok").conversionConfig === false
+      && platformSignals("tiktok").learningState === false,
+    "default-deny, so a new platform produces no claim until somebody writes the line");
+
+  ok("Meta declares no conversion-action configuration and no click id on a lead",
+    PLATFORM_SIGNALS.meta!.conversionConfig === false && PLATFORM_SIGNALS.meta!.clickIdOnLead === null);
+
+  ok("…so no 'part of this could not be read' tracking row is produced on a Meta account",
+    !metaFindings.some((f) => f.findingType === "conversion_tracking_gap"),
+    "that row named a fix that would never stop producing it");
+
+  ok("…and no closed-outcome row is produced either",
+    !metaFindings.some((f) => f.findingType === "outcome_feedback_gap"),
+    "there is no fbclid column, so the chain does not exist to be read");
+
+  // The rules gate, on its own. The findings run also refuses to GATHER these
+  // facts for a platform with no click id, so this is the second of two
+  // defences: hand the engine Google-shaped outcomes under a Meta platform and
+  // it must still say nothing, because they are not this platform's outcomes.
+  ok("…even when Google-shaped outcomes are handed to it under a Meta platform",
+    evaluate({
+      ...META,
+      outcomes: {
+        leadsInWindow: 400, gclidLeadsInWindow: 0, newestGclidLeadOn: null,
+        crmRowsInWindow: 30, wonInWindow: 6, wonWindowMonths: 6,
+        measuredWonValueCents: 240_000, uploadsEver: 0, newestUploadOn: null,
+      },
+    }).every((f) => f.findingType !== "outcome_feedback_gap"),
+    "otherwise every Meta account reports 'not one lead carries a click id' and sends somebody to fix Google auto-tagging");
+
+  ok("Google still gets both rows from the same engine",
+    evaluate(withTracking(null)).some((f) => f.findingType === "conversion_tracking_gap"),
+    "the gate is per platform, not a deletion");
+
+  const limited = metaFindings.filter((f) => f.findingType === "learning_limited");
+  ok("the ad set the platform says will not settle gets exactly one row", limited.length === 1,
+    limited[0]?.title ?? "none");
+  ok("…the settled one, the one still learning normally and the one under the spend floor get none",
+    !limited.some((f) => /Retargeting|Lookalike|Test — new creative/.test(f.entityName ?? "")),
+    "LEARNING is the ordinary state of a new ad set and resolves by itself — a row on it fires on every launch");
+  ok("…it proposes nothing, claims no money and is a brief",
+    limited[0]?.changePayload === null && limited[0]?.estImpactCents === 0 && limited[0]?.applicability === "vendor",
+    "what an unsettled ad set costs is a difference nothing here can see");
+  ok("…and it names the one event that counts toward the threshold",
+    /only that event counts/.test(limited[0]?.evidence.lines.join(" ") ?? ""));
+
+  ok("no learning row on a platform that reports no learning state",
+    evaluate({ ...FIXTURE, adSets: META_ADSETS }).every((f) => f.findingType !== "learning_limited"),
+    "Google reports its learning period in no API field, so asserting one would be inventing a verdict");
+
+  // The platform's own verdict decides, never our arithmetic over its counts.
+  ok("a platform saying SUCCESS on a thin-looking count is settled",
+    learningReading({ ...META_ADSETS[1]!, learningEvents: 3 }).verdict === "settled");
+  ok("a platform saying LEARNING_LIMITED on a healthy-looking count is still limited",
+    learningReading({ ...META_ADSETS[0]!, learningEvents: 400 }).verdict === "limited");
+  ok("a status nobody read says nothing at all",
+    learningReading({ ...META_ADSETS[0]!, learningStatus: null }).verdict === "unreadable");
+
+  const ownThreshold = learningReading(META_ADSETS[0]!);
+  const ourThreshold = learningReading({ ...META_ADSETS[0]!, learningThreshold: null });
+  ok("the platform's own threshold is used and said to be the platform's",
+    ownThreshold.thresholdFromPlatform && /threshold the platform reports/.test(ownThreshold.lines.join(" ")));
+  ok("…and where it reports none, the convention is used and says it is a convention",
+    !ourThreshold.thresholdFromPlatform && ourThreshold.threshold === LEARNING_EVENTS_CONVENTION
+      && /convention and not a figure the platform gave us/.test(ourThreshold.lines.join(" ")),
+    "a number we chose and a number the platform chose must never render identically");
+  ok("an unread event count is never read as a nought",
+    learningReading({ ...META_ADSETS[0]!, learningEvents: null }).shortBy === null);
+
+  // Restricted categories change which advice is honest.
+  const restricted = evaluate({
+    ...META,
+    campaigns: [{ ...META.campaigns[0]!, specialAdCategories: ["HOUSING"] }],
+  }).find((f) => f.findingType === "learning_limited");
+  const plain = limited[0];
+  const restrictedLines = restricted?.evidence.lines.join(" ") ?? "";
+  ok("a campaign under a restricted category is never told to widen its audience",
+    !/A wider audience, so the same budget/.test(restrictedLines)
+      && /HOUSING/.test(restrictedLines)
+      && /is not an option that exists on it/.test(restrictedLines),
+    "age, gender and detailed targeting are stripped, so that control is not there — the row names it rather than offering it");
+  ok("…and one that is not under one still gets that advice",
+    /A wider audience, so the same budget/.test(plain?.evidence.lines.join(" ") ?? ""));
+
+  // ── The adapter's own counting, which was summing one lead two or three times
+  console.log("\n   Counting a Meta conversion once");
+  const doubled = countMetaConversions({
+    actions: [
+      { action_type: "lead", value: "12" },
+      { action_type: "offsite_conversion.fb_pixel_lead", value: "12" },
+      { action_type: "onsite_conversion.lead_grouped", value: "12" },
+      { action_type: "link_click", value: "2100" },
+      { action_type: "video_view", value: "8000" },
+    ],
+  });
+  ok("one lead reported under three action names counts once", doubled.conversions === 12,
+    `counted ${doubled.conversions} — the old regex summed all three and reported 36`);
+  ok("…and a link click or a video view is not a conversion", doubled.basis === "actions");
+
+  ok("the platform's own result count wins where it reports one",
+    countMetaConversions({ objective_results: 7, actions: [{ action_type: "lead", value: "12" }] }).conversions === 7,
+    "it is what the delivery model is working from and what the learning threshold is measured against");
+  ok("a genuine nought from the platform is taken as a nought",
+    countMetaConversions({ objective_results: 0, actions: [] }).basis === "objective_results");
+  ok("nothing at all reads as nothing, not as a nought conversion count",
+    countMetaConversions({}).basis === "none");
+  ok("a purchase reported under two names counts once",
+    countMetaConversions({ actions: [
+      { action_type: "purchase", value: "3" },
+      { action_type: "offsite_conversion.fb_pixel_purchase", value: "3" },
+    ] }).conversions === 3);
+  ok("two DIFFERENT outcomes are both counted",
+    countMetaConversions({ actions: [
+      { action_type: "lead", value: "4" },
+      { action_type: "purchase", value: "2" },
+    ] }).conversions === 6);
 
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

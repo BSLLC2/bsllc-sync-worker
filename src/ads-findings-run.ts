@@ -4,7 +4,7 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { GoogleAdsApi } from "google-ads-api";
 import { loadConfig, digitsOnly } from "./config.js";
-import { evaluate, ADS_RULESET_VERSION, type DerivedFinding } from "./ads/rules.js";
+import { evaluate, platformSignals, ADS_RULESET_VERSION, type DerivedFinding } from "./ads/rules.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
@@ -68,7 +68,18 @@ async function auditOne(
   const economics = await clientEconomicsFor(c, clientId, end);
   // And what the record already holds about those leads becoming customers —
   // also Postgres, also nothing to do with the ad platform.
-  const outcomes = await outcomeFeedFactsFor(c, clientId, slugify(clientName), start, end);
+  //
+  // ONLY WHERE THIS SYSTEM CAPTURES THIS PLATFORM'S CLICK IDENTIFIER.
+  // `outcomeFeedFactsFor` counts `web_inquiries.gclid`, which is Google's. No
+  // column anywhere holds Meta's, so gathering these facts on a Meta account
+  // would hand the rules a chain that is empty because it does not exist, and
+  // the reading would report "not one lead carries a click id" on every Meta
+  // account and send somebody to fix the wrong platform's tagging. Not
+  // gathered is the honest input and the reading already handles it.
+  const signals = platformSignals(platform);
+  const outcomes = signals.clickIdOnLead
+    ? await outcomeFeedFactsFor(c, clientId, slugify(clientName), start, end)
+    : null;
   const input = { ...platformInput, economics, outcomes };
   console.log(
     `  goal: ${economics.cplCeilingCents != null ? `$${(economics.cplCeilingCents / 100).toFixed(2)} cost-per-lead ceiling (${economics.cplCeilingMonth})` : "no cost-per-lead ceiling recorded"}`
@@ -77,15 +88,21 @@ async function auditOne(
   );
   console.log(
     `  outcomes: ${outcomes == null
-      ? "not gathered"
+      ? (signals.clickIdOnLead ? "not gathered" : `not asked — nothing here captures a ${platform} click id on a lead`)
       : `${outcomes.gclidLeadsInWindow}/${outcomes.leadsInWindow} leads carry a click id · ${outcomes.crmRowsInWindow} reached the CRM · ${outcomes.wonInWindow} won over ${outcomes.wonWindowMonths} month(s)`}`,
   );
   const t = platformInput.tracking;
   console.log(
     `  tracking: ${t == null
-      ? "not read by this adapter"
+      ? (signals.conversionConfig
+          ? "not read by this adapter"
+          : "no conversion-action configuration exists on this platform to read")
       : `${t.status ?? "status unread"} · ${t.actions == null ? "conversion actions unread" : `${t.actions.length} conversion action(s)`}`}`,
   );
+  if (platformInput.adSets?.length) {
+    const limited = platformInput.adSets.filter((a) => /LIMITED/i.test(a.learningStatus ?? "")).length;
+    console.log(`  learning: ${platformInput.adSets.length} ad set(s) read · ${limited} the platform says it does not expect to settle`);
+  }
 
   // Deterministic first. The rules decide everything true about the account.
   const rulesFindings = evaluate(input);

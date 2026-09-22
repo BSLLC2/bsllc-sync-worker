@@ -23,7 +23,7 @@
 import { createHash } from "node:crypto";
 
 /** Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts. */
-export const ADS_RULESET_VERSION = 2;
+export const ADS_RULESET_VERSION = 3;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -84,6 +84,13 @@ export const THRESHOLDS = {
    */
   trackingImplausibleConvPerClick: 1.0,
   /**
+   * An ad set's spend over the window before its learning state is worth a
+   * row. A platform will happily report LEARNING_LIMITED on an ad set carrying
+   * $6, which is true and is not a finding: it says the budget is small, which
+   * the person who set the budget already knows.
+   */
+  learningAdSetMinSpendMicros: 50_000_000,   // $50 / 90 days
+  /**
    * How far over the target a conversion has to cost before it is a finding.
    * A cost target is a round number somebody typed; a campaign within a
    * quarter of it is inside the noise of how that number was picked, and
@@ -127,6 +134,59 @@ export interface CampaignRow {
   impressionShare: number | null;
   budgetLostShare: number | null;
   rankLostShare: number | null;
+  /**
+   * Restricted-advertising categories the campaign runs under, verbatim
+   * (Meta: HOUSING, EMPLOYMENT, CREDIT, ISSUES_ELECTIONS_POLITICS). NULL means
+   * the adapter did not read it; [] means it read it and there are none.
+   *
+   * It is here because it changes what advice is HONEST rather than what is
+   * possible: a campaign under one of these has age, gender and detailed
+   * targeting stripped, so "broaden the audience" is not an option that exists
+   * on it, and a row that says it anyway is a row somebody wastes an afternoon
+   * on. Nothing here proposes a targeting change either way.
+   *
+   * Absent (like `tracking` below) means the adapter does not read it at all.
+   */
+  specialAdCategories?: string[] | null;
+}
+
+/**
+ * An ad set, and what the platform says about its own delivery model.
+ *
+ * Google has no analogue anybody can read: its learning phase is described in
+ * support documentation and reported nowhere in the API, so a Google adapter
+ * leaves this empty and every rule below simply produces nothing. Meta reports
+ * it directly on the ad set (`learning_stage_info`), which is why this shape
+ * exists at all — the reading it feeds is a reading of the PLATFORM'S OWN
+ * verdict rather than one this engine works out from a convention.
+ *
+ * NULL EVERYWHERE MEANS "NOT READ", NEVER NOUGHT. An unread event count that
+ * arrived as a nought would report every healthy ad set as starved.
+ */
+export interface AdSetRow {
+  id: string;
+  name: string;
+  campaignId: string | null;
+  campaignName: string | null;
+  /** What the ad set is told to optimise for, verbatim. Null = not read. */
+  optimizationGoal: string | null;
+  /** The platform's own word for where this ad set is in its learning, verbatim
+   *  (Meta: LEARNING / SUCCESS / LEARNING_LIMITED). Null = not read. */
+  learningStatus: string | null;
+  /** Optimisation events the platform counted toward its OWN threshold over its
+   *  own window. Null = not read. */
+  learningEvents: number | null;
+  /**
+   * The threshold the PLATFORM says this ad set has to clear, where it reports
+   * one (Meta: `dynamic_lp_conversions_threshold`). Null means it did not, and
+   * the reading falls back to the published convention and says which of the
+   * two it used — a number we chose and a number the platform chose must never
+   * render identically.
+   */
+  learningThreshold: number | null;
+  costMicros: number;
+  /** Delivery status, verbatim. Null = not read. */
+  effectiveStatus: string | null;
 }
 
 export interface SearchTermRow {
@@ -491,6 +551,168 @@ export function trackingCaveat(t: TrackingReading): string {
 }
 
 
+// ── What each platform's adapter actually supplies ──────────────────────────
+/**
+ * The rules are platform-neutral and must stay that way: a rule may not contain
+ * a Google-shaped or Meta-shaped field name, and a new platform must cost an
+ * adapter rather than a second engine. That principle has a hole in it, and
+ * this table is the patch.
+ *
+ * TWO OF THE ACCOUNT-LEVEL RULES MADE A CLAIM THAT ONLY HELD ON GOOGLE.
+ *
+ *  - The conversion-tracking reading ends with "part of this could not be read"
+ *    whenever an adapter supplies no `tracking`. On Google that is a real
+ *    finding somebody closes by reading the account's settings. On Meta the
+ *    adapter supplies none because META HAS NO SUCH OBJECT TO READ — its
+ *    equivalent is a dataset, its pixel/CAPI events and their match quality,
+ *    which is a different shape entirely. So the row would have appeared on
+ *    every Meta account, every week, forever, saying a piece could not be read
+ *    and naming a fix that would never produce it again.
+ *  - The closed-outcome reading counts `web_inquiries.gclid`, and calls it "a
+ *    Google click id" in the sentence a person reads. No lead row in this
+ *    system carries Meta's click id (`fbclid`) — there is no column for one —
+ *    so on a Meta account that reading is not thin, it is NOT A READING: it
+ *    would report `no_click_ids` on every Meta account and tell somebody to go
+ *    and fix Google auto-tagging.
+ *
+ * So each platform DECLARES what its adapter supplies, the rules ask, and a
+ * rule that cannot be answered for a platform says nothing at all rather than
+ * saying the Google answer. Silence here is not the same as the silence a
+ * finding-free account produces: nothing was ever asked.
+ *
+ * DEFAULT-DENY for a platform nobody has declared, the same call
+ * `shared/deal-pipeline.ts` makes about an unknown pipeline. A blocklist's
+ * failure is a new platform quietly producing claims nobody checked; an
+ * allowlist's failure is a platform producing nothing until somebody writes a
+ * line here, which is visible the first time anybody looks at the screen.
+ */
+export interface PlatformSignals {
+  /**
+   * Does the adapter report a conversion-tracking CONFIGURATION this engine can
+   * check — the actions, the platform's own category on each, and what each one
+   * recorded? False is "there is no such thing to read here", not "the read
+   * failed".
+   */
+  conversionConfig: boolean;
+  /**
+   * What a lead row in THIS SYSTEM carries for this platform's click
+   * identifier, in the words a person would use. NULL means nothing here
+   * captures one, so no reading of the click → customer chain can be taken at
+   * all and none is attempted.
+   */
+  clickIdOnLead: string | null;
+  /** Does the platform report impression share? */
+  impressionShare: boolean;
+  /** Does the platform report its own learning verdict per ad set? */
+  learningState: boolean;
+}
+
+export const PLATFORM_SIGNALS: Record<string, PlatformSignals> = {
+  google_ads: {
+    conversionConfig: true,
+    clickIdOnLead: "Google click id",
+    impressionShare: true,
+    // Google's learning period is documented in support pages and reported in
+    // no API field. Asserting it would mean this engine inventing a verdict.
+    learningState: false,
+  },
+  meta: {
+    // Meta has conversion tracking; it does not have Google's conversion-action
+    // object, and this adapter reads no equivalent. When somebody builds the
+    // dataset/event-match reading, this flips and the row starts meaning
+    // something.
+    conversionConfig: false,
+    // There is no fbclid column on web_inquiries. Not "it is usually empty" —
+    // the column does not exist. See docs/agent-reports/meta-paid-media.md.
+    clickIdOnLead: null,
+    // Meta has no impression-share metric of any kind.
+    impressionShare: false,
+    // `learning_stage_info` on the ad set, which is the platform's own verdict.
+    learningState: true,
+  },
+  microsoft: {
+    // The adapter is a declared seam that throws on every verb.
+    conversionConfig: false,
+    clickIdOnLead: null,
+    impressionShare: false,
+    learningState: false,
+  },
+};
+
+/** Nothing is claimed for a platform nobody has declared. */
+const NO_SIGNALS: PlatformSignals = {
+  conversionConfig: false, clickIdOnLead: null, impressionShare: false, learningState: false,
+};
+
+export function platformSignals(platform: string): PlatformSignals {
+  return PLATFORM_SIGNALS[platform] ?? NO_SIGNALS;
+}
+
+// ── Can the platform's own delivery model learn on this ad set at all? ──────
+/**
+ * The published convention, used ONLY where the platform reported no threshold
+ * of its own.
+ *
+ * It is widely quoted as ~50 optimisation events per ad set per rolling 7 days
+ * on Meta, and it is a convention rather than something verified here — every
+ * sentence built on it says so, the same discipline `MIN_MONTHLY_OUTCOMES_FOR_BIDDING`
+ * already carries. Where Meta reports `dynamic_lp_conversions_threshold` that
+ * figure is used instead and the sentence says it came from the platform.
+ */
+export const LEARNING_EVENTS_CONVENTION = 50;
+
+export type LearningVerdict = "limited" | "learning" | "settled" | "unreadable";
+
+export interface LearningReading {
+  verdict: LearningVerdict;
+  /** The platform's own word, verbatim, or null where it reported none. */
+  status: string | null;
+  events: number | null;
+  /** Always resolved: the platform's own figure where it gave one, the
+   *  convention otherwise. `thresholdFromPlatform` is what says which. */
+  threshold: number;
+  /** True where the threshold is the platform's own rather than the convention. */
+  thresholdFromPlatform: boolean;
+  /** How many more events a week it would take, where both figures are real. */
+  shortBy: number | null;
+  lines: string[];
+}
+
+/**
+ * Pure. One ad set's facts in, one reading out.
+ *
+ * It reads the PLATFORM'S OWN verdict and never second-guesses it. A platform
+ * that says SUCCESS is settled even where the event count looks thin to us, and
+ * a platform that says LEARNING_LIMITED is limited even where the count looks
+ * fine — it knows what its own model did with the events and this engine does
+ * not. What the counts are for is saying HOW FAR SHORT, which is the part a
+ * person can act on.
+ */
+export function learningReading(row: AdSetRow): LearningReading {
+  const status = row.learningStatus == null ? null : String(row.learningStatus).toUpperCase();
+  const thresholdFromPlatform = row.learningThreshold != null && row.learningThreshold > 0;
+  const threshold = thresholdFromPlatform ? row.learningThreshold! : LEARNING_EVENTS_CONVENTION;
+  const events = row.learningEvents;
+  const shortBy = events != null ? Math.max(0, threshold - events) : null;
+
+  const lines: string[] = [];
+  lines.push(events != null
+    ? `${events} optimisation event(s) counted against ${threshold}`
+      + (thresholdFromPlatform
+        ? ", which is the threshold the platform reports for this ad set"
+        : `, which is the widely quoted convention and not a figure the platform gave us`)
+    : "The platform reported no event count for this ad set, so how far short it is cannot be said");
+  lines.push(row.optimizationGoal
+    ? `Optimising for ${row.optimizationGoal} — only that event counts toward the threshold; everything else the ad set produces counts toward nothing`
+    : "What this ad set optimises for was not read, and it is the only event that counts toward the threshold");
+  lines.push(`${usd(row.costMicros)} spent over the window`);
+
+  if (status == null) return { verdict: "unreadable", status, events, threshold, thresholdFromPlatform, shortBy, lines };
+  if (status.includes("LIMITED")) return { verdict: "limited", status: row.learningStatus, events, threshold, thresholdFromPlatform, shortBy, lines };
+  if (status === "SUCCESS") return { verdict: "settled", status: row.learningStatus, events, threshold, thresholdFromPlatform, shortBy, lines };
+  return { verdict: "learning", status: row.learningStatus, events, threshold, thresholdFromPlatform, shortBy, lines };
+}
+
 // ── Can this account learn from its own closed outcomes at all? ─────────────
 /**
  * What the record already holds about leads becoming customers.
@@ -732,6 +954,12 @@ export interface AuditInput {
   windowStart: string;
   windowEnd: string;
   campaigns: CampaignRow[];
+  /**
+   * Ad sets and the platform's own learning verdict. ABSENT MEANS THE ADAPTER
+   * DOES NOT READ THEM — Google reports no learning state anywhere in its API,
+   * so its adapter leaves this out and the learning rule produces nothing.
+   */
+  adSets?: AdSetRow[];
   searchTerms: SearchTermRow[];
   keywords: KeywordRow[];
   ads: AdGroupAdRow[];
@@ -845,6 +1073,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     }),
     { costMicros: 0, clicks: 0, conversions: 0 },
   );
+  const signals = platformSignals(input.platform);
   const tracking = trackingReading(input.tracking, accountTotals);
   /** A nought in the conversion column means a real nought. */
   const zeroMeansZero = tracking.countsAnything === "yes";
@@ -1377,7 +1606,11 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   // taken, say which part rather than letting the absence of a row read as a
   // clean account. This is not a defect and carries no severity of its own — it
   // is the reading saying what it could not see.
-  if (tracking.defects.length === 0 && tracking.unread.length > 0 && accountWorthARow) {
+  // Gated on the platform DECLARING that it reports a conversion-tracking
+  // configuration at all. Without this the row is produced on every account of
+  // every platform whose adapter has no such object to read, saying a piece
+  // could not be checked and naming a fix that would never stop producing it.
+  if (signals.conversionConfig && tracking.defects.length === 0 && tracking.unread.length > 0 && accountWorthARow) {
     out.push({
       entityType: "account", entityId: `${input.accountId}:tracking:unread`, entityName: "Conversion tracking",
       findingType: "conversion_tracking_gap", severity: "medium", riskLevel: "low",
@@ -1400,13 +1633,107 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     });
   }
 
+  // ── 5b. The platform's own verdict on whether it can learn at all ─────────
+  // The Meta analogue of the question the Google half of this engine cannot
+  // ask: is there enough of the one event this ad set optimises for, inside the
+  // platform's own window, for its delivery model to stop guessing. On Google
+  // that number is a support-page convention and nothing reports it. On Meta
+  // the platform says so itself, per ad set, and often reports the threshold it
+  // is measuring against — so this rule reads a verdict rather than forming
+  // one, and the counts are only ever used to say how far short.
+  //
+  // NO DOLLAR FIGURE. An ad set stuck in learning is not spend at risk the way
+  // a campaign converting nothing is: it delivers, it just delivers worse and
+  // less predictably, and what that costs is the difference between the results
+  // it got and the ones a settled ad set would have got — which nothing here
+  // can see. The spend is named in the evidence as what is being spent under an
+  // unstable model, never claimed as a saving. Same call `rank_limited` makes.
+  for (const a of input.adSets ?? []) {
+    if (!signals.learningState) break;
+    if (a.costMicros < THRESHOLDS.learningAdSetMinSpendMicros) continue;
+    const reading = learningReading(a);
+    // Only the platform saying it does not expect to get there. LEARNING is the
+    // ordinary state of a new ad set and resolves by itself; raising a row on it
+    // would fire on every launch and teach people to scroll past the ones that
+    // matter. An unreadable state says nothing — it was never asked.
+    if (reading.verdict !== "limited") continue;
+
+    // A campaign under a restricted-advertising category has age, gender and
+    // detailed targeting stripped, so the usual "widen the audience" answer is
+    // not one that exists on it. Read from the campaign the ad set sits under;
+    // absent means the adapter did not read it, and nothing is assumed.
+    const parent = a.campaignId ? input.campaigns.find((c) => c.id === a.campaignId) : undefined;
+    const restricted = parent?.specialAdCategories ?? null;
+    const isRestricted = Array.isArray(restricted) && restricted.length > 0;
+
+    const shortClause = reading.shortBy != null && reading.shortBy > 0
+      ? `It is about ${reading.shortBy} event(s) short of the threshold it is measured against.`
+      : reading.events == null
+        ? `How far short it is was not reported, so the size of the gap is unknown.`
+        : `It is at or above the threshold on the counts reported and the platform still says it cannot settle, which usually means the events are arriving too unevenly to learn from.`;
+
+    const fixes = [
+      "Fewer ad sets carrying more of the budget, so one of them clears the threshold instead of several falling short.",
+      "A shallower event to optimise for, where one exists that is still worth having — only the optimisation event counts, so a deeper one on a small account counts almost nothing.",
+      isRestricted
+        ? `This campaign runs under a restricted-advertising category (${restricted!.join(", ")}), so age, gender and detailed targeting are stripped and "broaden the audience" is not an option that exists on it.`
+        : "A wider audience, so the same budget reaches enough people to produce the event more often.",
+      "Leaving it alone once it is changed. Every significant edit restarts the count, so a week of small adjustments keeps an ad set permanently short.",
+    ];
+
+    out.push({
+      entityType: "campaign", entityId: `${a.id}:learning`, entityName: a.name,
+      findingType: "learning_limited",
+      severity: "high",
+      riskLevel: "medium",
+      // Consolidating ad sets, changing the optimisation event and widening an
+      // audience are all structural decisions about how the account is built,
+      // and none has a guarded path here. Budget is the one thing this system
+      // can change, and more budget on an ad set optimising for an event that
+      // barely happens buys more of an unstable signal rather than a stable one.
+      applicability: "vendor",
+      title: `"${a.name}" is not getting enough of the event it optimises for to settle`,
+      summary: `The platform's own reading of this ad set is ${reading.status}: it does not expect to gather enough of the one `
+        + `event this ad set optimises for to stop guessing. ${shortClause} Until it does, what the ad set delivers stays `
+        + `unstable, the cost per result moves week to week, and any comparison drawn against another ad set is a comparison `
+        + `between two guesses.`,
+      evidence: {
+        metrics: {
+          costMicros: a.costMicros,
+          ...(reading.events != null ? { learningEvents: reading.events } : {}),
+          learningThreshold: reading.threshold,
+          ...(reading.shortBy != null ? { shortBy: reading.shortBy } : {}),
+        },
+        ...win,
+        lines: [
+          ...reading.lines,
+          a.campaignName ? `Ad set in "${a.campaignName}"` : "The campaign this ad set sits under was not read",
+          ...fixes,
+        ],
+      },
+      estImpactCents: 0,
+      impactUnit: "usd_month",
+      impactAssumption: "No figure claimed. What an unsettled ad set costs is the difference between the results it got and the "
+        + "ones a settled one would have got, and nothing here can see the second of those. The spend named above is what is "
+        + "being spent under a model that is still guessing, not a saving.",
+      changePayload: null,
+      guardNote: "No API change proposed. Consolidating ad sets, changing the optimisation event and widening an audience are "
+        + "decisions about how the account is built, and none of them has a guarded path here — deliberately.",
+    });
+  }
+
   // ── 6. Does anything tell this account which leads became customers? ──────
   // The account buys form fills, and the platform only ever learns which
   // clicks produced one. Which of those became a customer is in the client's
   // CRM and nothing sends it back. This row says whether it COULD be sent, per
   // client, from data already here — and it deliberately stops short of saying
   // it should be. See the OCH note in docs/agent-reports/ads-revenue-insights.md.
-  const readiness = outcomeReadiness(input.outcomes, input.economics);
+  // Gated on this system capturing THIS PLATFORM'S click identifier on a lead.
+  // Where it does not, the chain does not exist to be read: the row would
+  // report `no_click_ids` on every account and send somebody to fix the wrong
+  // platform's tagging. That is a different answer from a thin chain and it is
+  // said in the report rather than on a finding row nobody can close.
+  const readiness = signals.clickIdOnLead ? outcomeReadiness(input.outcomes, input.economics) : null;
   if (readiness && accountWorthARow) {
     const perMonth = readiness.outcomesPerMonth;
     const thin = readiness.verdict === "too_thin_to_bid";
