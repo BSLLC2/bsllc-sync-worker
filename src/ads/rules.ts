@@ -28,17 +28,25 @@ import {
 import { spendVisibility, coverageChangesTheClaim, type SpendVisibility } from "./spend-visibility.js";
 import type { DailyConversionRow } from "./tracking-outage.js";
 import { readinessFindings } from "./readiness-findings.js";
+import {
+  queryPromotions, promotionClaim,
+  PROMOTE_MIN_CONVERSIONS, PROMOTE_MIN_COST_MICROS,
+  type ExistingKeyword,
+} from "./query-promotion.js";
+import { headroomReading, headroomClaim } from "./headroom.js";
+import { sequenceFindings } from "./sequence.js";
 
 /**
  * Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts.
  *
- * 4, not 3: the Meta work took this to 3 and the readiness work landed
- * alongside it, and two changes must not ship under one version number —
- * a finding records the version that produced it so a row can be read back
- * against the rules of its day, and a shared number makes two sets of rules
- * indistinguishable a year later.
+ * 5: the growth half. Two new rules (a converting query that is not a keyword,
+ * and a campaign converting under target with impressions still to buy) and a
+ * pass that orders a campaign's findings rather than ranking them by size
+ * alone. A finding records the version that produced it so a row can be read
+ * back against the rules of its day, which is why this moves even though no
+ * existing threshold changed.
  */
-export const ADS_RULESET_VERSION = 4;
+export const ADS_RULESET_VERSION = 5;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -1048,6 +1056,18 @@ export interface AuditInput {
    * it is two numbers divided. Absent = the report was not read.
    */
   searchTermSpendByCampaign?: Record<string, number> | null;
+  /**
+   * EVERY enabled keyword in the account, as a settings read rather than a
+   * performance one. ABSENT OR NULL MEANS THE READ FAILED, and the promotion
+   * rule then proposes nothing at all: a query cannot be called a gap in a
+   * keyword list nobody could see.
+   *
+   * It is a separate input from `keywords` above deliberately. That pull is
+   * filtered to `cost_micros > 0` and capped at 300 rows, so a keyword that
+   * took no clicks in the window is missing from it — and proposing a keyword
+   * the account already holds is the one mistake this rule must not make.
+   */
+  existingKeywords?: ExistingKeyword[] | null;
 }
 
 // ── Output ───────────────────────────────────────────────────────────────────
@@ -1058,6 +1078,16 @@ export interface DerivedFinding {
    *  id and we still need the same term next week to land on the same row. */
   entityId: string;
   entityName: string;
+  /**
+   * Which campaign this finding is about, where it is about one. Null on an
+   * account-level row, and never parsed back out of `entityId` — several rules
+   * suffix that (`:cost_target`, `:wasted_terms`) so it is not a campaign id.
+   *
+   * It exists for `sequenceFindings`, which has to read one campaign's findings
+   * together and cannot do it from a name: two accounts can run campaigns with
+   * the same name and an id cannot collide.
+   */
+  campaignId?: string | null;
   findingType: string;
   severity: "high" | "medium" | "low";
   riskLevel: "low" | "medium" | "high";
@@ -1285,7 +1315,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
               + `Raising budget buys more of what already works.`;
 
       out.push({
-        entityType: "campaign", entityId: c.id, entityName: c.name,
+        entityType: "campaign", entityId: c.id, entityName: c.name, campaignId: c.id,
         findingType: "budget_limited",
         severity: budgetLost > THRESHOLDS.budgetLostShareHigh ? "high" : "medium",
         riskLevel: propose ? "low" : "high",
@@ -1359,7 +1389,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     const rankLost = c.rankLostShare ?? 0;
     if (rankLost > THRESHOLDS.rankLostShare) {
       out.push({
-        entityType: "campaign", entityId: c.id, entityName: c.name,
+        entityType: "campaign", entityId: c.id, entityName: c.name, campaignId: c.id,
         findingType: "rank_limited", severity: "medium", riskLevel: "low",
         // Ad Rank is bid + quality + relevance. We do not hold a guarded bid
         // path, and the quality half is ad copy and landing pages — both
@@ -1392,7 +1422,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     // zero and this is the strongest row on the account.
     if (zeroMeansZero && c.clicks >= THRESHOLDS.noConversionClicks && c.conversions === 0) {
       out.push({
-        entityType: "campaign", entityId: c.id, entityName: c.name,
+        entityType: "campaign", entityId: c.id, entityName: c.name, campaignId: c.id,
         findingType: "no_conversions", severity: "high", riskLevel: "medium",
         applicability: "vendor",
         title: `"${c.name}" took ${c.clicks} clicks and ${usd(c.costMicros)} with zero conversions`,
@@ -1431,7 +1461,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       // so the conversion count is already a month's worth.
       const monthlyOverspendCents = Math.max(0, Math.round(overCents * c.conversions));
       out.push({
-        entityType: "campaign", entityId: `${c.id}:cost_target`, entityName: c.name,
+        entityType: "campaign", entityId: `${c.id}:cost_target`, entityName: c.name, campaignId: c.id,
         findingType: "cpa_above_target",
         severity: cpaCents > target.cents * 2 ? "high" : "medium",
         riskLevel: "medium",
@@ -1473,6 +1503,75 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
             + `and it moves the moment either of those figures is corrected.`,
         changePayload: null,
         guardNote: "Bids and landing pages have no guarded path here, and nothing pauses a converting campaign automatically.",
+      });
+    }
+
+    // ── The campaign that converts cheaply, with impressions still to buy ──
+    // The other half of `budget_limited`, and the one nothing looked for. That
+    // rule fires on a campaign losing impressions to its daily CAP. A campaign
+    // at 55% impression share, four points lost to budget and 35% lost to Ad
+    // Rank, buying conversions at half what this client says one is worth,
+    // produces no row anywhere — every metric on it reads healthy, which is
+    // exactly why nothing speaks for it.
+    //
+    // The reading is silent on every verdict but `room`, which is the whole
+    // reason it can be a rule rather than a column: a line on every campaign
+    // saying whether it has headroom is a line people learn to scroll past.
+    const head = headroomReading({
+      campaignId: c.id, campaignName: c.name,
+      costMicros: c.costMicros, conversions: c.conversions,
+      impressionShare: c.impressionShare,
+      budgetLostShare: c.budgetLostShare, rankLostShare: c.rankLostShare,
+      // Passed, never recomputed. The float-denominator refusal and the
+      // broken-column refusal are both already in this one figure.
+      costPerConversionCents: cpaCents,
+      targetCents: target?.cents ?? null,
+      targetBasis: target?.basis ?? null,
+      budgetRuleFloor: THRESHOLDS.budgetLostShare,
+      // The same haircut the budget rule applies, so the two rules can never
+      // print two different extra-spend figures for one campaign.
+      captureRate: BUDGET_CAPTURE_RATE,
+      readiness: biddingByCampaign.get(c.id) ?? null,
+      rankRuleAlsoFired: rankLost > THRESHOLDS.rankLostShare,
+    });
+    if (head.verdict === "room" && head.extraConversions != null && head.extraSpendMicros != null) {
+      out.push({
+        entityType: "campaign", entityId: `${c.id}:headroom`, entityName: c.name, campaignId: c.id,
+        findingType: "headroom",
+        // Never high. A campaign performing well with room to do more of it is
+        // an opportunity, and putting it at the same weight as money leaving
+        // the account for nothing is how a queue stops sorting anything.
+        severity: "medium",
+        riskLevel: "medium",
+        // The lever is a bid or a target, which has no guarded path here by
+        // design, or a daily cap the budget rule's own floor says is not
+        // costing enough to be worth moving. Either way, a brief.
+        applicability: "vendor",
+        title: head.lever === "rank"
+          ? `"${c.name}" buys conversions ${pct(head.marginShare ?? 0)} under target and gives up ${pct(head.lostShare ?? 0)} of its impressions to Ad Rank`
+          : `"${c.name}" buys conversions ${pct(head.marginShare ?? 0)} under target and gives up ${pct(head.lostShare ?? 0)} of its impressions`,
+        summary: head.lever === "rank"
+          ? `Each conversion costs $${((cpaCents ?? 0) / 100).toFixed(2)} against $${((target?.cents ?? 0) / 100).toFixed(2)}, and the campaign is only reaching ${pct(c.impressionShare ?? 0)} of the `
+            + `searches it could. What it gives up goes to Ad Rank rather than to the daily budget, so the money lever is what we are willing to pay `
+            + `for a conversion — a higher bid, or a looser target on the strategy — and the margin against what a lead is worth is what makes paying `
+            + `more sane rather than reckless. Ad relevance and the landing page buy the same impressions without paying for them, so try those first.`
+          : `Each conversion costs $${((cpaCents ?? 0) / 100).toFixed(2)} against $${((target?.cents ?? 0) / 100).toFixed(2)}, and the campaign is only reaching ${pct(c.impressionShare ?? 0)} of the `
+            + `searches it could, mostly because the daily cap runs out. The cap is under the floor at which this engine proposes a budget rise on its `
+            + `own, so nothing is proposed here — but this is the cheapest campaign on the account to put another pound into.`,
+        evidence: {
+          metrics: head.metrics,
+          ...win,
+          lines: [...head.lines, ...head.blockers, ...targetLines],
+        },
+        // LEADS, not dollars. The margin this row is built on is already
+        // measured against what a lead is worth, and running that same figure
+        // through the projected volume as well would turn one recorded number
+        // into a dollar forecast of a change nobody has made.
+        estImpactCents: Math.round(head.extraConversions * 100),
+        impactUnit: "leads_month",
+        impactAssumption: headroomClaim(head, BUDGET_CAPTURE_RATE),
+        changePayload: null,
+        guardNote: "No API change proposed. A bid or a bid target is deliberately outside the guarded path, and the daily cap here is under the floor at which this engine proposes a budget move at all.",
       });
     }
   }
@@ -1531,7 +1630,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
      */
     const seen = visibility.get(first.campaignId) ?? null;
     out.push({
-      entityType: "campaign", entityId: `${first.campaignId}:wasted_terms`, entityName: campaignName,
+      entityType: "campaign", entityId: `${first.campaignId}:wasted_terms`, entityName: campaignName, campaignId: first.campaignId,
       findingType: "wasted_search_term",
       // A list worked out over a third of the campaign's money is not the
       // strongest row on an account, whatever its dollar figure says.
@@ -1574,6 +1673,73 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     });
   }
 
+  // ── 2b. Search terms — the queries that are working ───────────────────────
+  /**
+   * THE LINE ABOVE THIS SECTION, AND WHAT IT THREW AWAY.
+   *
+   * The waste rule opens `if (t.conversions > 0 || t.allConversions > 0)
+   * continue;`. Every query that PRODUCED something was read, discarded, and
+   * read again next week. Seven of this engine's eight original rules cut
+   * waste; this is the one that reads the same report for the opposite thing.
+   *
+   * A converting query the account holds no keyword for is being bought
+   * through whatever looser keyword happens to match it, at that keyword's bid,
+   * in that keyword's ad group, against that ad group's ads. It is the clearest
+   * growth signal a search account has and it costs nothing extra to read.
+   *
+   * NO DOLLAR IS CLAIMED and the reason is in `promotionClaim`: the conversions
+   * already happen and are already in this campaign's totals, so pricing the
+   * change at their value counts the same conversion twice.
+   */
+  const promotions = queryPromotions({
+    terms: input.searchTerms,
+    existingKeywords: input.existingKeywords,
+    // Composed from the one tracking reading, never re-decided. A conversion
+    // on a column counting page views is a page view, and bidding deliberately
+    // on the queries producing the most of them is the finding doing harm.
+    columnCountsOutcomes: tracking.countsOutcomes,
+    protectedPatterns: input.protectedPatterns,
+  });
+  for (const cp of promotions.byCampaign) {
+    const seen = visibility.get(cp.campaignId) ?? null;
+    out.push({
+      entityType: "campaign", entityId: `${cp.campaignId}:promote_terms`, entityName: cp.campaignName,
+      campaignId: cp.campaignId,
+      findingType: "converting_search_term",
+      // Never high, for the same reason it claims no dollar: nothing is
+      // currently going wrong on these queries. They are working, and this is
+      // about buying them deliberately instead of by accident.
+      severity: "medium",
+      riskLevel: "low",
+      // Adding a keyword is not a guarded operation here and this does not make
+      // it one. It means choosing an ad group, a match type and a bid — three
+      // judgements, two of which change which ads a query is served against.
+      applicability: "vendor",
+      title: `${cp.queries.length} quer${cp.queries.length === 1 ? "y" : "ies"} in "${cp.campaignName}" converted ${cp.totalConversions.toFixed(1)} times and ${cp.queries.length === 1 ? "is" : "are"} not a keyword`,
+      summary: `Each of these matched, took clicks and produced conversions over 90 days, and none of them is in the account as a keyword. `
+        + `They are being bought through whichever looser keyword happens to match them, at that keyword's bid and inside that keyword's ad group. `
+        + `Adding each one — usually as a phrase or exact keyword in the ad group whose ads already answer it — gives it its own bid, its own match `
+        + `type and its own reporting line. Read each one before adding it: a query that converts twice is not always a query worth its own keyword.`,
+      evidence: {
+        metrics: { ...cp.metrics, alreadyKeywords: promotions.alreadyKeywords },
+        ...win,
+        lines: [
+          ...cp.lines,
+          `Floor: at least ${PROMOTE_MIN_CONVERSIONS} conversions and ${usd(PROMOTE_MIN_COST_MICROS)} over the 90-day window, on the column this account actually counts.`,
+          `Checked against every enabled keyword in the account, matched on letters and digits only, so case and punctuation cannot hide a duplicate.`,
+          ...(seen && seen.verdict !== "not_applicable" ? [seen.line] : []),
+        ],
+      },
+      // No dollar and no lead count. See `promotionClaim`.
+      estImpactCents: 0,
+      impactUnit: "usd_month",
+      impactAssumption: promotionClaim(cp, promotions.alreadyKeywords)
+        + (seen?.caveat ? ` ${seen.caveat}` : ""),
+      changePayload: null,
+      guardNote: "Nothing to apply. Creating a keyword needs an ad group, a match type and a bid chosen for it, none of which is mechanical, and none of which is in the guarded operation list.",
+    });
+  }
+
   // ── 3. Keywords — spend without return, and quality problems ──────────────
   // Same reasoning as the search terms above: "this keyword converted nothing"
   // and "nothing on this account is recorded" are the same row, and one of them
@@ -1587,7 +1753,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   for (const k of deadKeywords) {
     const monthly = Math.round(k.costMicros / 3);
     out.push({
-      entityType: "keyword", entityId: k.criterionResourceName, entityName: k.text,
+      entityType: "keyword", entityId: k.criterionResourceName, entityName: k.text, campaignId: k.campaignId,
       findingType: "dead_keyword", severity: "high", riskLevel: "medium",
       // Pausing or re-bidding a keyword is not in the guarded API scope. What IS
       // in scope is pointing it at a better page, which is often the real fix —
@@ -1953,5 +2119,15 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     accountCostMicros: accountTotals.costMicros,
   }));
 
-  return out.sort((a, b) => b.estImpactCents - a.estImpactCents);
+  /**
+   * ONE CAMPAIGN'S FINDINGS, READ TOGETHER.
+   *
+   * Everything above decides on its own. `sequenceFindings` is the only pass
+   * that groups them, and it orders a campaign's rows stop -> measure ->
+   * improve -> grow so nobody funds the waste before stopping it. It suppresses
+   * nothing, re-prices nothing and re-severities nothing; the group holding the
+   * biggest single figure still comes first, so the queue reads the same at the
+   * top as it did before.
+   */
+  return sequenceFindings(out);
 }

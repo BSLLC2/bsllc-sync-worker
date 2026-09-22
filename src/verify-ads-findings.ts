@@ -22,6 +22,14 @@ import {
   type DailyConversionRow,
 } from "./ads/tracking-outage.js";
 import { proxyConversionValue } from "./ads/proxy-value.js";
+import {
+  queryPromotions, normalizeQueryText, keywordIndex,
+  PROMOTE_MIN_CONVERSIONS, PROMOTE_MIN_COST_MICROS,
+} from "./ads/query-promotion.js";
+import {
+  headroomReading, HEADROOM_COMFORT_RATIO, HEADROOM_MIN_CONVERSIONS, HEADROOM_MIN_LOST_SHARE,
+} from "./ads/headroom.js";
+import { sequenceFindings, stageOf, FINDING_STAGE, DEFAULT_STAGE } from "./ads/sequence.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { applyChangeSet, rollbackChangeSet, type ChangeSet, type PriorValue } from "./apply-ads-changes.js";
 import { enumName, CONVERSION_CATEGORY, TRACKING_STATUS, BIDDING_STRATEGY_TYPE, CONVERSION_LAG_BUCKET } from "./ads/google-ads-adapter.js";
@@ -107,6 +115,21 @@ const FIXTURE: AuditInput = {
       costMicros: 600_000_000, clicks: 300, impressions: 12_000, conversions: 4,
       impressionShare: 0.55, budgetLostShare: 0.02, rankLostShare: 0.11,
     },
+    // THE GROWTH CASE. Converts 21 times a month at $40 against a $95 ceiling,
+    // is not capped (5% lost to budget, under the budget rule's own floor), is
+    // not rank-limited (33%, under the 40% that rule needs) — and gives away
+    // more than a third of its impressions. Every metric on it reads healthy,
+    // which is precisely why the engine had nothing to say about it.
+    {
+      id: "400", name: "Search — Service Areas", channelType: "SEARCH",
+      resourceName: "customers/1234567890/campaigns/400",
+      // Maximize Conversions with no target: no conversion floor applies, so
+      // the bidding gate is not what is being tested here.
+      bidStrategyType: "MAXIMIZE_CONVERSIONS", hasBidTarget: false,
+      dailyBudgetMicros: 35_000_000, budgetResourceName: "customers/1234567890/campaignBudgets/903",
+      costMicros: 840_000_000, clicks: 520, impressions: 19_000, conversions: 21,
+      impressionShare: 0.54, budgetLostShare: 0.05, rankLostShare: 0.33,
+    },
   ],
   searchTerms: [
     { term: "emergency service near me", campaignId: "200", campaignName: "Search — Broad Prospecting", adGroupName: "Broad", costMicros: 142_000_000, clicks: 96, conversions: 0, allConversions: 0 },
@@ -118,6 +141,28 @@ const FIXTURE: AuditInput = {
     { term: "service consultation booking", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", costMicros: 190_000_000, clicks: 88, conversions: 0, allConversions: 4 },
     // The client's own brand. Must never reach a negatives proposal.
     { term: "northgate clinic reviews", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Brand", costMicros: 77_000_000, clicks: 40, conversions: 0, allConversions: 0 },
+
+    // Converts nothing and is over the waste floor, so campaign 100 carries a
+    // stop-stage row AND two grow-stage ones. That combination is the whole
+    // reason the sequencing pass exists and the fixture had no example of it.
+    { term: "service diy guide", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", costMicros: 110_000_000, clicks: 62, conversions: 0, allConversions: 0 },
+
+    // ── Queries that WORK, which the engine read and discarded until v5 ────
+    // Over both floors and in no keyword anywhere in the account.
+    { term: "emergency service downtown", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", costMicros: 96_000_000, clicks: 40, conversions: 4, allConversions: 4 },
+    { term: "same day service booking", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", costMicros: 52_000_000, clicks: 28, conversions: 3, allConversions: 3 },
+    // Already a keyword, in different case. Must NOT be proposed.
+    { term: "Best Service Provider", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", costMicros: 70_000_000, clicks: 45, conversions: 5, allConversions: 5 },
+    // Converts three times on $20 — under the $25/90d spend floor.
+    { term: "urgent service quote", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", costMicros: 20_000_000, clicks: 9, conversions: 3, allConversions: 3 },
+    // Spends enough, converted once — under the two-conversion floor.
+    { term: "service repair cost", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", costMicros: 60_000_000, clicks: 30, conversions: 1, allConversions: 1 },
+    // Converts well, and is the client's protected brand. Must NOT be proposed.
+    { term: "northgate clinic booking", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Brand", costMicros: 80_000_000, clicks: 30, conversions: 4, allConversions: 4 },
+    // Converts only on an action the account does not count. The waste rule
+    // reads all_conversions and leaves it alone; this rule reads the PRIMARY
+    // column and must leave it alone too, for the opposite reason.
+    { term: "service brochure download", campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", costMicros: 65_000_000, clicks: 35, conversions: 0, allConversions: 6 },
   ],
   keywords: [
     { criterionResourceName: "customers/1234567890/adGroupCriteria/300~1", text: "service near me", matchType: "BROAD", qualityScore: 3, campaignId: "200", campaignName: "Search — Broad Prospecting", adGroupName: "Broad", costMicros: 210_000_000, clicks: 150, conversions: 0, finalUrls: [] },
@@ -166,7 +211,18 @@ const FIXTURE: AuditInput = {
   // its money as queries — which is what the report withholding low-volume
   // searches looks like from the outside, and is the case the waste rule has
   // always reasoned over without saying so.
-  searchTermSpendByCampaign: { "100": 2_000_000_000, "200": 250_000_000, "300": 500_000_000 },
+  searchTermSpendByCampaign: { "100": 2_000_000_000, "200": 250_000_000, "300": 500_000_000, "400": 700_000_000 },
+  // Every enabled keyword the account holds, as a settings read. Deliberately
+  // NOT the same list as `keywords` above — that one is the performance pull
+  // and is filtered to keywords that spent, so a keyword sitting in the account
+  // taking no clicks is absent from it. "[emergency service]" is here and in no
+  // performance row, which is exactly the case that would produce a duplicate
+  // proposal if this rule checked the wrong list.
+  existingKeywords: [
+    { text: "service near me", matchType: "BROAD", adGroupName: "Broad", campaignName: "Search — Broad Prospecting" },
+    { text: "best service provider", matchType: "PHRASE", adGroupName: "Core", campaignName: "Search — Core Services" },
+    { text: "[emergency service]", matchType: "EXACT", adGroupName: "Core", campaignName: "Search — Core Services" },
+  ],
   // A day-by-day series with a break in it: 84 healthy days, then six days on
   // which the account carried on buying clicks and recorded nothing.
   dailyConversions: healthySeriesWithOutage(),
@@ -1126,7 +1182,10 @@ async function main() {
   ok("…and it carries a change through the guarded path", exclPayload.op === "dataExclusions");
   const exclBody = (exclPayload.body as { campaigns: string[]; campaignNames: string[]; startDateTime: string; endDateTime: string }[])[0]!;
   ok("…scoped to the campaigns that actually bid on the conversion column",
-    exclBody.campaigns.length === 2 && !exclBody.campaignNames.includes("Search — Broad Prospecting"),
+    // Three, since v5's fixture added a fourth campaign that bids on
+    // conversions. The count is incidental; what this asserts is that the
+    // MANUALLY bid one is not in the list.
+    exclBody.campaigns.length === 3 && !exclBody.campaignNames.includes("Search — Broad Prospecting"),
     `${exclBody.campaignNames.join(", ")} — a manually bid campaign is unaffected either way, so scoping one would be a change that does nothing`);
   ok("…and the plain English says the tag is still broken",
     /still broken/.test(exclPayload.plainEnglish), exclPayload.plainEnglish.slice(0, 110));
@@ -1287,6 +1346,178 @@ async function main() {
     spendVisibility({ campaignId: "c1", campaignName: "Treatment Center Search", channelType: enumName(ADVERTISING_CHANNEL_TYPE, 2), campaignCostMicros: 100_000_000, reportedTermCostMicros: 80_000_000 }).verdict !== "not_applicable");
   ok("the platform declining to name the channel reads as unread, never as not applicable",
     spendVisibility({ campaignId: "c1", campaignName: "Treatment Center Search", channelType: "UNKNOWN", campaignCostMicros: 100_000_000, reportedTermCostMicros: null }).verdict === "unread");
+
+  // ── 16. The queries that WORK ────────────────────────────────────────────
+  // Seven of the eight original rules cut waste, and the search-term rule's
+  // first line discards every query that converted. This section drives the
+  // rule that reads the same report for the opposite thing, and most of it is
+  // about what it must NOT propose.
+  console.log("\n16. A query that converts and is not a keyword");
+  const grown = evaluate(FIXTURE);
+  const promo = grown.filter((f) => f.findingType === "converting_search_term");
+  ok("the converting queries produce a row", promo.length === 1, promo[0]?.title ?? "none");
+  const promoLines = promo[0]?.evidence.lines.join("\n") ?? "";
+  ok("…naming the two queries that clear both floors and are in no keyword",
+    /emergency service downtown/.test(promoLines) && /same day service booking/.test(promoLines));
+  ok("…and not the one that is already a keyword in different case",
+    !/Best Service Provider/i.test(promoLines) && promo[0]?.evidence.metrics.queryCount === 2,
+    "case and punctuation cannot hide a duplicate, or the rule proposes a keyword the account already holds");
+  ok("…and not the one under the spend floor",
+    !/urgent service quote/.test(promoLines),
+    `${usd(PROMOTE_MIN_COST_MICROS)} over 90 days, the same floor the waste rule uses to decide a query is worth blocking`);
+  ok("…and not the one that converted once",
+    !/service repair cost/.test(promoLines),
+    `conversions is a float, so under ${PROMOTE_MIN_CONVERSIONS} is one event or a share of somebody else's`);
+  ok("…and never the client's protected brand",
+    !/northgate clinic booking/.test(promoLines),
+    "a protected pattern is the client's instruction to leave those queries alone, and a keyword changes how one is bid");
+  ok("…and not the one that only converted on an action the account does not count",
+    !/service brochure download/.test(promoLines),
+    "the waste rule reads all_conversions so it never blocks a query producing business; this one reads the primary column, because a query the bidding cannot learn from is not one to bid on harder");
+  ok("it checks the whole keyword list, not the spending one",
+    Boolean(keywordIndex(FIXTURE.existingKeywords!)!.get("emergency service")),
+    "keyword_view is filtered to cost_micros > 0, so a keyword taking no clicks is missing from it and would be proposed again");
+  ok("IT CLAIMS NO DOLLAR, and says why",
+    promo[0]?.estImpactCents === 0 && /counts? the same conversion twice/.test(promo[0]?.impactAssumption ?? ""),
+    "the conversions already happen and are already in the campaign's own totals");
+  ok("…and proposes nothing through the API",
+    promo[0]?.changePayload === null && promo[0]?.applicability === "vendor",
+    "a keyword needs an ad group, a match type and a bid chosen for it — three judgements, and none of them is in the guarded operation list");
+  ok("an unread keyword list produces nothing at all",
+    evaluate({ ...FIXTURE, existingKeywords: null }).every((f) => f.findingType !== "converting_search_term"),
+    "a query cannot be called a gap in a list nobody could see");
+  ok("…and so does a column that counts page views",
+    queryPromotions({ terms: FIXTURE.searchTerms, existingKeywords: FIXTURE.existingKeywords!, columnCountsOutcomes: "no", protectedPatterns: [] }).verdict === "column_not_outcomes",
+    "bidding deliberately on the queries producing the most page views is the finding doing active harm");
+  ok("…and so does one nobody checked",
+    queryPromotions({ terms: FIXTURE.searchTerms, existingKeywords: FIXTURE.existingKeywords!, columnCountsOutcomes: "unknown", protectedPatterns: [] }).verdict === "column_not_outcomes");
+  ok("normalisation folds case, punctuation and spacing and nothing else",
+    normalizeQueryText("[Emergency  Service!]") === "emergency service"
+    && normalizeQueryText("+plumber \"near\" me") === "plumber near me"
+    && normalizeQueryText("services") !== normalizeQueryText("service"),
+    "it does not stem or fold plurals, so it says 'already there' less often than Google would — which proposes a redundant keyword rather than swallowing a real find");
+  ok("the row says how many converting queries it checked and found already there",
+    promo[0]?.evidence.metrics.alreadyKeywords === 1,
+    "a check nobody can see the result of is a check nobody trusts");
+
+  // ── 17. Converting profitably, with room to spend more ───────────────────
+  console.log("\n17. A campaign converting under target with impressions to buy");
+  const head = grown.filter((f) => f.findingType === "headroom");
+  ok("the healthy campaign nothing spoke for gets a row", head.length === 1, head[0]?.title ?? "none");
+  ok("…and it is the one that is neither budget-capped nor rank-limited",
+    head[0]?.entityName === "Search — Service Areas",
+    "5% lost to budget is under the budget rule's floor and 33% lost to rank is under the rank rule's, so every other rule was silent on it");
+  ok("it names which lever, and it is not the budget",
+    /Ad Rank/.test(head[0]?.title ?? "") && /what we are willing to pay/.test(head[0]?.summary ?? ""),
+    "impressions are lost to the cap or to Ad Rank and the two have opposite fixes, so saying 'spend more' without saying which is not advice");
+  ok("it claims LEADS, projected, never dollars",
+    head[0]?.impactUnit === "leads_month" && head[0]!.estImpactCents > 0
+    && /projection from this campaign's current performance, not a promise/.test(head[0]?.impactAssumption ?? ""));
+  ok("…and says the projection is optimistic at both ends",
+    /cost more per click than the ones it wins/.test(head[0]?.impactAssumption ?? "")
+    && /Impression share lost is not demand handed over/.test(head[0]?.impactAssumption ?? ""),
+    "diminishing returns are real: the auctions a campaign is missing are the ones it is being outbid in");
+  ok("…and proposes no change",
+    head[0]?.changePayload === null && head[0]?.applicability === "vendor",
+    "a bid target has no guarded path here by design, and this campaign's cap is under the floor at which a budget move is proposed at all");
+  ok("the extra-spend figure is the same arithmetic the budget rule uses",
+    head[0]?.evidence.metrics.projectedExtraSpendMicros === Math.round(840_000_000 * 0.38 * 0.5),
+    "two rules printing two different extra-spend figures for one campaign is the disagreement this codebase spends versions removing");
+
+  const headBase = {
+    campaignId: "9", campaignName: "T", costMicros: 840_000_000, conversions: 21,
+    impressionShare: 0.54, budgetLostShare: 0.05, rankLostShare: 0.33,
+    costPerConversionCents: 4_000, targetCents: 9_500, targetBasis: "stated" as const,
+    budgetRuleFloor: THRESHOLDS.budgetLostShare, captureRate: 0.5,
+    readiness: null, rankRuleAlsoFired: false,
+  };
+  ok("no target on the client's record means no reading, and it says which figures are missing",
+    headroomReading({ ...headBase, targetCents: null, targetBasis: null }).verdict === "cant_tell"
+    && /cost-per-lead ceiling, or a customer value and a close rate/.test(headroomReading({ ...headBase, targetCents: null, targetBasis: null }).silence ?? ""),
+    "nothing here invents a threshold to measure a margin against");
+  ok("a campaign at its target is not headroom",
+    headroomReading({ ...headBase, costPerConversionCents: 9_000 }).verdict === "at_or_over_target",
+    `inside ${Math.round((1 - HEADROOM_COMFORT_RATIO) * 100)}% of the target, one conversion either way puts it over`);
+  ok("…and neither is one with too few conversions to hold a cost per conversion still",
+    headroomReading({ ...headBase, conversions: 4 }).verdict === "too_few_conversions",
+    `${HEADROOM_MIN_CONVERSIONS} is where a one-conversion swing is a fifth, which is the margin the ratio demands`);
+  ok("…and neither is one already taking what is there",
+    headroomReading({ ...headBase, impressionShare: 0.95, budgetLostShare: 0.02, rankLostShare: 0.03 }).verdict === "no_room",
+    `under ${Math.round(HEADROOM_MIN_LOST_SHARE * 100)}% there is nothing that could absorb meaningful extra spend`);
+  ok("a campaign the budget rule already fired on is left to that row",
+    headroomReading({ ...headBase, budgetLostShare: 0.31 }).verdict === "budget_rule_owns_it",
+    "two rows proposing the same rise is how a queue fills with advice nobody reads");
+  ok("neither lost share reported is unreadable, never nought",
+    headroomReading({ ...headBase, budgetLostShare: null, rankLostShare: null }).verdict === "cant_tell",
+    "1 minus the impression share is lost to SOMETHING, and which of the two decides the whole recommendation");
+  ok("an unreadable cost per conversion produces nothing",
+    headroomReading({ ...headBase, costPerConversionCents: null }).verdict === "cant_tell");
+  ok("THE BIDDING GATE HOLDS HERE TOO",
+    headroomReading({
+      ...headBase,
+      readiness: biddingReadiness(
+        { campaignId: "9", campaignName: "T", strategyType: "TARGET_CPA", hasTarget: true, conversions30d: 6, costMicros30d: 840_000_000 },
+        null, "yes"),
+    }).blockers.some((b) => /does not have the conversions to survive one/.test(b)),
+    "a target change on a campaign under the published minimum restarts a learning period it cannot finish — composed from biddingReadiness, not re-decided");
+
+  // ── 18. One campaign's findings, read together ───────────────────────────
+  console.log("\n18. The order to do a campaign's findings in");
+  const c100 = grown.filter((f) => f.campaignId === "100");
+  const stages100 = c100.map((f) => stageOf(f.findingType));
+  const stageRank: Record<string, number> = { stop: 0, measure: 1, improve: 2, grow: 3 };
+  ok("a campaign's rows come out stop → measure → improve → grow",
+    stages100.every((st, idx) => idx === 0 || stageRank[stages100[idx - 1]!]! <= stageRank[st]!),
+    `${c100.map((f) => `${f.findingType}(${stageOf(f.findingType)})`).join(" · ")}`);
+  ok("…so stopping the waste comes before adding money to the same campaign",
+    c100.findIndex((f) => f.findingType === "wasted_search_term") < c100.findIndex((f) => f.findingType === "converting_search_term"),
+    "doing them the other way round funds the waste before stopping it");
+  const grow100 = c100.find((f) => stageOf(f.findingType) === "grow");
+  ok("the grow row says what it is waiting on, naming it",
+    /Do this after the money going out for nothing is stopped: "/.test(grow100?.evidence.lines.at(-1) ?? ""),
+    grow100?.evidence.lines.at(-1) ?? "no clause");
+  ok("…in ONE clause, and only on the row that has something ahead of it",
+    grown.filter((f) => f.evidence.lines.some((l) => /^Do this after /.test(l))).every((f) => stageOf(f.findingType) === "grow")
+    && grown.every((f) => f.evidence.lines.filter((l) => /^Do this after /.test(l)).length <= 1),
+    "a badge on every row flattens the only distinction that matters");
+  ok("NOTHING IS SUPPRESSED",
+    sequenceFindings(grown).length === grown.length
+    && new Set(sequenceFindings(grown).map((f) => `${f.entityId}|${f.findingType}`)).size
+       === new Set(grown.map((f) => `${f.entityId}|${f.findingType}`)).size,
+    "a hidden row is worse than a badly ordered one");
+  ok("…and nothing is re-priced or re-severitied",
+    sequenceFindings(grown).every((f) => {
+      // Identity is entity AND type: `budget_limited`, `no_conversions` and
+      // `rank_limited` all key on the bare campaign id.
+      const was = grown.find((g) => g.entityId === f.entityId && g.findingType === f.findingType)!;
+      return was.estImpactCents === f.estImpactCents && was.severity === f.severity && was.riskLevel === f.riskLevel;
+    }),
+    "est_impact_cents carries a basis, so nudging one to move a row up the queue would make a figure mean two things");
+  ok("the clause is on the evidence LINES, never the metrics",
+    grown.every((f) => Object.keys(f.evidence.metrics).every((k) => !/^Do this after/.test(k)))
+    && evidenceHash(grown.find((f) => f.findingType === "wasted_search_term")!.evidence.metrics)
+       === evidenceHash(evaluate(FIXTURE).find((f) => f.findingType === "wasted_search_term")!.evidence.metrics),
+    "the hash is what decides whether a dismissed finding comes back, and a sentence must never be able to resurrect one");
+  ok("a campaign with only one stage on it gets no clause",
+    grown.filter((f) => f.campaignId === "400").every((f) => !f.evidence.lines.some((l) => /^Do this after /.test(l))),
+    "campaign 400 carries the headroom row and nothing else, so there is nothing for it to wait for");
+  ok("an account-level row is never told to wait for a campaign's work",
+    grown.filter((f) => f.entityType === "account").every((f) => !f.evidence.lines.some((l) => /^Do this after /.test(l))));
+  ok("the group holding the biggest single figure still comes first",
+    grown[0]!.estImpactCents === Math.max(...grown.map((f) => f.estImpactCents)),
+    "the queue reads the same at the top as it did before");
+  ok("…and calling it twice adds nothing",
+    JSON.stringify(sequenceFindings(sequenceFindings(grown))) === JSON.stringify(sequenceFindings(grown)),
+    "a pure function that grows a line every time it is called is one somebody will call twice and not find out for a month");
+  ok("the pass is stable, so two runs order identically",
+    JSON.stringify(sequenceFindings(grown)) === JSON.stringify(sequenceFindings([...grown])),
+    "the determinism check one section up depends on it");
+  ok("a finding type nobody has placed sits in the middle",
+    stageOf("something_new_entirely") === DEFAULT_STAGE && DEFAULT_STAGE === "improve",
+    "it must not jump ahead of waste-stopping and must not be pushed past a budget rise either");
+  ok("every finding type this engine produces has a declared stage",
+    Array.from(new Set(grown.map((f) => f.findingType))).every((t) => FINDING_STAGE[t] != null),
+    Array.from(new Set(grown.map((f) => f.findingType))).filter((t) => FINDING_STAGE[t] == null).join(", ") || "all declared");
 
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

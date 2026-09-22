@@ -27,6 +27,7 @@ import type {
 } from "./rules.js";
 import type { ConversionLagRow } from "./bidding-readiness.js";
 import type { DailyConversionRow } from "./tracking-outage.js";
+import type { ExistingKeyword } from "./query-promotion.js";
 
 /** The API returns enums as integers over REST, not their string names, so a
  *  `=== "BROAD"` comparison silently never matches. Map both forms. */
@@ -261,6 +262,35 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       negRows.map((r: any) => String(r.campaign_criterion?.keyword?.text ?? "").toLowerCase()).filter(Boolean),
     );
 
+    // ── Every keyword the account holds, as a SETTINGS read ────────────────
+    // Not the `keyword_view` pull below: that one is filtered to
+    // `cost_micros > 0` and capped at 300 rows, so a keyword that took no
+    // clicks in the window is missing from it — and "missing from a
+    // performance report" is not "not in the account". The promotion rule
+    // proposes adding keywords, so it checks against the whole list or it
+    // proposes nothing at all; `tryQuery` returns null on a failed read and
+    // null is what makes the rule silent rather than confident.
+    //
+    // No date segment, so no metrics come back and the row count is the
+    // account's live keyword count rather than a window's worth of them.
+    const kwListRows = await tryQuery(customer, "keyword list", `
+      SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+             ad_group.name, campaign.name
+        FROM ad_group_criterion
+       WHERE ad_group_criterion.type = 'KEYWORD'
+         AND ad_group_criterion.negative = FALSE
+         AND ad_group_criterion.status = 'ENABLED'
+         AND ad_group.status = 'ENABLED'
+         AND campaign.status = 'ENABLED'`, log);
+    const existingKeywords: ExistingKeyword[] | null = kwListRows
+      ? kwListRows.map((r: any) => ({
+          text: String(r.ad_group_criterion?.keyword?.text ?? ""),
+          matchType: matchType(r.ad_group_criterion?.keyword?.match_type),
+          adGroupName: r.ad_group?.name ? String(r.ad_group.name) : null,
+          campaignName: r.campaign?.name ? String(r.campaign.name) : null,
+        })).filter((k: ExistingKeyword) => k.text.length > 0)
+      : null;
+
     // GAQL's DURING literals stop at LAST_30_DAYS — there is no LAST_90_DAYS —
     // so the 90-day windows are an explicit BETWEEN range.
     const termRows = await safeQuery(customer, "search terms", `
@@ -431,6 +461,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       conversionLag,
       dailyConversions,
       searchTermSpendByCampaign,
+      existingKeywords,
       // The client's own economics are not the platform's to know. They are
       // read from Postgres by the caller (src/ads-findings-run.ts) and merged
       // onto the input, which keeps this adapter what it is: one vendor's API.
