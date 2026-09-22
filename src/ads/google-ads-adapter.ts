@@ -21,7 +21,10 @@ import {
 import type {
   PlatformAdapter, PlatformCapabilities, AdapterContext, ValidationResult, ApplyResult, VerifyMetrics,
 } from "./platform.js";
-import type { AuditInput, CampaignRow, SearchTermRow, KeywordRow, AdGroupAdRow } from "./rules.js";
+import type {
+  AuditInput, CampaignRow, SearchTermRow, KeywordRow, AdGroupAdRow,
+  ConversionActionRow, TrackingFacts,
+} from "./rules.js";
 
 /** The API returns enums as integers over REST, not their string names, so a
  *  `=== "BROAD"` comparison silently never matches. Map both forms. */
@@ -29,6 +32,52 @@ const MATCH_TYPE: Record<string, string> = {
   "2": "EXACT", "3": "PHRASE", "4": "BROAD", EXACT: "EXACT", PHRASE: "PHRASE", BROAD: "BROAD",
 };
 const matchType = (v: unknown): string => MATCH_TYPE[String(v ?? "")] ?? String(v ?? "?");
+
+/**
+ * The same indignity, for the enums the conversion-tracking reading decides on.
+ *
+ * `trackingReading` refuses to compute money when a counting action's category
+ * is a page view, and it decides that by comparing the category to Google's own
+ * word for it. Over REST that word arrives as `"3"`. A comparison against
+ * `"PAGE_VIEW"` would therefore never match, on every account, silently — the
+ * rule would read as "nothing wrong here" forever and nothing would say so.
+ * Normalising happens HERE rather than in the rules, because which shape an
+ * enum arrives in is one vendor's API and the rules are platform-neutral.
+ *
+ * Values from the read-only diagnostics that already decode them
+ * (src/dump-ads-conversions.ts, src/diagnose-och-ads.ts). A number this map
+ * does not know passes through as its own digits rather than being guessed at,
+ * and an unknown category reads as ambiguous, which is the safe direction.
+ */
+export const CONVERSION_CATEGORY: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "DEFAULT", "3": "PAGE_VIEW", "4": "PURCHASE",
+  "5": "SIGNUP", "6": "LEAD", "7": "DOWNLOAD", "8": "ADD_TO_CART", "9": "BEGIN_CHECKOUT",
+  "10": "SUBSCRIBE_PAID", "11": "PHONE_CALL_LEAD", "12": "IMPORTED_LEAD", "13": "SUBMIT_LEAD_FORM",
+  "14": "BOOK_APPOINTMENT", "15": "REQUEST_QUOTE", "16": "GET_DIRECTIONS", "17": "OUTBOUND_CLICK",
+  "18": "CONTACT", "19": "ENGAGEMENT", "20": "STORE_VISIT", "21": "STORE_SALE",
+  "22": "QUALIFIED_LEAD", "23": "CONVERTED_LEAD",
+};
+const CONVERSION_STATUS: Record<string, string> = { "2": "ENABLED", "3": "REMOVED", "4": "HIDDEN" };
+const CONVERSION_TYPE: Record<string, string> = {
+  "2": "AD_CALL", "3": "CLICK_TO_CALL", "4": "GOOGLE_PLAY_DOWNLOAD", "5": "GOOGLE_PLAY_IN_APP_PURCHASE",
+  "6": "UPLOAD_CALLS", "7": "UPLOAD_CLICKS", "8": "WEBPAGE", "9": "WEBSITE_CALL",
+  "10": "STORE_SALES_DIRECT_UPLOAD", "11": "STORE_SALES", "12": "FIREBASE_ANDROID_FIRST_OPEN",
+  "16": "GOOGLE_ANALYTICS_4_CUSTOM", "17": "GOOGLE_ANALYTICS_4_PURCHASE",
+};
+/** Only the value the tracking reading actually branches on. */
+export const TRACKING_STATUS: Record<string, string> = {
+  "2": "NOT_CONVERSION_TRACKED", "3": "CONVERSION_TRACKING_MANAGED_BY_SELF",
+  "4": "CONVERSION_TRACKING_MANAGED_BY_THIS_MANAGER", "5": "CONVERSION_TRACKING_MANAGED_BY_ANY_MANAGER",
+};
+/** A string already in Google's own words passes through untouched, so the
+ *  normalisation is safe whichever shape a future client library returns. */
+export function enumName(map: Record<string, string>, v: unknown): string | null {
+  if (v == null) return null;
+  const raw = String(v);
+  if (map[raw]) return map[raw];
+  const upper = raw.toUpperCase();
+  return Object.values(map).includes(upper) ? upper : raw;
+}
 
 /** Run a GAQL query, returning [] and logging rather than throwing — one
  *  unsupported field must not sink the whole audit. */
@@ -39,6 +88,22 @@ async function safeQuery(customer: any, label: string, gaql: string, onLog?: (s:
     const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
     (onLog ?? console.log)(`    ⚠ ${label} query failed: ${msg.slice(0, 200)}`);
     return [];
+  }
+}
+
+/**
+ * The same query, with the one distinction `safeQuery` cannot make: null when
+ * the query threw, an array when it ran. Used only where an empty result is
+ * itself a finding — an account with no conversion actions is broken, and a
+ * query that failed is not, and the two must never be the same value.
+ */
+async function tryQuery(customer: any, label: string, gaql: string, onLog?: (s: string) => void): Promise<any[] | null> {
+  try {
+    return await customer.query(gaql);
+  } catch (e: any) {
+    const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
+    (onLog ?? console.log)(`    ⚠ ${label} query failed: ${msg.slice(0, 200)}`);
+    return null;
   }
 }
 
@@ -223,6 +288,14 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       adStrength: r.ad_group_ad?.ad_strength != null ? String(r.ad_group_ad.ad_strength) : null,
     }));
 
+    // ── Conversion tracking ────────────────────────────────────────────────
+    // Read last and read carefully, because every rule above it judges a
+    // campaign on "converted" or "converted nothing" and a failed read here
+    // looks exactly like an account with no conversion actions. `tryQuery`
+    // exists for that one distinction: it returns null when the query threw
+    // and [] when the account genuinely has nothing.
+    const tracking = await this.readTracking(customer, ctx);
+
     return {
       platform: "google_ads",
       accountId: ctx.accountId,
@@ -234,7 +307,78 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       ads,
       existingNegatives,
       protectedPatterns: ctx.protectedPatterns,
+      tracking,
+      // The client's own economics are not the platform's to know. They are
+      // read from Postgres by the caller (src/ads-findings-run.ts) and merged
+      // onto the input, which keeps this adapter what it is: one vendor's API.
+      economics: null,
     };
+  }
+
+  /**
+   * What the account says about its own conversion tracking.
+   *
+   * Three reads, in falling order of how much they tell us, and each one is
+   * allowed to fail without costing the others:
+   *   1. the account-level tracking status — the one field that answers
+   *      "is anything configured at all";
+   *   2. the conversion actions WITH what each has recorded over the window;
+   *   3. the same actions without metrics, where (2) is not available on this
+   *      API version — in which case every count comes back null and the rules
+   *      refuse to argue from a nought they did not read.
+   */
+  private async readTracking(customer: any, ctx: AdapterContext): Promise<TrackingFacts> {
+    const log = this.onLog;
+
+    const statusRows = await safeQuery(customer, "conversion tracking status", `
+      SELECT customer.id, customer.conversion_tracking_setting.conversion_tracking_status
+        FROM customer LIMIT 1`, log);
+    const status = enumName(TRACKING_STATUS, statusRows[0]?.customer?.conversion_tracking_setting?.conversion_tracking_status);
+
+    const map = (r: any, recorded: number | null): ConversionActionRow => ({
+      id: String(r.conversion_action?.id ?? ""),
+      name: String(r.conversion_action?.name ?? ""),
+      status: enumName(CONVERSION_STATUS, r.conversion_action?.status),
+      category: enumName(CONVERSION_CATEGORY, r.conversion_action?.category),
+      actionType: enumName(CONVERSION_TYPE, r.conversion_action?.type),
+      primaryForGoal: r.conversion_action?.primary_for_goal != null
+        ? Boolean(r.conversion_action.primary_for_goal) : null,
+      countsIntoConversionsColumn: r.conversion_action?.include_in_conversions_metric != null
+        ? Boolean(r.conversion_action.include_in_conversions_metric) : null,
+      conversionsInWindow: recorded,
+    });
+
+    const withMetrics = await tryQuery(customer, "conversion actions (with metrics)", `
+      SELECT conversion_action.id, conversion_action.name, conversion_action.status,
+             conversion_action.category, conversion_action.type,
+             conversion_action.primary_for_goal, conversion_action.include_in_conversions_metric,
+             metrics.all_conversions
+        FROM conversion_action
+       WHERE segments.date BETWEEN '${ctx.windowStart}' AND '${ctx.windowEnd}'`, log);
+
+    if (withMetrics) {
+      // The resource returns one row per action per segment on some versions,
+      // so fold by action id rather than trusting one row each.
+      const acc = new Map<string, ConversionActionRow>();
+      for (const r of withMetrics) {
+        const row = map(r, Number(r.metrics?.all_conversions ?? 0));
+        const prev = acc.get(row.id);
+        if (!prev) { acc.set(row.id, row); continue; }
+        prev.conversionsInWindow = (prev.conversionsInWindow ?? 0) + (row.conversionsInWindow ?? 0);
+      }
+      return { status, actions: Array.from(acc.values()) };
+    }
+
+    const settingsOnly = await tryQuery(customer, "conversion actions (settings only)", `
+      SELECT conversion_action.id, conversion_action.name, conversion_action.status,
+             conversion_action.category, conversion_action.type,
+             conversion_action.primary_for_goal, conversion_action.include_in_conversions_metric
+        FROM conversion_action`, log);
+
+    // Null all the way through where nothing came back. An empty array here
+    // would say "this account has no conversion actions", which is a finding,
+    // and we do not have the evidence for it.
+    return { status, actions: settingsOnly ? settingsOnly.map((r: any) => map(r, null)) : null };
   }
 
   // ── Validate / apply / rollback ────────────────────────────────────────────
