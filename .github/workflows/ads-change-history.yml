@@ -1,0 +1,75 @@
+name: Ads change history capture (read-only)
+
+# Captures Google Ads' own change_event feed per mapped account: who changed
+# what, when, whether it came through an API or from a person in the web
+# interface, and what the fields moved from and to.
+#
+# WHY SIX-HOURLY. change_event is capped at 30 DAYS by the API and anything
+# older is deleted, so a day not captured is account history lost for good.
+# Every run re-reads the WHOLE thirty days, which is free because rows are
+# keyed on the platform's own identity for the event — so nothing is lost until
+# every run inside a thirty-day stretch has failed, and the heartbeat SLA fires
+# after two missed firings. A daily job reading only the previous day would
+# lose a week to a week of failures.
+#
+# READ-ONLY. change_event is a SELECT. This writes nothing to any ad account.
+on:
+  schedule:
+    # 02:10, 08:10, 14:10, 20:10 UTC. Ten past, so it is not competing with the
+    # metric importers on the hour.
+    - cron: "10 2,8,14,20 * * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug. Blank = every mapped account."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: ads-change-history
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Capture change history
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.client }}" ] && ARGS="--client=${{ inputs.client }}"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run ads-change-history -- $ARGS 2>&1 | tee run.log
+
+      # Without this, a job that quietly stopped firing produces exactly the
+      # same empty table as an account nobody touched — and here the second
+      # reading is what a guard acts on. `if: always()` so a failure records as
+      # a failure rather than as silence.
+      - name: Heartbeat
+        # A dry run and a single-account run are both excluded. The heartbeat
+        # is ONE row for the whole book, so stamping it from a run that read
+        # one account would claim every other account was captured today and
+        # hide a schedule that has stopped — which is the exact failure the
+        # 30-day cap makes expensive.
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=ads_change_history --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log

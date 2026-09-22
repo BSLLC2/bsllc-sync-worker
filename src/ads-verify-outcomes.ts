@@ -7,6 +7,7 @@ import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import { logEvent } from "./ads/store.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
+import { changeWindowReading, OBSERVATIONAL_CAVEAT } from "./ads/change-window.js";
 
 /**
  * The after-check. This is the part that turns a pile of recommendations into
@@ -93,6 +94,57 @@ function judge(
   return { verdict: "inconclusive", observedCents: null, note: `Spend moved ${(relCost * 100).toFixed(0)}% and conversions ${(relConv * 100).toFixed(0)}% — inside the noise band, so no verdict.` };
 }
 
+/**
+ * Who else worked on this thing while we were measuring it.
+ *
+ * Reads ads_change_events and ads_change_scans — rows the change-history
+ * capture job wrote. Both halves matter: the events say what landed, the scan
+ * row says whether we were capturing at all, and with no scan row the reading
+ * comes back "not known" rather than "clean". See src/ads/change-window.ts.
+ *
+ * `verify` measures the WHOLE ACCOUNT for any entity that is not a campaign
+ * (GoogleAdsAdapter.verify), so the scope widens to match rather than
+ * pretending the measurement was narrower than it was.
+ */
+async function windowSharedWith(
+  c: pg.Client,
+  platform: string,
+  accountId: string,
+  entityType: string,
+  entityId: string,
+  windowStart: Date,
+  windowEnd: Date,
+) {
+  const wholeAccount = entityType !== "campaign";
+  const campaignId = wholeAccount ? null : (entityId.split(":")[0] ?? "");
+  const { rows: scans } = await c.query<{ covered_from: string }>(
+    `SELECT covered_from FROM ads_change_scans WHERE platform = $1 AND account_id = $2`,
+    [platform, accountId],
+  );
+  const { rows: events } = await c.query<{
+    changed_at: Date; actor_kind: string; actor_internal: boolean | null; actor_email: string | null;
+  }>(
+    `SELECT changed_at, actor_kind, actor_internal, actor_email
+       FROM ads_change_events
+      WHERE platform = $1 AND account_id = $2
+        AND changed_at >= $3 AND changed_at <= $4
+        AND ($5::text IS NULL OR campaign_id = $5)`,
+    [platform, accountId, windowStart, windowEnd, campaignId && /^\d+$/.test(campaignId) ? campaignId : null],
+  );
+  return changeWindowReading({
+    coveredFrom: scans[0]?.covered_from ? new Date(`${scans[0].covered_from}T00:00:00.000Z`) : null,
+    windowStart,
+    windowEnd,
+    wholeAccount,
+    events: events.map((e) => ({
+      changedAt: e.changed_at,
+      actorKind: e.actor_kind,
+      actorInternal: e.actor_internal,
+      actorEmail: e.actor_email,
+    })),
+  });
+}
+
 async function main() {
   const cfg = loadConfig();
   const api = new GoogleAdsApi({ client_id: cfg.clientId, client_secret: cfg.clientSecret, developer_token: cfg.developerToken });
@@ -150,13 +202,32 @@ async function main() {
         for (const [k, v] of Object.entries(before)) beforeScaled[k] = (v as number) * (horizon / MEASURE_DAYS);
 
         const { verdict, observedCents, note } = judge(r.finding_type, beforeScaled, after.metrics, r.est_impact_cents);
+
+        // WAS THE WINDOW OURS ALONE? A subcontractor rebuilding the account
+        // inside the measured stretch moves exactly the numbers this verdict
+        // is read off. The result is NOT dropped and NOT adjusted — it is
+        // recorded as shared, with a count and who, so a won or a lost is
+        // readable rather than quietly wrong. A null is "we could not see",
+        // which is never read as a clean window.
+        const shared = await windowSharedWith(
+          c, r.platform, accountId, r.entity_type, r.entity_id,
+          new Date(`${daysAgo(horizon)}T00:00:00.000Z`), new Date(`${daysAgo(1)}T23:59:59.000Z`),
+        );
+        // The caveat rides on EVERY verdict, clean window or not: a pre/post
+        // comparison with nothing held back observes, it does not prove.
+        const fullNote = `${note} ${shared.note} ${OBSERVATIONAL_CAVEAT}`;
         existing.push({
           checkedAt: new Date().toISOString(), horizonDays: horizon,
           before: beforeScaled, after: after.metrics,
-          predictedCents: r.est_impact_cents, observedCents, verdict, note,
+          predictedCents: r.est_impact_cents, observedCents, verdict, note: fullNote,
+          windowContaminated: shared.contaminated,
+          otherChangesInWindow: shared.otherChanges,
+          otherChangesByHand: shared.byHand,
+          otherChangesFromOutside: shared.fromOutsideTheCompany,
+          otherChangeActors: shared.actors,
         });
-        console.log(`   ${horizon}d: ${verdict.toUpperCase()} — ${note}`);
-        await logEvent(c, r.id, "verified", ACTOR, `${horizon}-day check: ${verdict}. ${note}`, JSON.stringify({ horizon, before: beforeScaled, after: after.metrics }));
+        console.log(`   ${horizon}d: ${verdict.toUpperCase()} — ${fullNote}`);
+        await logEvent(c, r.id, "verified", ACTOR, `${horizon}-day check: ${verdict}. ${fullNote}`, JSON.stringify({ horizon, before: beforeScaled, after: after.metrics, sharedWindow: { contaminated: shared.contaminated, otherChanges: shared.otherChanges } }));
       }
 
       // The 28-day verdict is the one that settles it; before that a 14-day

@@ -40,7 +40,7 @@ export interface AdsJobSpec {
 }
 
 /**
- * The four jobs. `job` names are also what `deriveJobCadences` picks up from
+ * The five jobs. `job` names are also what `deriveJobCadences` picks up from
  * the workflow files, so the SLA for each comes from its own cron rather than
  * a number typed here: hourly for apply, daily for verify, weekly for
  * findings, fortnightly for briefs.
@@ -69,6 +69,14 @@ export const ADS_JOBS: AdsJobSpec[] = [
     cadence: "daily 06:40 UTC",
     quiet: "Nothing due is normal — an after-check only exists 14 and 28 days after a change was applied, and nothing has been applied yet.",
     fix: "Open bsllc-sync-worker → Actions → \"Ads — verify outcomes (read-only)\" and re-run it. It is read-only against every platform; it writes outcomes onto findings. While it is down, applied changes silently never get a verdict, which is precisely the record the pipeline exists to build — so this one being quietly broken costs more the longer it lasts.",
+  },
+  {
+    job: "ads_change_history",
+    workflow: "ads-change-history.yml",
+    label: "Ads change history capture",
+    cadence: "every six hours, at :10",
+    quiet: "An account nobody touched genuinely produces no new rows, and a second run inside the same window produces none either — the note carries accounts/read/events counts so both read as what they are. What this job must never do is stop: the platform keeps change_event for 30 DAYS and then deletes it, so a silent stop is account history being lost rather than a stale reading.",
+    fix: "Open bsllc-sync-worker → Actions → \"Ads change history capture (read-only)\" and re-run it. It is a SELECT against change_event and writes nothing to any ad account. Fix it the same day: every day it is down is a day of change history that cannot be recovered afterwards, and while it is down the settle-window guard in the dashboard cannot see a change a subcontractor made by hand.",
   },
   {
     job: "ads_vendor_briefs",
