@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { loadConfig } from "./config.js";
 import { logEvent } from "./ads/store.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
+import { stageOf, type FindingStage } from "./ads/sequence.js";
 
 /**
  * Vendor briefs — what the API cannot do, written so someone else can do it.
@@ -31,6 +32,8 @@ import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 
 const ACTOR = "ads-vendor-briefs";
 /** How long a brief covers, and how long before the same client gets another. */
+const STAGE_RANK: Record<FindingStage, number> = { stop: 0, measure: 1, improve: 2, grow: 3 };
+
 const CADENCE_DAYS = 28;
 /** Who chases it by default until someone reassigns it in the OS. */
 const DEFAULT_OWNER = "BS LLC";
@@ -182,6 +185,18 @@ async function main() {
         [cl.id],
       );
       if (!rows.length) { console.log(`· ${cl.name}: nothing new to brief.`); continue; }
+
+      // ORDER THE BRIEF THE WAY THE WORK HAS TO BE DONE, not by what each item
+      // is worth. A vendor reads this list top to bottom, and a document that
+      // puts "raise the bid on this campaign" above "these twelve queries are
+      // burning money in it" has them funding the waste before stopping it.
+      // `sequenceFindings` in src/ads/sequence.ts decides the same order inside
+      // the engine; this reads the same catalog rather than a second copy of
+      // it, so the brief and the run can never disagree about what comes first.
+      // Size still breaks ties within a stage, which is what the old sort was.
+      rows.sort((a, b) =>
+        STAGE_RANK[stageOf(a.finding_type)] - STAGE_RANK[stageOf(b.finding_type)]
+        || (b.est_impact_cents ?? 0) - (a.est_impact_cents ?? 0));
 
       // One brief per client per platform — a vendor works one account at a time.
       const byPlatform = new Map<string, Row[]>();

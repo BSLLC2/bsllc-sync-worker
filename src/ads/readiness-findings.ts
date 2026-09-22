@@ -81,7 +81,7 @@ export function readinessFindings(i: ReadinessFindingInput): DerivedFinding[] {
 
     const needs = whatItWouldNeed(r);
     out.push({
-      entityType: "campaign", entityId: `${c.id}:bidding_readiness`, entityName: c.name,
+      entityType: "campaign", entityId: `${c.id}:bidding_readiness`, entityName: c.name, campaignId: c.id,
       findingType: "bidding_not_ready",
       // The campaign is spending against a strategy that cannot work. That is
       // upstream of every other judgement this audit makes about it.

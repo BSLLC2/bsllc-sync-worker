@@ -163,8 +163,14 @@ async function auditOne(
  */
 async function fileUrgentTasks(c: pg.Client, clientId: string, clientName: string): Promise<number> {
   const { rows } = await c.query<{ id: string; title: string; est_impact_cents: number; finding_type: string }>(
+    // `impact_unit = 'usd_month'` is not a tidy-up: URGENT_FLOOR_CENTS is a
+    // DOLLAR floor and est_impact_cents holds leads x 100 on a leads_month
+    // row, so without it a growth finding would be compared against a money
+    // threshold and, if it ever cleared one, described as "$N/month" below.
+    // Two units in one column need the unit in the WHERE.
     `SELECT id, title, est_impact_cents, finding_type FROM ads_findings
       WHERE client_id = $1 AND status IN ('open','proposed') AND est_impact_cents >= $2
+        AND impact_unit = 'usd_month'
       ORDER BY est_impact_cents DESC`,
     [clientId, URGENT_FLOOR_CENTS],
   );
