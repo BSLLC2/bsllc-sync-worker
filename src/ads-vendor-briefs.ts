@@ -122,6 +122,12 @@ function targetFor(r: Row): string {
       return "Either paused, bid reduced, or pointed at a page that answers the search. Check the landing page before pausing.";
     case "budget_limited":
       return "Relevance fixed first — targeting, landing page or tracking — before any budget increase.";
+    case "bidding_not_ready":
+      return "The campaign on a bidding strategy its conversion volume can carry — either enough conversions a month for a target to mean anything, or a strategy with no target. One change, then a fortnight untouched.";
+    case "bidding_data_exclusion":
+      return "The named dates excluded from what the bidding learns from, under Bidding in the account, scoped to the campaigns that bid on conversions. Whatever stopped recording still has to be fixed separately.";
+    case "proxy_conversion_value":
+      return "The supplied figure set as the default value on the counting action, unchanged. Two weeks untouched afterwards.";
     default:
       return "See 'What to change'.";
   }
