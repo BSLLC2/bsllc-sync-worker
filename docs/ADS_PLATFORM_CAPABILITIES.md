@@ -99,7 +99,7 @@ Dialpad and Slack in this worker.
 
 | Capability | API can? | We have a guarded path? | Notes |
 | --- | --- | --- | --- |
-| Campaign / ad set budget | yes | **yes** | Daily budget only. Same 2× and $100/day guards, enforced in the Meta adapter itself. |
+| Campaign / ad set budget | yes | **yes** | Campaign daily budget only. Same 2× and $100/day guards, enforced in the Meta adapter itself — plus, since 2026-09-22, the same staleness guard the Google path carries: a proposal with no recorded starting budget, or one whose budget has moved since, is refused rather than applied over somebody else's change. |
 | Bid strategy (cost cap, bid cap) | yes | no | Brief. |
 | Keywords / negative keywords | **no** | — | Meta has no keywords. The search-term and keyword rules simply produce nothing here. |
 | Audiences / targeting | yes | no — **and unverifiable** | See Advantage+ below. |
@@ -119,9 +119,56 @@ design, not by omission.
 
 ### Special Ad Categories
 Meta's Special Ad Category (housing, employment, credit, social issues/elections)
-strips age, gender and detailed targeting on any account running under one. The
-adapter reads the flag from the campaign object so a finding can say so rather
-than proposing something the category forbids.
+strips age, gender and detailed targeting on any account running under one.
+
+**This paragraph used to say the adapter read the flag "so a finding can say so".
+It did not.** `special_ad_categories` was in the campaign field list and the
+response was discarded, and no rule could see it because `CampaignRow` had no
+field for one. It is carried now, and the one thing it does is remove a line of
+advice: an ad set under a restricted category is never told to widen its
+audience, because that control does not exist on it. `[]` means we read it and
+there are none; absent means the campaign read never reached that campaign, and
+the two are kept apart.
+
+### The learning phase — the one reading Meta gives that Google does not
+`AdSet.learning_stage_info` reports Meta's own verdict per ad set (`status`,
+the optimisation events it counted, and often
+`dynamic_lp_conversions_threshold`, the threshold it is measuring that ad set
+against). Google describes its learning period in support documentation and
+reports it in no API field at all.
+
+So the engine READS a verdict here rather than forming one. A platform saying
+`SUCCESS` on a thin-looking count is settled; a platform saying
+`LEARNING_LIMITED` on a healthy-looking count is limited. The counts are only
+used to say how far short, and where Meta reports no threshold the published
+convention (~50 events / 7 days) is used with a sentence saying it is a
+convention rather than the platform's figure.
+
+### Counting a conversion once
+Meta's `actions` array reports the same event under several names: `lead`,
+`offsite_conversion.fb_pixel_lead` and `onsite_conversion.lead_grouped` are one
+lead, not three. The adapter's original prefix regex summed all of them, so a
+cost per conversion came out at a third of the truth — the direction that makes
+a struggling account look healthy. `countMetaConversions` declares the families
+and takes exactly one member of each, and prefers `objective_results` (the
+platform's own count of what the ad set optimises for) wherever Meta reports it.
+
+`clicks` is Clicks (All) and counts reactions, comments, shares and media
+expansions. The adapter reads `inline_link_clicks` and says in the log when it
+had to fall back.
+
+### What Meta has no equivalent of
+- **Impression share.** No metric of any kind. Null, never nought.
+- **Keywords and search terms.** No such objects, so those rules find nothing.
+- **A conversion-action object.** Meta's equivalent is a dataset, its
+  pixel/CAPI events and their match quality, which is a different shape. The
+  adapter reads none of it, and the rules now know that rather than reporting
+  "part of this could not be read" on every Meta account forever.
+- **Bidding data exclusions.** Google can be told to ignore a range of days
+  after a tracking outage. Meta cannot, at all. The only remedy is behavioural.
+- **A click id anywhere in this system.** There is no `fbclid` column on
+  `web_inquiries`, so the click → customer chain the Google accounts are read on
+  does not exist for Meta and no reading of it is attempted.
 
 ### Rate limits
 The Marketing API is points-based per app per ad account over a rolling window.

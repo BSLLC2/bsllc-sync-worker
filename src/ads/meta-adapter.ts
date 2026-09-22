@@ -37,12 +37,77 @@
 import type {
   PlatformAdapter, PlatformCapabilities, AdapterContext, ValidationResult, ApplyResult, VerifyMetrics,
 } from "./platform.js";
-import type { AuditInput, CampaignRow } from "./rules.js";
+import type { AuditInput, AdSetRow, CampaignRow } from "./rules.js";
 
 const GRAPH = "https://graph.facebook.com/v21.0";
 
 /** Meta reports money in the account's currency as a decimal string, not micros. */
 const toMicros = (v: unknown) => Math.round(Number(v ?? 0) * 1_000_000);
+
+/**
+ * WHICH ACTION TYPES COUNT AS ONE CONVERSION, AND WHY THIS IS A LIST AND NOT A
+ * PATTERN.
+ *
+ * Meta's `actions` array is not a list of distinct events. The same lead is
+ * reported several times under different names: `lead` is the canonical roll-up
+ * and `offsite_conversion.fb_pixel_lead` is the pixel's own copy of the same
+ * event, and `onsite_conversion.lead_grouped` is the instant-form copy. A
+ * regular expression over the prefixes therefore SUMS one conversion two or
+ * three times, and every cost-per-conversion figure downstream comes out a
+ * third or a half of what it really is — which is the direction that makes an
+ * account look like it is working.
+ *
+ * So the families are declared, in preference order, and exactly ONE member of
+ * each family is taken: the first one present. A family is a business outcome;
+ * the names inside it are the several ways Meta reports it.
+ *
+ * Verify the exact strings on a real account before treating the ordering as
+ * load-bearing — this was assembled from Meta's own SDK field lists and from
+ * community reports, not from a live read.
+ */
+const ACTION_FAMILIES: readonly (readonly string[])[] = [
+  // A form filled in, on the site or in an instant form.
+  ["lead", "offsite_conversion.fb_pixel_lead", "onsite_conversion.lead_grouped", "leadgen_grouped"],
+  // A sale.
+  ["omni_purchase", "purchase", "offsite_conversion.fb_pixel_purchase"],
+  // An account or registration completed.
+  ["complete_registration", "offsite_conversion.fb_pixel_complete_registration"],
+  // An application submitted.
+  ["submit_application", "offsite_conversion.fb_pixel_submit_application"],
+];
+
+/**
+ * Count conversions from one insights row without counting anything twice.
+ *
+ * `objective_results` is preferred wherever Meta reports it: it is the
+ * platform's own count of the thing the ad set is optimising for, which is the
+ * number the delivery model is actually working from and the only one that
+ * lines up with what the learning threshold is measured against.
+ */
+export function countMetaConversions(row: {
+  actions?: unknown;
+  objective_results?: unknown;
+}): { conversions: number; basis: "objective_results" | "actions" | "none" } {
+  const objective = Number(row.objective_results ?? NaN);
+  if (Number.isFinite(objective) && objective >= 0) return { conversions: objective, basis: "objective_results" };
+
+  const actions: { action_type?: string; value?: string }[] = Array.isArray(row.actions) ? row.actions : [];
+  if (!actions.length) return { conversions: 0, basis: "none" };
+  const byType = new Map<string, number>();
+  for (const a of actions) {
+    const t = String(a.action_type ?? "");
+    if (!t) continue;
+    byType.set(t, Number(a.value ?? 0));
+  }
+  let total = 0;
+  let sawAny = false;
+  for (const family of ACTION_FAMILIES) {
+    for (const name of family) {
+      if (byType.has(name)) { total += byType.get(name) ?? 0; sawAny = true; break; }
+    }
+  }
+  return { conversions: total, basis: sawAny ? "actions" : "none" };
+}
 
 export interface MetaConfig {
   /** System-user access token with ads_read (+ ads_management to mutate). */
@@ -90,7 +155,10 @@ export class MetaAdapter implements PlatformAdapter {
           : "DORMANT — no META_ACCESS_TOKEN. Reads return empty and every mutation is refused.",
         "No keywords or negatives exist on Meta, so the search-term and keyword findings never apply here. Meta findings are budget, delivery and creative shaped.",
         "Advantage+ treats audience inputs as signals to the delivery model, not constraints — a targeting change cannot be verified the way a Google negative can, so targeting is always a vendor brief.",
-        "Special Ad Category accounts lose age, gender and detailed targeting. The adapter reads the flag so findings do not propose something the category forbids.",
+        "Special Ad Category accounts lose age, gender and detailed targeting. The flag is carried onto the campaign row so a finding says which advice is not available rather than naming a control that is not there.",
+        "Meta reports its own learning verdict per ad set (learning_stage_info), and often the threshold it is measuring against. That is read and used as-is: the engine reports the platform's verdict rather than forming one from a support-page number.",
+        "There is no fbclid column anywhere in this system, so the click-to-customer chain that Google accounts are read on does not exist here and no reading of it is attempted.",
+        "Meta has no equivalent of Google's bidding data exclusions. When tracking breaks there is no way to tell the delivery model to ignore those days, so the only remedy is behavioural — leave the account alone and let the events return.",
       ],
     };
   }
@@ -119,7 +187,7 @@ export class MetaAdapter implements PlatformAdapter {
     const empty: AuditInput = {
       platform: "meta", accountId: ctx.accountId,
       windowStart: ctx.windowStart, windowEnd: ctx.windowEnd,
-      campaigns: [], searchTerms: [], keywords: [], ads: [],
+      campaigns: [], adSets: [], searchTerms: [], keywords: [], ads: [],
       existingNegatives: new Set(), protectedPatterns: ctx.protectedPatterns,
     };
     if (!this.cfg.accessToken) {
@@ -135,7 +203,17 @@ export class MetaAdapter implements PlatformAdapter {
       const resp = await this.graph(`${act}/insights`, {
         level: "campaign",
         time_range: timeRange,
-        fields: "campaign_id,campaign_name,spend,clicks,impressions,actions,objective",
+        // `inline_link_clicks`, not `clicks`. Meta's `clicks` is Clicks (All) —
+        // it counts reactions, comments, shares, profile-photo clicks and media
+        // expansions alongside link clicks. Every click-based judgement in the
+        // rules engine (cost per click, the 100-click floor before "zero
+        // conversions" means anything, conversions per click) reads a link
+        // click, so handing it Clicks (All) inflates the denominator and makes
+        // a working account look like it converts nothing.
+        // `attribution_setting` is carried so a person can see which window the
+        // numbers were counted under; `objective_results` is the platform's own
+        // count of what the ad set optimises for. See countMetaConversions.
+        fields: "campaign_id,campaign_name,spend,clicks,inline_link_clicks,impressions,actions,objective,objective_results,attribution_setting",
         limit: "200",
       });
       insights = Array.isArray(resp?.data) ? resp.data : [];
@@ -149,37 +227,115 @@ export class MetaAdapter implements PlatformAdapter {
     // without a budget we cannot propose a budget change, and the rules will
     // mark the finding vendor-applicable instead.
     const budgets = new Map<string, number>();
+    // `special_ad_categories` was ALREADY being requested here and thrown away,
+    // while docs/ADS_PLATFORM_CAPABILITIES.md claimed the adapter read it "so a
+    // finding can say so". It is kept now, on the campaign row, because it
+    // changes what advice is honest: a campaign under one of these has age,
+    // gender and detailed targeting stripped, so a finding that says "widen the
+    // audience" is telling somebody to use a control that is not there.
+    // NULL for a campaign the budget read never reached — absent is "not read",
+    // never "there are none".
+    const categories = new Map<string, string[]>();
+    let readCampaignObjects = false;
     try {
       const resp = await this.graph(`${act}/campaigns`, {
         fields: "id,name,daily_budget,lifetime_budget,status,special_ad_categories",
         limit: "200",
       });
+      readCampaignObjects = true;
       for (const c of resp?.data ?? []) {
         // Meta returns budgets in the account currency's minor unit (cents).
         const daily = Number(c.daily_budget ?? 0);
         if (daily > 0) budgets.set(String(c.id), daily * 10_000); // cents → micros
+        const cats = Array.isArray(c.special_ad_categories)
+          ? c.special_ad_categories.map((x: unknown) => String(x)).filter((x: string) => x && x !== "NONE")
+          : [];
+        categories.set(String(c.id), cats);
       }
     } catch (e) {
       this.onLog(`    ⚠ Meta campaign budgets failed for ${act}: ${e instanceof Error ? e.message : e}`);
     }
 
+    // Ad sets, and the platform's own verdict on whether its delivery model can
+    // settle on each one. This is the read the Google side has no analogue for:
+    // `learning_stage_info` carries Meta's own status, the events it counted and
+    // — where it reports one — the threshold it is measuring against, so the
+    // rules read a verdict instead of forming one from a support-page number.
+    // A failure here degrades the run rather than ending it: no ad sets means
+    // no learning findings, which is the same silence an adapter that does not
+    // read them produces.
+    const adSets: AdSetRow[] = [];
+    try {
+      const resp = await this.graph(`${act}/adsets`, {
+        fields: "id,name,campaign_id,optimization_goal,effective_status,learning_stage_info",
+        limit: "200",
+      });
+      const spendByAdSet = new Map<string, { cost: number; campaignName: string | null }>();
+      try {
+        const ins = await this.graph(`${act}/insights`, {
+          level: "adset",
+          time_range: timeRange,
+          fields: "adset_id,campaign_name,spend",
+          limit: "500",
+        });
+        for (const r of ins?.data ?? []) {
+          spendByAdSet.set(String(r.adset_id ?? ""), {
+            cost: toMicros(r.spend),
+            campaignName: r.campaign_name ? String(r.campaign_name) : null,
+          });
+        }
+      } catch (e) {
+        this.onLog(`    ⚠ Meta ad-set insights failed for ${act}: ${e instanceof Error ? e.message : e}`);
+      }
+      for (const a of resp?.data ?? []) {
+        const id = String(a.id ?? "");
+        if (!id) continue;
+        const li = a.learning_stage_info ?? null;
+        const spend = spendByAdSet.get(id);
+        const events = li && li.conversions != null ? Number(li.conversions) : null;
+        const threshold = li && li.dynamic_lp_conversions_threshold != null
+          ? Number(li.dynamic_lp_conversions_threshold) : null;
+        adSets.push({
+          id,
+          name: String(a.name ?? ""),
+          campaignId: a.campaign_id ? String(a.campaign_id) : null,
+          campaignName: spend?.campaignName ?? null,
+          optimizationGoal: a.optimization_goal ? String(a.optimization_goal) : null,
+          learningStatus: li?.status ? String(li.status) : null,
+          // NULL IS NOT READ. A missing count arriving as a nought would report
+          // every settled ad set as starved of events.
+          learningEvents: Number.isFinite(events as number) ? events : null,
+          learningThreshold: Number.isFinite(threshold as number) && (threshold as number) > 0 ? threshold : null,
+          costMicros: spend?.cost ?? 0,
+          effectiveStatus: a.effective_status ? String(a.effective_status) : null,
+        });
+      }
+    } catch (e) {
+      this.onLog(`    ⚠ Meta ad sets failed for ${act}: ${e instanceof Error ? e.message : e}`);
+    }
+
+    let inflatedClickRows = 0;
     const campaigns: CampaignRow[] = insights.map((r: any) => {
-      // Meta reports conversions as a list of typed action counts, not one
-      // number. Summing every action type would count link clicks and video
-      // views as conversions, so only the offsite/onsite conversion families
-      // are taken.
-      const actions: { action_type?: string; value?: string }[] = Array.isArray(r.actions) ? r.actions : [];
-      const conversions = actions
-        .filter((a) => /^(offsite_conversion|onsite_conversion|lead|purchase|complete_registration|submit_application)/.test(String(a.action_type ?? "")))
-        .reduce((s, a) => s + Number(a.value ?? 0), 0);
+      const id = String(r.campaign_id ?? "");
+      // ONE conversion counted once. See countMetaConversions: Meta reports the
+      // same lead under two or three action types and the old regex summed
+      // every one of them.
+      const { conversions } = countMetaConversions(r);
+      // Link clicks, falling back to Clicks (All) only where the link metric is
+      // missing — and counted, so the log can say the fallback was taken rather
+      // than quietly handing the rules engine a different metric.
+      const linkClicks = Number(r.inline_link_clicks ?? NaN);
+      const allClicks = Number(r.clicks ?? 0);
+      const usedLink = Number.isFinite(linkClicks);
+      if (!usedLink && allClicks > 0) inflatedClickRows++;
       return {
-        id: String(r.campaign_id ?? ""),
+        id,
         name: String(r.campaign_name ?? ""),
         channelType: r.objective ? String(r.objective) : null,
-        dailyBudgetMicros: budgets.get(String(r.campaign_id ?? "")) ?? 0,
+        dailyBudgetMicros: budgets.get(id) ?? 0,
         budgetResourceName: null,     // Meta budgets are edited by campaign id
         costMicros: toMicros(r.spend),
-        clicks: Number(r.clicks ?? 0),
+        clicks: usedLink ? linkClicks : allClicks,
         impressions: Number(r.impressions ?? 0),
         conversions,
         // Meta has no impression-share metrics. Null, not zero — a zero would
@@ -187,10 +343,23 @@ export class MetaAdapter implements PlatformAdapter {
         impressionShare: null,
         budgetLostShare: null,
         rankLostShare: null,
+        // [] is "we read it and there are none"; undefined is "the campaign
+        // object read never reached this campaign", and the rules keep the two
+        // apart. Not conflated: one of them is a fact about the account.
+        specialAdCategories: readCampaignObjects ? (categories.get(id) ?? []) : undefined,
       };
     });
 
-    return { ...empty, campaigns };
+    if (inflatedClickRows > 0) {
+      this.onLog(`    ⚠ Meta: ${inflatedClickRows} campaign row(s) reported no inline_link_clicks, so Clicks (All) was used — that figure counts reactions and comments as clicks`);
+    }
+    const attribution = insights.find((r: any) => r.attribution_setting)?.attribution_setting;
+    this.onLog(
+      `    · Meta read ${campaigns.length} campaign(s) and ${adSets.length} ad set(s)`
+      + `${attribution ? ` · attribution ${attribution}` : ""}`,
+    );
+
+    return { ...empty, campaigns, adSets };
   }
 
   async validate(op: string, body: unknown): Promise<ValidationResult> {
@@ -204,9 +373,18 @@ export class MetaAdapter implements PlatformAdapter {
     // happened: the honest answer is that we checked the shape ourselves and
     // the platform has not seen it.
     const items = Array.isArray(body) ? body : [];
-    for (const it of items as { campaignId?: string; newDailyUsd?: number }[]) {
+    for (const it of items as { campaignId?: string; newDailyUsd?: number; fromDailyMinor?: number }[]) {
       if (!it.campaignId) return { ok: false, serverValidated: false, message: "Each budget change needs a campaignId." };
       if (!(Number(it.newDailyUsd) > 0)) return { ok: false, serverValidated: false, message: "newDailyUsd must be positive." };
+      // The staleness guard's input, checked here as well as at apply, so a
+      // change set with no recorded starting budget is refused before anybody
+      // presses Approve rather than after.
+      if (it.fromDailyMinor == null) {
+        return {
+          ok: false, serverValidated: false,
+          message: `Budget change on ${it.campaignId} carries no recorded starting budget, so nothing can tell a current proposal from a stale one. Re-run the findings audit so it is worked out from today's number.`,
+        };
+      }
     }
     return {
       ok: true, serverValidated: false,
@@ -221,7 +399,7 @@ export class MetaAdapter implements PlatformAdapter {
     if (op !== "budgets") {
       return { ok: false, message: `Meta adapter has no guarded path for "${op}".`, result: null, priorValues: null, rollbackPlan: [] };
     }
-    const items = (Array.isArray(body) ? body : []) as { campaignId: string; newDailyUsd: number; reason?: string }[];
+    const items = (Array.isArray(body) ? body : []) as { campaignId: string; newDailyUsd: number; fromDailyMinor?: number; reason?: string }[];
     const priorValues: { campaignId: string; dailyBudgetMinor: number }[] = [];
     const rollbackPlan: string[] = [];
     const results: unknown[] = [];
@@ -235,6 +413,31 @@ export class MetaAdapter implements PlatformAdapter {
         return {
           ok: false,
           message: `Campaign ${it.campaignId} has no daily budget to change (it may use a lifetime or ad-set budget). Refusing rather than guessing.`,
+          result: null, priorValues: null, rollbackPlan: [],
+        };
+      }
+      // ── The staleness guard, mirroring the Google apply path ────────────
+      // `newDailyUsd` is a frozen dollar figure rather than a delta, so without
+      // the budget it was worked out FROM there is nothing that can tell a
+      // current +25% step from a week-old one somebody has since overtaken.
+      // Enforced here rather than inherited from a shared helper, because this
+      // is a different API and a shared helper would hide that.
+      //
+      // ABSENT IS REFUSED, not waved through — the same rule the Google path
+      // lives by. A proposal with no recorded starting point cannot prove it is
+      // current, and re-running the audit rewrites the payload in place.
+      if (it.fromDailyMinor == null) {
+        return {
+          ok: false,
+          message: `Campaign ${it.campaignId} carries no recorded starting budget, so this proposal cannot be shown to be current. Re-run the findings audit and approve the fresh one.`,
+          result: null, priorValues: null, rollbackPlan: [],
+        };
+      }
+      // A cent of tolerance, because the platform normalises what it stores.
+      if (Math.abs(priorMinor - it.fromDailyMinor) > 1) {
+        return {
+          ok: false,
+          message: `Campaign ${it.campaignId} was ${it.fromDailyMinor / 100}/day when this was worked out and is ${priorMinor / 100}/day now. Somebody has moved it since, and applying ${it.newDailyUsd} would overwrite their change with a stale figure. Refusing.`,
           result: null, priorValues: null, rollbackPlan: [],
         };
       }
@@ -287,19 +490,21 @@ export class MetaAdapter implements PlatformAdapter {
     try {
       const resp = await this.graph(`${entityId}/insights`, {
         time_range: JSON.stringify({ since: windowStart, until: windowEnd }),
-        fields: "spend,clicks,impressions,actions",
+        fields: "spend,clicks,inline_link_clicks,impressions,actions,objective_results",
       });
       const r = resp?.data?.[0];
       if (!r) return zero;
-      const actions: { action_type?: string; value?: string }[] = Array.isArray(r.actions) ? r.actions : [];
+      // The SAME counting the read uses. A before/after check that counts
+      // conversions differently from the read that raised the finding compares
+      // two different numbers and calls the difference an effect.
+      const { conversions } = countMetaConversions(r);
+      const linkClicks = Number(r.inline_link_clicks ?? NaN);
       return {
         metrics: {
           costMicros: toMicros(r.spend),
-          clicks: Number(r.clicks ?? 0),
+          clicks: Number.isFinite(linkClicks) ? linkClicks : Number(r.clicks ?? 0),
           impressions: Number(r.impressions ?? 0),
-          conversions: actions
-            .filter((a) => /^(offsite_conversion|onsite_conversion|lead|purchase)/.test(String(a.action_type ?? "")))
-            .reduce((s, a) => s + Number(a.value ?? 0), 0),
+          conversions,
         },
         windowStart, windowEnd,
       };
