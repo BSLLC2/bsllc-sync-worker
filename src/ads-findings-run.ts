@@ -80,6 +80,17 @@ async function auditOne(
       ? "not gathered"
       : `${outcomes.gclidLeadsInWindow}/${outcomes.leadsInWindow} leads carry a click id · ${outcomes.crmRowsInWindow} reached the CRM · ${outcomes.wonInWindow} won over ${outcomes.wonWindowMonths} month(s)`}`,
   );
+  console.log(
+    `  bidding: ${platformInput.conversionLag == null
+      ? "conversion lag not read by this adapter"
+      : `${platformInput.conversionLag.length} lag bucket row(s)`}`
+    + ` · ${platformInput.dailyConversions == null
+      ? "no day-by-day series, so a tracking break cannot be dated"
+      : `${platformInput.dailyConversions.length} day(s) of series`}`
+    + ` · ${platformInput.searchTermSpendByCampaign == null
+      ? "search-term coverage unread"
+      : `${Object.keys(platformInput.searchTermSpendByCampaign).length} campaign(s) with search-term spend`}`,
+  );
   const t = platformInput.tracking;
   console.log(
     `  tracking: ${t == null

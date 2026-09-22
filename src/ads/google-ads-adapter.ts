@@ -25,6 +25,8 @@ import type {
   AuditInput, CampaignRow, SearchTermRow, KeywordRow, AdGroupAdRow,
   ConversionActionRow, TrackingFacts,
 } from "./rules.js";
+import type { ConversionLagRow } from "./bidding-readiness.js";
+import type { DailyConversionRow } from "./tracking-outage.js";
 
 /** The API returns enums as integers over REST, not their string names, so a
  *  `=== "BROAD"` comparison silently never matches. Map both forms. */
@@ -63,6 +65,31 @@ const CONVERSION_TYPE: Record<string, string> = {
   "6": "UPLOAD_CALLS", "7": "UPLOAD_CLICKS", "8": "WEBPAGE", "9": "WEBSITE_CALL",
   "10": "STORE_SALES_DIRECT_UPLOAD", "11": "STORE_SALES", "12": "FIREBASE_ANDROID_FIRST_OPEN",
   "16": "GOOGLE_ANALYTICS_4_CUSTOM", "17": "GOOGLE_ANALYTICS_4_PURCHASE",
+};
+/**
+ * The bidding strategy a campaign is on. The readiness reading turns on this
+ * value — a campaign under the published conversion minimum matters where it
+ * runs a strategy with a conversion target and does not where it does not —
+ * so an undecoded integer here would make every account read as having no
+ * target strategy anywhere, silently and forever. Same indignity, same fix.
+ */
+export const BIDDING_STRATEGY_TYPE: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "ENHANCED_CPC", "3": "MANUAL_CPC", "4": "MANUAL_CPM",
+  "5": "PAGE_ONE_PROMOTED", "6": "TARGET_CPA", "7": "TARGET_OUTRANK_SHARE", "8": "TARGET_ROAS",
+  "9": "TARGET_SPEND", "10": "MAXIMIZE_CONVERSIONS", "11": "MAXIMIZE_CONVERSION_VALUE",
+  "12": "PERCENT_CPC", "13": "MANUAL_CPV", "14": "TARGET_CPM", "15": "TARGET_IMPRESSION_SHARE",
+  "16": "COMMISSION", "17": "INVALID", "18": "MANUAL_CPA", "19": "FIXED_CPM",
+  "20": "TARGET_CPV", "21": "TARGET_CPC", "22": "FIXED_SHARE_OF_VOICE",
+};
+/** How long after the click a conversion arrived, as the platform buckets it. */
+export const CONVERSION_LAG_BUCKET: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "LESS_THAN_ONE_DAY", "3": "ONE_TO_TWO_DAYS",
+  "4": "TWO_TO_THREE_DAYS", "5": "THREE_TO_FOUR_DAYS", "6": "FOUR_TO_FIVE_DAYS",
+  "7": "FIVE_TO_SIX_DAYS", "8": "SIX_TO_SEVEN_DAYS", "9": "SEVEN_TO_EIGHT_DAYS",
+  "10": "EIGHT_TO_NINE_DAYS", "11": "NINE_TO_TEN_DAYS", "12": "TEN_TO_ELEVEN_DAYS",
+  "13": "ELEVEN_TO_TWELVE_DAYS", "14": "TWELVE_TO_THIRTEEN_DAYS", "15": "THIRTEEN_TO_FOURTEEN_DAYS",
+  "16": "FOURTEEN_TO_TWENTY_ONE_DAYS", "17": "TWENTY_ONE_TO_THIRTY_DAYS",
+  "18": "THIRTY_TO_FORTY_FIVE_DAYS", "19": "FORTY_FIVE_TO_SIXTY_DAYS", "20": "SIXTY_TO_NINETY_DAYS",
 };
 /** Only the value the tracking reading actually branches on. */
 export const TRACKING_STATUS: Record<string, string> = {
@@ -147,11 +174,12 @@ export class GoogleAdsAdapter implements PlatformAdapter {
         finalUrls: true,
         assetDetach: true,
       },
-      guardedOps: ["budgets", "campaignNegatives", "removeCampaignNegatives", "keywordFinalUrls", "removeAssets"],
+      guardedOps: ["budgets", "campaignNegatives", "removeCampaignNegatives", "keywordFinalUrls", "removeAssets", "dataExclusions"],
       notes: [
         "Ad copy is out of scope by policy, not by API limitation — OCH runs under LegitScript.",
         "Performance Max exposes asset groups, budget and (limited) signals; it does not expose keyword-level control, so PMax findings are budget/asset shaped only.",
         "Bid strategy changes are within the API but have no guarded path here — they become vendor briefs.",
+        "A data exclusion tells Smart Bidding to ignore conversion data over a past date range. It is the one guarded operation that changes what the platform LEARNS rather than what it serves, it may cover at most 14 days, and the account is re-read over those exact dates before it is written — conversions backfill, and excluding a range that has since filled in throws real signal away.",
       ],
     };
   }
@@ -168,6 +196,10 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     // about whose number is right.
     const campaignRows = await safeQuery(customer, "campaign 30d", `
       SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+             campaign.resource_name, campaign.bidding_strategy_type,
+             campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas,
+             campaign.maximize_conversions.target_cpa_micros,
+             campaign.maximize_conversion_value.target_roas,
              campaign_budget.resource_name, campaign_budget.amount_micros,
              metrics.cost_micros, metrics.clicks, metrics.impressions, metrics.conversions,
              metrics.search_impression_share, metrics.search_budget_lost_impression_share,
@@ -188,6 +220,19 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       impressionShare: r.metrics?.search_impression_share != null ? Number(r.metrics.search_impression_share) : null,
       budgetLostShare: r.metrics?.search_budget_lost_impression_share != null ? Number(r.metrics.search_budget_lost_impression_share) : null,
       rankLostShare: r.metrics?.search_rank_lost_impression_share != null ? Number(r.metrics.search_rank_lost_impression_share) : null,
+      resourceName: r.campaign?.resource_name ? String(r.campaign.resource_name) : null,
+      bidStrategyType: enumName(BIDDING_STRATEGY_TYPE, r.campaign?.bidding_strategy_type),
+      // Google returns a target field only where one is set, and a nought where
+      // it is not. Both read as "no target", which for a Maximize strategy is
+      // the answer that decides whether the conversion floor applies to it at
+      // all — so it is computed from the fields that came back rather than left
+      // null, and the campaign query either ran for every row or for none.
+      hasBidTarget: [
+        r.campaign?.target_cpa?.target_cpa_micros,
+        r.campaign?.target_roas?.target_roas,
+        r.campaign?.maximize_conversions?.target_cpa_micros,
+        r.campaign?.maximize_conversion_value?.target_roas,
+      ].some((v) => v != null && Number(v) > 0),
     }));
 
     // Existing negatives, so we never propose a duplicate.
@@ -288,6 +333,64 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       adStrength: r.ad_group_ad?.ad_strength != null ? String(r.ad_group_ad.ad_strength) : null,
     }));
 
+    // ── How much of each campaign's money the search-terms report shows ────
+    // The SAME 30-day window the campaign figures above cover. That sameness
+    // is the whole point: the 90-day term pull further up is capped at 500
+    // rows and covers three months, so dividing it by a one-month campaign
+    // cost is two numbers over two windows rather than a coverage share.
+    // Zero-cost terms are excluded because they contribute nothing to the
+    // numerator and are most of the rows on a large account.
+    const coverageRows = await tryQuery(customer, "search term spend 30d", `
+      SELECT campaign.id, metrics.cost_micros
+        FROM search_term_view
+       WHERE segments.date DURING LAST_30_DAYS AND metrics.cost_micros > 0`, log);
+    // Null all the way through where the query failed. An empty map would say
+    // "the report showed nothing", which on a working account is a finding,
+    // and we would not have the evidence for it.
+    let searchTermSpendByCampaign: Record<string, number> | null = null;
+    if (coverageRows) {
+      searchTermSpendByCampaign = {};
+      for (const r of coverageRows) {
+        const id = String((r as any).campaign?.id ?? "");
+        if (!id) continue;
+        searchTermSpendByCampaign[id] = (searchTermSpendByCampaign[id] ?? 0) + Number((r as any).metrics?.cost_micros ?? 0);
+      }
+    }
+
+    // ── How long after the click this account's conversions arrive ─────────
+    // The variable the OCH offline-conversion upload foundered on and which
+    // nothing here has ever measured. Per campaign, because the readiness
+    // reading is per campaign; folded and read in src/ads/bidding-readiness.ts.
+    const lagRows = await tryQuery(customer, "conversion lag", `
+      SELECT campaign.id, segments.conversion_lag_bucket, metrics.conversions
+        FROM campaign
+       WHERE segments.date BETWEEN '${ctx.windowStart}' AND '${ctx.windowEnd}'
+         AND campaign.status = 'ENABLED'`, log);
+    const conversionLag: ConversionLagRow[] | null = lagRows
+      ? lagRows.map((r: any) => ({
+          campaignId: String(r.campaign?.id ?? ""),
+          bucket: enumName(CONVERSION_LAG_BUCKET, r.segments?.conversion_lag_bucket) ?? "UNKNOWN",
+          conversions: Number(r.metrics?.conversions ?? 0),
+        }))
+      : null;
+
+    // ── Day by day, so a silent column can be given a start and an end ─────
+    // Without two dates there is nothing to tell the platform to ignore, and
+    // the conversion reading below can only ever say the column is quiet now.
+    const dailyRows = await tryQuery(customer, "daily conversions", `
+      SELECT segments.date, metrics.clicks, metrics.conversions, metrics.cost_micros
+        FROM customer
+       WHERE segments.date BETWEEN '${ctx.windowStart}' AND '${ctx.windowEnd}'
+       ORDER BY segments.date ASC`, log);
+    const dailyConversions: DailyConversionRow[] | null = dailyRows
+      ? dailyRows.map((r: any) => ({
+          date: String(r.segments?.date ?? ""),
+          clicks: Number(r.metrics?.clicks ?? 0),
+          conversions: Number(r.metrics?.conversions ?? 0),
+          costMicros: Number(r.metrics?.cost_micros ?? 0),
+        })).filter((d: DailyConversionRow) => d.date.length === 10)
+      : null;
+
     // ── Conversion tracking ────────────────────────────────────────────────
     // Read last and read carefully, because every rule above it judges a
     // campaign on "converted" or "converted nothing" and a failed read here
@@ -308,6 +411,9 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       existingNegatives,
       protectedPatterns: ctx.protectedPatterns,
       tracking,
+      conversionLag,
+      dailyConversions,
+      searchTermSpendByCampaign,
       // The client's own economics are not the platform's to know. They are
       // read from Postgres by the caller (src/ads-findings-run.ts) and merged
       // onto the input, which keeps this adapter what it is: one vendor's API.
@@ -346,12 +452,21 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       countsIntoConversionsColumn: r.conversion_action?.include_in_conversions_metric != null
         ? Boolean(r.conversion_action.include_in_conversions_metric) : null,
       conversionsInWindow: recorded,
+      // What the account already says a conversion on this action is worth.
+      // Read so the proxy-value reading can tell an account with no value from
+      // one that already has a better figure than anything we could model.
+      defaultValue: r.conversion_action?.value_settings?.default_value != null
+        ? Number(r.conversion_action.value_settings.default_value) : null,
+      alwaysUseDefaultValue: r.conversion_action?.value_settings?.always_use_default_value != null
+        ? Boolean(r.conversion_action.value_settings.always_use_default_value) : null,
     });
 
     const withMetrics = await tryQuery(customer, "conversion actions (with metrics)", `
       SELECT conversion_action.id, conversion_action.name, conversion_action.status,
              conversion_action.category, conversion_action.type,
              conversion_action.primary_for_goal, conversion_action.include_in_conversions_metric,
+             conversion_action.value_settings.default_value,
+             conversion_action.value_settings.always_use_default_value,
              metrics.all_conversions
         FROM conversion_action
        WHERE segments.date BETWEEN '${ctx.windowStart}' AND '${ctx.windowEnd}'`, log);
@@ -372,7 +487,9 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     const settingsOnly = await tryQuery(customer, "conversion actions (settings only)", `
       SELECT conversion_action.id, conversion_action.name, conversion_action.status,
              conversion_action.category, conversion_action.type,
-             conversion_action.primary_for_goal, conversion_action.include_in_conversions_metric
+             conversion_action.primary_for_goal, conversion_action.include_in_conversions_metric,
+             conversion_action.value_settings.default_value,
+             conversion_action.value_settings.always_use_default_value
         FROM conversion_action`, log);
 
     // Null all the way through where nothing came back. An empty array here

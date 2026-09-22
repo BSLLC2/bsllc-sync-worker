@@ -21,9 +21,24 @@
  */
 
 import { createHash } from "node:crypto";
+import {
+  biddingReadiness, TARGET_STRATEGY_MIN_CONVERSIONS_30D,
+  type BiddingReadiness, type ConversionLagRow,
+} from "./bidding-readiness.js";
+import { spendVisibility, coverageChangesTheClaim, type SpendVisibility } from "./spend-visibility.js";
+import type { DailyConversionRow } from "./tracking-outage.js";
+import { readinessFindings } from "./readiness-findings.js";
 
-/** Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts. */
-export const ADS_RULESET_VERSION = 2;
+/**
+ * Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts.
+ *
+ * 4, not 3: the dashboard's mirror was taken to 3 by the Meta work landing
+ * alongside this, and two changes must not ship under one version number —
+ * a finding records the version that produced it so a row can be read back
+ * against the rules of its day, and a shared number makes two sets of rules
+ * indistinguishable a year later.
+ */
+export const ADS_RULESET_VERSION = 4;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -127,6 +142,23 @@ export interface CampaignRow {
   impressionShare: number | null;
   budgetLostShare: number | null;
   rankLostShare: number | null;
+  /**
+   * The platform's own resource name for the campaign. Only a data exclusion
+   * needs it (it is scoped by resource name, not by id), so it is optional and
+   * absent means the exclusion is not offered rather than guessed at.
+   */
+  resourceName?: string | null;
+  /**
+   * The bidding strategy the platform reports this campaign is on, already
+   * decoded. NULL MEANS NOT REPORTED and is never read as manual: "we did not
+   * read it" and "it needs no conversion volume" are opposite answers and only
+   * one of them licenses a change.
+   */
+  bidStrategyType?: string | null;
+  /** Does that strategy carry an actual target figure? Null = not reported.
+   *  Maximize Conversions with no target is the recommended low-volume
+   *  strategy; with one it carries the same volume floor as Target CPA. */
+  hasBidTarget?: boolean | null;
 }
 
 export interface SearchTermRow {
@@ -203,6 +235,16 @@ export interface ConversionActionRow {
    * as one would invent a broken tag on a working account.
    */
   conversionsInWindow: number | null;
+  /**
+   * The default value set on the action, in the account's own currency. Null
+   * where none is set OR where the field was not read — the two are the same
+   * answer for this purpose, because both mean nothing here may claim a value
+   * is already on the account.
+   */
+  defaultValue?: number | null;
+  /** Does the action always use that default rather than a value the page
+   *  sends? Null = not reported, never read as false. */
+  alwaysUseDefaultValue?: boolean | null;
 }
 
 /**
@@ -758,6 +800,26 @@ export interface AuditInput {
    * nobody has answered; it is never filled in with an assumption.
    */
   economics?: ClientEconomics | null;
+  /**
+   * The platform's own segmentation of how long after a click its conversions
+   * arrive, per campaign. ABSENT MEANS NOT READ — an adapter with no analogue
+   * (Meta here) simply leaves it out, and every reading that leans on lag says
+   * it could not be taken rather than calling the account fast.
+   */
+  conversionLag?: ConversionLagRow[] | null;
+  /**
+   * Day by day, what the account took and what it recorded. Read only so the
+   * conversion column's silence can be given a START AND AN END: without those
+   * two dates there is nothing to tell the platform to ignore. Absent = not read.
+   */
+  dailyConversions?: DailyConversionRow[] | null;
+  /**
+   * Spend the search-terms report accounts for, per campaign id, over the SAME
+   * window as the campaign figures above. That sameness is the whole point — a
+   * 90-day term total against a 30-day campaign total is not a coverage share,
+   * it is two numbers divided. Absent = the report was not read.
+   */
+  searchTermSpendByCampaign?: Record<string, number> | null;
 }
 
 // ── Output ───────────────────────────────────────────────────────────────────
@@ -851,6 +913,48 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   /** A conversion in that column is something the client would count, so money
    *  may be divided by it. */
   const costPerOutcomeReadable = tracking.countsOutcomes === "yes";
+  /**
+   * CAN EACH CAMPAIGN'S BIDDING LEARN FROM WHAT IT GETS?
+   *
+   * Every published threshold for a target-based strategy is a conversion
+   * count PER CAMPAIGN PER 30 DAYS, and nothing in this engine computed it
+   * until now. The reading is built once here and consulted by the rules
+   * below rather than re-decided in each of them, for the same reason the
+   * tracking reading is: two answers to one question is how a screen starts
+   * disagreeing with itself.
+   */
+  const biddingByCampaign = new Map<string, BiddingReadiness>();
+  for (const c of input.campaigns) {
+    biddingByCampaign.set(c.id, biddingReadiness(
+      {
+        campaignId: c.id, campaignName: c.name,
+        strategyType: c.bidStrategyType ?? null,
+        hasTarget: c.hasBidTarget ?? null,
+        conversions30d: tracking.countsAnything === "unknown" ? null : c.conversions,
+        costMicros30d: c.costMicros,
+      },
+      input.conversionLag,
+      tracking.countsAnything,
+    ));
+  }
+
+  /**
+   * HOW MUCH OF EACH CAMPAIGN'S MONEY THE SEARCH-TERMS REPORT SHOWS.
+   *
+   * Every query-based figure below is worked out over the terms the platform
+   * chose to show, and it has never said what share of the spend that was.
+   */
+  const visibility = new Map<string, SpendVisibility>();
+  for (const c of input.campaigns) {
+    visibility.set(c.id, spendVisibility({
+      campaignId: c.id, campaignName: c.name, channelType: c.channelType,
+      reportedTermCostMicros: input.searchTermSpendByCampaign
+        ? (input.searchTermSpendByCampaign[c.id] ?? 0)
+        : null,
+      campaignCostMicros: c.costMicros,
+    }));
+  }
+
   const targets = costTargets(input.economics);
   const target = governingTarget(targets);
   /** Printed under every figure that leaned on a target, and under every one
@@ -906,7 +1010,17 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       // gets NO proposal to spend more. This is the whole point of reading the
       // goal: at identical impression-share numbers, a campaign hitting the
       // target and one running at three times it are opposite recommendations.
-      const propose = converting && !overTarget && Boolean(c.budgetResourceName);
+      // THE BIDDING GATE. A budget step of a quarter is over the size at which
+      // a target-based strategy re-enters its learning period, and a campaign
+      // that is already under the published conversion minimum has nothing to
+      // come out of it with. So the step is held back there — and ONLY there:
+      // a campaign on no target strategy is not learning from anything, and
+      // budget is the ordinary way a small account reaches the minimum in the
+      // first place. Gating that would be a rule firing on every small account
+      // while stopping the work that would fix it.
+      const campaignReadiness = biddingByCampaign.get(c.id) ?? null;
+      const biddingAllowsBudget = campaignReadiness == null || campaignReadiness.mayProposeBudgetStep;
+      const propose = converting && !overTarget && biddingAllowsBudget && Boolean(c.budgetResourceName);
 
       const headline = !zeroMeansZero
         ? `"${c.name}" is budget-capped, and nothing here can tell whether it is working`
@@ -914,6 +1028,8 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
           ? `"${c.name}" is budget-capped but converting nothing — fix relevance before adding budget`
           : overTarget
             ? `"${c.name}" is budget-capped, and each conversion costs $${((cpaCents ?? 0) / 100).toFixed(2)} against a $${((target?.cents ?? 0) / 100).toFixed(2)} target`
+            : !biddingAllowsBudget
+              ? `"${c.name}" is budget-capped, and its bidding does not have the conversions to survive being moved`
             : underTarget
               ? `"${c.name}" is budget-capped and converting under target — it loses ${pct(budgetLost)} of impressions to budget`
               : `"${c.name}" is budget-capped and converting — it loses ${pct(budgetLost)} of impressions to budget`;
@@ -930,6 +1046,11 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
             ? `It is capped, and it is converting, and each conversion costs more than this client asked to pay. More budget buys `
               + `more conversions at the same price. Bring the cost down — search terms, landing page, bids — and the cap becomes `
               + `worth lifting.`
+            : !biddingAllowsBudget
+              ? `The campaign is capped and converting, and it runs a bidding strategy with a target to hit on ${(campaignReadiness?.conversions30d ?? 0).toFixed(1)} conversions `
+                + `a month — under the ${TARGET_STRATEGY_MIN_CONVERSIONS_30D} per campaign per 30 days the platform publishes as the minimum for one. A budget move of this size `
+                + `restarts that strategy's learning period, and this campaign has nothing to come out of it with. Get the conversions up, or move it to a `
+                + `strategy with no target, and then the cap is worth lifting.`
             : `The campaign gave up ${pct(budgetLost)} of its available impressions because the daily budget ran out, while producing `
               + `${c.conversions.toFixed(1)} conversions on ${usd(c.costMicros)}${cpaCents != null ? ` at $${(cpaCents / 100).toFixed(2)} each` : ""}. `
               + `Raising budget buys more of what already works.`;
@@ -969,7 +1090,10 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
               ? `No figure claimed: the conversion column on this account cannot be read, so there is nothing to work a return out of.`
               : !converting
                 ? `No impact claimed: this campaign converts nothing, so extra budget has no modelled return.`
-                : `No impact claimed: each conversion already costs more than the target, so buying more of them at the same price is not a gain.`)
+                : overTarget
+                  ? `No impact claimed: each conversion already costs more than the target, so buying more of them at the same price is not a gain.`
+                  : `No impact claimed: the change this would make is held back because it restarts a bidding strategy that has too little to learn from. `
+                    + `What the extra budget might have bought is beside the point while the strategy cannot use it.`)
           : claimCents > 0
             ? `Estimated, not measured. Assumes we capture ${pct(BUDGET_CAPTURE_RATE)} of the impression share lost to budget at today's cost `
               + `per click — about ${usd(upliftMicros)} a month of extra spend — buying ${(extraConversions ?? 0).toFixed(1)} more conversions at `
@@ -997,7 +1121,9 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
             ? "No API change proposed — this engine does not spend more on an account whose conversion column it cannot read."
             : overTarget
               ? "No API change proposed — more budget on a campaign already over its cost target is refused by rule, not by the API."
-              : "No API change proposed — adding budget to a non-converting campaign is refused by rule, not by the API.",
+              : !biddingAllowsBudget
+                ? "No API change proposed — a budget move of this size restarts the learning period on a target-based bidding strategy, and this campaign is under the published conversion minimum for one. Refused by rule, not by the API."
+                : "No API change proposed — adding budget to a non-converting campaign is refused by rule, not by the API.",
       });
     }
 
@@ -1163,9 +1289,25 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     const total = sorted.reduce((s, t) => s + t.costMicros, 0);
     const monthly = Math.round(total / 3);                 // 90-day window → per month
     const recoverable = Math.round(monthly * RECOVERY_RATE);
+    /**
+     * HOW MUCH OF THIS CAMPAIGN'S SPEND THE REPORT THESE TERMS CAME FROM
+     * ACTUALLY SHOWS.
+     *
+     * Google withholds queries too few people searched, and those clicks are
+     * still charged. So this figure has always been worked out over an unknown
+     * fraction of the money and stated as though it were the whole of it. It
+     * says the share now — measured on this campaign rather than quoted from
+     * anybody's study — and where the share is low the claim changes rather
+     * than the claim carrying a footnote.
+     */
+    const seen = visibility.get(first.campaignId) ?? null;
     out.push({
       entityType: "campaign", entityId: `${first.campaignId}:wasted_terms`, entityName: campaignName,
-      findingType: "wasted_search_term", severity: "high", riskLevel: "low",
+      findingType: "wasted_search_term",
+      // A list worked out over a third of the campaign's money is not the
+      // strongest row on an account, whatever its dollar figure says.
+      severity: seen && coverageChangesTheClaim(seen) && seen.verdict !== "unread" ? "medium" : "high",
+      riskLevel: "low",
       applicability: "api",
       title: `${sorted.length} search terms in "${campaignName}" spent ${usd(total)} converting nothing`,
       summary: `These queries matched, took clicks and produced nothing over 90 days. Adding them as phrase negatives on the `
@@ -1175,16 +1317,19 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         metrics: {
           termCount: sorted.length, costMicros: total,
           clicks: sorted.reduce((s, t) => s + t.clicks, 0), conversions: 0,
+          ...(seen?.metrics ?? {}),
         },
         ...win,
         lines: sorted.slice(0, 12).map((t) => `${usd(t.costMicros)} · ${t.clicks} clicks · "${t.term}"`)
-          .concat(sorted.length > 12 ? [`…and ${sorted.length - 12} more`] : []),
+          .concat(sorted.length > 12 ? [`…and ${sorted.length - 12} more`] : [])
+          .concat(seen ? [seen.line] : []),
       },
       estImpactCents: microsToCents(recoverable),
       impactUnit: "usd_month",
       impactAssumption: `${usd(total)} over 90 days is ${usd(monthly)}/month; we claim ${Math.round(RECOVERY_RATE * 100)}% of it. `
         + `The haircut is because some of this traffic would have converted eventually and some terms are relevant but badly landed — `
-        + `claiming the full figure promises a saving we can't deliver.`,
+        + `claiming the full figure promises a saving we can't deliver.`
+        + (seen?.caveat ? ` ${seen.caveat}` : ""),
       changePayload: {
         op: "campaignNegatives",
         body: [{
@@ -1458,6 +1603,28 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       guardNote: "Nothing here is applied. Uploading an outcome, or changing what a conversion action does, is outside the guarded path on purpose — it changes what a live account bids toward.",
     });
   }
+
+  // ── 7. Can the bidding learn, can the platform be told about an outage,
+  //       and does anything say what a lead is worth? ──────────────────────
+  // Their own module: three readings that share nothing with the waste rules
+  // above except the account they are about.
+  out.push(...readinessFindings({
+    accountId: input.accountId,
+    platformLabel: input.platform === "google_ads" ? "Google Ads" : input.platform === "meta" ? "Meta" : "Microsoft Advertising",
+    windowStart, windowEnd,
+    readiness: biddingByCampaign,
+    campaigns: input.campaigns,
+    tracking,
+    conversionActions: input.tracking?.actions ?? null,
+    economics: input.economics,
+    dailyConversions: input.dailyConversions,
+    // Measured from the client's CRM, never from clients.customer_value_cents,
+    // which on at least one account here is explicitly our assumption.
+    measuredWonValueCents: input.outcomes?.measuredWonValueCents ?? null,
+    campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros,
+    accountMinSpendMicros: THRESHOLDS.accountMinSpendMicros,
+    accountCostMicros: accountTotals.costMicros,
+  }));
 
   return out.sort((a, b) => b.estImpactCents - a.estImpactCents);
 }

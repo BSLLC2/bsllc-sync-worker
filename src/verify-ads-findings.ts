@@ -4,11 +4,24 @@ import {
   evaluate, evidenceHash, materiallyChanged, trackingReading, costTargets, governingTarget,
   outcomeReadiness, MIN_MONTHLY_OUTCOMES_FOR_BIDDING,
   ADS_RULESET_VERSION, THRESHOLDS,
-  type AuditInput, type TrackingFacts, type ClientEconomics,
+  type AuditInput, type TrackingFacts, type ClientEconomics, type CampaignRow,
 } from "./ads/rules.js";
+import {
+  biddingReadiness, lagReading, onTargetStrategy, whatItWouldNeed,
+  TARGET_STRATEGY_MIN_CONVERSIONS_30D, USEFUL_CONVERSION_LAG_DAYS,
+  type ConversionLagRow,
+} from "./ads/bidding-readiness.js";
+import {
+  spendVisibility, LOW_COVERAGE_SHARE, BARELY_COVERED_SHARE,
+} from "./ads/spend-visibility.js";
+import {
+  findTrackingOutage, dataExclusionProposal, MAX_DATA_EXCLUSION_DAYS,
+  type DailyConversionRow,
+} from "./ads/tracking-outage.js";
+import { proxyConversionValue } from "./ads/proxy-value.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { applyChangeSet, rollbackChangeSet, type ChangeSet, type PriorValue } from "./apply-ads-changes.js";
-import { enumName, CONVERSION_CATEGORY, TRACKING_STATUS } from "./ads/google-ads-adapter.js";
+import { enumName, CONVERSION_CATEGORY, TRACKING_STATUS, BIDDING_STRATEGY_TYPE, CONVERSION_LAG_BUCKET } from "./ads/google-ads-adapter.js";
 
 /**
  * Verifies the ads findings pipeline WITHOUT touching a live ad account.
@@ -58,12 +71,19 @@ const FIXTURE: AuditInput = {
   campaigns: [
     {
       id: "100", name: "Search — Core Services", channelType: "SEARCH",
+      // On a target-cost strategy at 36 conversions a month: over the
+      // published minimum, so the bidding gate lets a budget step through.
+      resourceName: "customers/1234567890/campaigns/100",
+      bidStrategyType: "TARGET_CPA", hasBidTarget: true,
       dailyBudgetMicros: 80_000_000, budgetResourceName: "customers/1234567890/campaignBudgets/900",
       costMicros: 2_400_000_000, clicks: 1_180, impressions: 41_000, conversions: 36,
       impressionShare: 0.42, budgetLostShare: 0.31, rankLostShare: 0.27,
     },
     {
       id: "200", name: "Search — Broad Prospecting", channelType: "SEARCH",
+      // Bidding manually, so no conversion floor applies to it at all.
+      resourceName: "customers/1234567890/campaigns/200",
+      bidStrategyType: "MANUAL_CPC", hasBidTarget: false,
       dailyBudgetMicros: 40_000_000, budgetResourceName: "customers/1234567890/campaignBudgets/901",
       costMicros: 910_000_000, clicks: 640, impressions: 88_000, conversions: 0,
       impressionShare: 0.19, budgetLostShare: 0.04, rankLostShare: 0.62,
@@ -75,6 +95,11 @@ const FIXTURE: AuditInput = {
     // it that converts at $67.
     {
       id: "300", name: "Search — Competitor Conquest", channelType: "SEARCH",
+      // Four conversions a month against a target-cost strategy: the shape
+      // that has never had a name in this engine and is the OCH scar in
+      // miniature — a model with a target to hit and nothing to hit it with.
+      resourceName: "customers/1234567890/campaigns/300",
+      bidStrategyType: "TARGET_CPA", hasBidTarget: true,
       dailyBudgetMicros: 30_000_000, budgetResourceName: "customers/1234567890/campaignBudgets/902",
       costMicros: 600_000_000, clicks: 300, impressions: 12_000, conversions: 4,
       impressionShare: 0.55, budgetLostShare: 0.02, rankLostShare: 0.11,
@@ -109,7 +134,7 @@ const FIXTURE: AuditInput = {
   tracking: {
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
     actions: [
-      { id: "500", name: "Contact form", status: "ENABLED", category: "SUBMIT_LEAD_FORM", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 40 },
+      { id: "500", name: "Contact form", status: "ENABLED", category: "SUBMIT_LEAD_FORM", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 40, defaultValue: null, alwaysUseDefaultValue: null },
       { id: "501", name: "Newsletter signup", status: "ENABLED", category: "ENGAGEMENT", actionType: "WEBPAGE", primaryForGoal: false, countsIntoConversionsColumn: false, conversionsInWindow: 310 },
     ],
   },
@@ -123,7 +148,48 @@ const FIXTURE: AuditInput = {
     cplCeilingCents: 9_500,            // $95, stated
     cplCeilingMonth: "2026-09",
   },
+  // The platform's own lag segmentation. Campaign 100 converts within a couple
+  // of days; campaign 300 has four conversions, which is far too few to read a
+  // distribution off, and the reading says so rather than calling it fast.
+  conversionLag: [
+    { campaignId: "100", bucket: "LESS_THAN_ONE_DAY", conversions: 22 },
+    { campaignId: "100", bucket: "ONE_TO_TWO_DAYS", conversions: 9 },
+    { campaignId: "100", bucket: "TWO_TO_THREE_DAYS", conversions: 4 },
+    { campaignId: "100", bucket: "SEVEN_TO_EIGHT_DAYS", conversions: 1 },
+    { campaignId: "300", bucket: "LESS_THAN_ONE_DAY", conversions: 4 },
+  ],
+  // Spend the search-terms report accounts for, per campaign, over the same
+  // 30 days the campaign figures above cover. Campaign 200 shows a quarter of
+  // its money as queries — which is what the report withholding low-volume
+  // searches looks like from the outside, and is the case the waste rule has
+  // always reasoned over without saying so.
+  searchTermSpendByCampaign: { "100": 2_000_000_000, "200": 250_000_000, "300": 500_000_000 },
+  // A day-by-day series with a break in it: 84 healthy days, then six days on
+  // which the account carried on buying clicks and recorded nothing.
+  dailyConversions: healthySeriesWithOutage(),
 };
+
+/**
+ * SYNTHETIC. Eighty-four days converting at a steady rate, then six days of
+ * clicks with no conversion recorded against any of them — the shape a tag
+ * removed from a site leaves behind, and the only shape from which a start
+ * date and an end date can be read.
+ */
+function healthySeriesWithOutage(): DailyConversionRow[] {
+  const out: DailyConversionRow[] = [];
+  const first = Date.parse("2026-06-13T00:00:00Z");
+  for (let i = 0; i < 90; i++) {
+    const date = new Date(first + i * 86_400_000).toISOString().slice(0, 10);
+    const broken = i >= 84;
+    out.push({
+      date,
+      clicks: 24,
+      conversions: broken ? 0 : 1,
+      costMicros: 43_000_000,
+    });
+  }
+  return out;
+}
 
 /** The same account with one thing changed. Used to drive the tracking rules
  *  without a second fixture drifting away from the first. */
@@ -142,7 +208,13 @@ function withEconomics(economics: ClientEconomics | null): AuditInput {
  * validate_only first. A test that only checks the end state would pass even if
  * the dry run were silently skipped.
  */
-function recorder() {
+function recorder(opts: {
+  /** What `FROM customer ... BETWEEN` reports for the exclusion's own staleness
+   *  guard. The proposal was worked out when this was nought. */
+  conversionsInRange?: number;
+  /** Data exclusions already on the account, for the overlap guard. */
+  existingExclusions?: { name: string; start: string; end: string }[];
+} = {}) {
   const calls: { method: string; validateOnly: boolean; payload: unknown }[] = [];
   const validated = new Set<string>();
   const key = (m: string, p: unknown) => `${m}:${JSON.stringify(p)}`;
@@ -162,9 +234,30 @@ function recorder() {
   const customer: any = {
     query: (gaql: string) => {
       const q = gaql.replace(/\s+/g, " ").trim();
+      // The data exclusion's own two reads, answered before the campaign
+      // branch below because both mention other resources.
+      if (/FROM bidding_data_exclusion\b/.test(q)) {
+        return Promise.resolve((opts.existingExclusions ?? []).map((x) => ({
+          bidding_data_exclusion: {
+            resource_name: `customers/1234567890/biddingDataExclusions/${x.name.length}`,
+            name: x.name, start_date_time: `${x.start} 00:00:00`, end_date_time: `${x.end} 23:59:59`,
+          },
+        })));
+      }
+      if (/FROM customer\b/.test(q) && /segments\.date BETWEEN/.test(q)) {
+        return Promise.resolve([{ metrics: { conversions: opts.conversionsInRange ?? 0, all_conversions: opts.conversionsInRange ?? 0 } }]);
+      }
       if (q.includes("FROM campaign ") || q.includes("FROM campaign\n") || /FROM campaign\b/.test(q)) {
         if (q.includes("campaign_criterion")) { /* fallthrough below */ }
         const name = /campaign\.name = '([^']+)'/.exec(q)?.[1];
+        if (!name) {
+          // No name in the WHERE: the exclusion path re-resolving every live
+          // campaign by resource name.
+          return Promise.resolve(FIXTURE.campaigns.map((c) => ({
+            campaign: { id: c.id, name: c.name, resource_name: `customers/1234567890/campaigns/${c.id}` },
+            campaign_budget: { resource_name: c.budgetResourceName, amount_micros: c.dailyBudgetMicros },
+          })));
+        }
         const c = FIXTURE.campaigns.find((x) => x.name === name);
         if (!c) return Promise.resolve([]);
         return Promise.resolve([{
@@ -181,6 +274,10 @@ function recorder() {
     campaignBudgets: { update: mutator("campaignBudgets.update") },
     campaignCriteria: { create: mutator("campaignCriteria.create"), remove: mutator("campaignCriteria.remove") },
     adGroupCriteria: { update: mutator("adGroupCriteria.update") },
+    biddingDataExclusions: {
+      create: mutator("biddingDataExclusions.create"),
+      remove: mutator("biddingDataExclusions.remove"),
+    },
   };
   return { customer, calls };
 }
@@ -425,9 +522,21 @@ async function main() {
     "the same terms are proposed on the healthy fixture — the account did not change, the trust in its noughts did");
   ok("no dead-keyword row either, for the same reason",
     brokenRun.every((f) => f.findingType !== "dead_keyword"));
-  ok("and nothing anywhere in the broken run carries a change to apply",
-    brokenRun.every((f) => f.changePayload === null),
+  // NARROWED WHEN THE DATA EXCLUSION SHIPPED, and narrowed rather than
+  // relaxed. The rule this check exists for is that the engine proposes
+  // nothing that ARGUES FROM A NOUGHT it cannot trust — no negatives, no dead
+  // keywords, and above all no extra budget on an account nobody can read.
+  // A data exclusion is the opposite kind of change: it does not spend, it
+  // does not block traffic, and it is the one thing there IS to do about a
+  // column that has been feeding noughts to a bidding model. The check now
+  // says both halves.
+  ok("nothing in the broken run proposes spending more or blocking traffic",
+    brokenRun.filter((f) => f.findingType !== "bidding_data_exclusion").every((f) => f.changePayload === null),
     "including the budget increase, which would be spending more on an account nobody can read");
+  const brokenExclusion = brokenRun.find((f) => f.findingType === "bidding_data_exclusion");
+  ok("…and the one change it DOES carry is the one that stops the bidding learning from the bad days",
+    brokenExclusion?.changePayload?.op === "dataExclusions",
+    brokenExclusion?.title ?? "none");
 
   const trackingRows = brokenRun.filter((f) => f.findingType === "conversion_tracking_gap");
   ok("the account gets a tracking finding instead", trackingRows.length === 1, trackingRows[0]?.title ?? "none");
@@ -631,6 +740,360 @@ async function main() {
       && /would be a claim/.test(feedback?.impactAssumption ?? ""));
   ok("no row at all where nothing was gathered",
     evaluate(FIXTURE).every((f) => f.findingType !== "outcome_feedback_gap"));
+
+  // ── 12. Can this campaign's bidding learn from what it gets? ─────────────
+  // The reading nothing in this engine computed. Every published threshold is
+  // a conversion count PER CAMPAIGN PER 30 DAYS, and `noConversionClicks` asks
+  // a different question — whether a campaign converted at all.
+  console.log("\n12. Bidding readiness, and the gate it puts in front of everything else");
+
+  const lagFast = lagReading([
+    { campaignId: "100", bucket: "LESS_THAN_ONE_DAY", conversions: 22 },
+    { campaignId: "100", bucket: "ONE_TO_TWO_DAYS", conversions: 9 },
+    { campaignId: "100", bucket: "TWO_TO_THREE_DAYS", conversions: 4 },
+    { campaignId: "100", bucket: "SEVEN_TO_EIGHT_DAYS", conversions: 1 },
+  ]);
+  ok("a lag distribution reads as a bucketed median and a share inside the useful window",
+    lagFast.medianDays === 1 && (lagFast.shareWithinUsefulWindow ?? 0) > 0.95 && (lagFast.shareWithinUsefulWindow ?? 1) < 1,
+    `median ${lagFast.medianDays}d · ${Math.round((lagFast.shareWithinUsefulWindow ?? 0) * 100)}% within ${USEFUL_CONVERSION_LAG_DAYS} days`);
+  const lagThin = lagReading([{ campaignId: "300", bucket: "LESS_THAN_ONE_DAY", conversions: 4 }]);
+  ok("four conversions is too few to read a distribution off, and it says so rather than calling the campaign fast",
+    lagThin.medianDays === null && lagThin.unread.length === 1, lagThin.unread[0] ?? "");
+  ok("a lag that was never read is unread, never fast",
+    lagReading(null).medianDays === null && lagReading(null).unread.length === 1);
+  const lagSlow = lagReading([
+    { campaignId: "9", bucket: "LESS_THAN_ONE_DAY", conversions: 10 },
+    { campaignId: "9", bucket: "THIRTY_TO_FORTY_FIVE_DAYS", conversions: 25 },
+  ]);
+  ok("a signal arriving a month after the click is read as a month, from the top of its bucket",
+    lagSlow.medianDays === 45, `median ${lagSlow.medianDays} day(s) — the top of the bucket, because rounding a lag DOWN is the expensive direction`);
+
+  ok("a strategy with a conversion target is told apart from one without",
+    onTargetStrategy({ strategyType: "TARGET_CPA", hasTarget: true }) === true
+      && onTargetStrategy({ strategyType: "MANUAL_CPC", hasTarget: false }) === false
+      && onTargetStrategy({ strategyType: "MAXIMIZE_CONVERSIONS", hasTarget: false }) === false
+      && onTargetStrategy({ strategyType: "MAXIMIZE_CONVERSIONS", hasTarget: true }) === true);
+  ok("Maximize Clicks and Target Impression Share carry no conversion floor, whatever their names say",
+    onTargetStrategy({ strategyType: "TARGET_SPEND", hasTarget: true }) === false
+      && onTargetStrategy({ strategyType: "TARGET_IMPRESSION_SHARE", hasTarget: true }) === false,
+    "neither optimises toward a conversion, so the published conversion minimum has nothing to say about either");
+  ok("a strategy nobody read is unknown, never manual",
+    onTargetStrategy({ strategyType: null, hasTarget: null }) === null,
+    "'we did not read it' and 'it needs no volume' are opposite answers and only one of them licenses a change");
+
+  const readyCampaign = biddingReadiness(
+    { campaignId: "100", campaignName: "Search — Core Services", strategyType: "TARGET_CPA", hasTarget: true, conversions30d: 36, costMicros30d: 2_400_000_000 },
+    FIXTURE.conversionLag, "yes");
+  ok("a campaign over the published minimum may be proposed a bid target and a budget step",
+    readyCampaign.verdict === "stable" && readyCampaign.mayProposeBidTarget && readyCampaign.mayProposeBudgetStep,
+    `${readyCampaign.conversions30d} conversions against a published minimum of ${TARGET_STRATEGY_MIN_CONVERSIONS_30D}`);
+
+  const thinCampaign = biddingReadiness(
+    { campaignId: "300", campaignName: "Search — Competitor Conquest", strategyType: "TARGET_CPA", hasTarget: true, conversions30d: 4, costMicros30d: 600_000_000 },
+    FIXTURE.conversionLag, "yes");
+  ok("a campaign under it may be proposed neither",
+    thinCampaign.verdict === "below_minimum" && !thinCampaign.mayProposeBidTarget && !thinCampaign.mayProposeBudgetStep,
+    `4 conversions, ${thinCampaign.shortBy} short`);
+  ok("…and it says what it would take, in things somebody can do",
+    whatItWouldNeed(thinCampaign).length >= 2
+      && whatItWouldNeed(thinCampaign).some((l) => /portfolio/i.test(l)),
+    "merging campaigns, a portfolio strategy, a shallower action, or a strategy with no target");
+
+  const thinManual = biddingReadiness(
+    { campaignId: "200", campaignName: "Search — Broad Prospecting", strategyType: "MANUAL_CPC", hasTarget: false, conversions30d: 4, costMicros30d: 600_000_000 },
+    FIXTURE.conversionLag, "yes");
+  ok("the SAME thin campaign bidding manually keeps its budget step",
+    thinManual.verdict === "below_minimum" && thinManual.mayProposeBudgetStep,
+    "nothing is learning, so nothing is reset — and budget is how a small account reaches the minimum in the first place");
+
+  const blindCampaign = biddingReadiness(
+    { campaignId: "100", campaignName: "Search — Core Services", strategyType: "TARGET_CPA", hasTarget: true, conversions30d: 36, costMicros30d: 2_400_000_000 },
+    FIXTURE.conversionLag, "no");
+  ok("36 conversions on a column that records nothing is not 36 conversions",
+    blindCampaign.verdict === "column_unreadable" && blindCampaign.conversions30d === null
+      && !blindCampaign.mayProposeBidTarget,
+    "the count is composed from the tracking reading rather than re-decided here");
+
+  const lateCampaign = biddingReadiness(
+    { campaignId: "9", campaignName: "Late", strategyType: "TARGET_CPA", hasTarget: true, conversions30d: 80, costMicros30d: 900_000_000 },
+    [{ campaignId: "9", bucket: "LESS_THAN_ONE_DAY", conversions: 10 }, { campaignId: "9", bucket: "THIRTY_TO_FORTY_FIVE_DAYS", conversions: 25 }],
+    "yes");
+  ok("volume alone does not clear the gate — a signal arriving a month late is refused at 80 conversions",
+    lateCampaign.verdict === "stable" && lateCampaign.lagTooLong === true && !lateCampaign.mayProposeBidTarget,
+    "this is the half of the OCH failure a conversion count alone never showed");
+
+  const readyRow = a.find((f) => f.findingType === "bidding_not_ready");
+  ok("the thin campaign on a target strategy gets a row of its own", Boolean(readyRow), readyRow?.title ?? "none");
+  ok("…which proposes nothing and claims no money",
+    readyRow?.changePayload === null && readyRow?.estImpactCents === 0 && readyRow?.applicability === "vendor");
+  ok("…and names the published minimum as a published minimum, and the convention beside it as a convention",
+    /published/i.test(readyRow?.impactAssumption ?? "") && /convention/i.test(readyRow?.impactAssumption ?? ""));
+  ok("no bidding-readiness row on a campaign that is not on a target strategy",
+    !a.some((f) => f.findingType === "bidding_not_ready" && f.entityName === "Search — Broad Prospecting"),
+    "most campaigns on a book this size are under fifteen a month; a row on each is a row telling every client they are small");
+
+  // THE GATE, ON A REAL RUN. Same campaign, same impression share, same
+  // conversions — the budget step is proposed on one bidding strategy and
+  // refused on another.
+  // Six conversions a month, still converting UNDER the client's ceiling, and
+  // still giving up a third of its impressions to budget — every reason to
+  // raise it, and a target strategy that cannot survive being raised.
+  const cappedThin: AuditInput = {
+    ...FIXTURE,
+    campaigns: FIXTURE.campaigns.map((c): CampaignRow => c.id === "100"
+      ? { ...c, conversions: 6, costMicros: 500_000_000 }
+      : c),
+  };
+  const gated = evaluate(cappedThin).find((f) => f.findingType === "budget_limited" && f.entityName === "Search — Core Services");
+  ok("a budget step is refused on a budget-capped campaign whose target strategy is under the minimum",
+    gated?.applicability === "vendor" && gated?.changePayload === null,
+    gated?.title ?? "none");
+  ok("…and the refusal says it is the learning period, not the API",
+    /learning period/i.test(gated?.guardNote ?? ""), gated?.guardNote?.slice(0, 90) ?? "");
+  const cappedThinManual = evaluate({
+    ...FIXTURE,
+    campaigns: FIXTURE.campaigns.map((c): CampaignRow => c.id === "100"
+      ? { ...c, conversions: 6, costMicros: 500_000_000, bidStrategyType: "MANUAL_CPC", hasBidTarget: false }
+      : c),
+  }).find((f) => f.findingType === "budget_limited" && f.entityName === "Search — Core Services");
+  ok("…and the identical campaign bidding manually still gets its budget step",
+    cappedThinManual?.applicability === "api" && cappedThinManual?.changePayload !== null,
+    "six conversions and a capped budget is exactly the campaign more budget might fix");
+
+  // ── 13. How much of the spend the engine could actually see ──────────────
+  console.log("\n13. Every query-based figure says what share of the money it looked at");
+
+  const covered = spendVisibility({ campaignId: "1", campaignName: "c", channelType: "SEARCH", reportedTermCostMicros: 900_000_000, campaignCostMicros: 1_000_000_000 });
+  ok("a campaign whose report accounts for most of its spend reads as covered and still names the rest",
+    covered.verdict === "covered" && (covered.share ?? 0) >= LOW_COVERAGE_SHARE && Boolean(covered.caveat),
+    covered.line);
+  const partial = spendVisibility({ campaignId: "1", campaignName: "c", channelType: "SEARCH", reportedTermCostMicros: 500_000_000, campaignCostMicros: 1_000_000_000 });
+  ok("half the spend showing up changes the claim rather than adding a footnote",
+    partial.verdict === "partial" && /floor/.test(partial.caveat ?? ""), partial.caveat ?? "");
+  const barely = spendVisibility({ campaignId: "1", campaignName: "c", channelType: "SEARCH", reportedTermCostMicros: 200_000_000, campaignCostMicros: 1_000_000_000 });
+  ok("a fifth showing up says the figure is a small visible corner of the spend",
+    barely.verdict === "barely" && (barely.share ?? 1) < BARELY_COVERED_SHARE, barely.caveat ?? "");
+  ok("…and both name the causes without asserting one",
+    /withheld for privacy/.test(partial.line) && /search partners/.test(barely.line),
+    "the privacy threshold is one cause and search partners, display expansion and Performance Max are others");
+  const display = spendVisibility({ campaignId: "1", campaignName: "c", channelType: "DISPLAY", reportedTermCostMicros: 0, campaignCostMicros: 1_000_000_000 });
+  ok("a display campaign is not low-coverage, it has no search-terms report at all",
+    display.verdict === "not_applicable" && display.share === null,
+    "a nought there would read as a defect on a campaign that cannot have one");
+  const notRead = spendVisibility({ campaignId: "1", campaignName: "c", channelType: "SEARCH", reportedTermCostMicros: null, campaignCostMicros: 1_000_000_000 });
+  ok("a report that was not read is unread, never nought coverage",
+    notRead.verdict === "unread" && notRead.share === null && Boolean(notRead.caveat));
+  const tiny = spendVisibility({ campaignId: "1", campaignName: "c", channelType: "SEARCH", reportedTermCostMicros: 0, campaignCostMicros: 4_000_000 });
+  ok("a four-dollar campaign gets no coverage share at all",
+    tiny.verdict === "too_small", "a share off a handful of clicks is one rounding");
+
+  ok("the search-term waste finding now says what share of the campaign's money it looked at",
+    /shows up as a search term/.test(wasted!.evidence.lines.join(" "))
+      && (wasted!.evidence.metrics.searchTermCoverageShare ?? 1) < LOW_COVERAGE_SHARE,
+    `${Math.round((wasted!.evidence.metrics.searchTermCoverageShare ?? 0) * 100)}% of the campaign's spend`);
+  ok("…and its dollar figure carries the share in the assumption rather than standing alone",
+    /spend/.test(wasted!.impactAssumption) && /report/.test(wasted!.impactAssumption),
+    wasted!.impactAssumption.slice(-120));
+  ok("…and a list worked out over a quarter of the money is not the loudest row on the account",
+    wasted!.severity === "medium",
+    "it was high before the coverage was known, whatever its dollar figure said");
+  const fullyVisible = evaluate({ ...FIXTURE, searchTermSpendByCampaign: { "100": 2_000_000_000, "200": 900_000_000, "300": 500_000_000 } })
+    .find((f) => f.findingType === "wasted_search_term");
+  ok("…and the same finding on a campaign the report DOES cover keeps its severity",
+    fullyVisible?.severity === "high", "the rule is about what was seen, not about the terms");
+
+  // ── 14. The column went quiet, and the platform can be told ───────────────
+  console.log("\n14. A tracking break gets a date range, and a data exclusion goes through the guarded path");
+
+  const outage = findTrackingOutage(FIXTURE.dailyConversions);
+  ok("a run of zero-conversion days behind a healthy stretch is found, with a start and an end",
+    outage.verdict === "found" && outage.startDate === "2026-09-05" && outage.days === 6,
+    `${outage.startDate} → ${outage.endDate}, ${outage.days} days, ${outage.clicksInRun} clicks`);
+  ok("…and it says how many conversions the account's OWN rate says are missing",
+    outage.expectedConversions > 3 && outage.baselineDays >= 7,
+    `about ${outage.expectedConversions.toFixed(1)} short, against ${outage.baselineDays} days of baseline`);
+  ok("a quiet stretch too small to have swallowed anything is not a break",
+    findTrackingOutage([
+      ...Array.from({ length: 30 }, (_, i) => ({ date: `2026-08-${String(i + 1).padStart(2, "0")}`, clicks: 20, conversions: 1, costMicros: 1_000_000 })),
+      { date: "2026-09-01", clicks: 2, conversions: 0, costMicros: 100_000 },
+    ]).verdict === "none",
+    "two clicks over a weekend expected about a tenth of a conversion");
+  ok("an account quiet across the whole window has no baseline and is told so, not given a date range",
+    findTrackingOutage(Array.from({ length: 40 }, (_, i) => ({ date: `2026-08-${String((i % 28) + 1).padStart(2, "0")}`, clicks: 20, conversions: 0, costMicros: 1_000_000 }))).verdict === "no_baseline",
+    "'it broke on this date' and 'it has never worked' are different answers and only one of them can be excluded");
+  ok("a series that was never read is unread, never a clean account",
+    findTrackingOutage(null).verdict === "unread" && findTrackingOutage(undefined).verdict === "unread");
+
+  const longOutage = findTrackingOutage([
+    ...Array.from({ length: 40 }, (_, i) => ({ date: new Date(Date.parse("2026-06-01T00:00:00Z") + i * 86_400_000).toISOString().slice(0, 10), clicks: 30, conversions: 2, costMicros: 5_000_000 })),
+    ...Array.from({ length: 25 }, (_, i) => ({ date: new Date(Date.parse("2026-07-11T00:00:00Z") + i * 86_400_000).toISOString().slice(0, 10), clicks: 30, conversions: 0, costMicros: 5_000_000 })),
+  ]);
+  ok(`a break longer than the platform's ${MAX_DATA_EXCLUSION_DAYS}-day ceiling is REFUSED rather than truncated`,
+    longOutage.verdict === "found" && !longOutage.exclusionExpressible && /at most/.test(longOutage.refusal ?? ""),
+    "excluding the last fortnight of a 25-day outage leaves the rest in the model and reads as handled");
+
+  const exclusionRow = a.find((f) => f.findingType === "bidding_data_exclusion");
+  ok("the account gets one row carrying the dates", Boolean(exclusionRow), exclusionRow?.title ?? "none");
+  ok("…and it is keyed on the break's START, so an outage that grows a day is the same row",
+    (exclusionRow?.entityId ?? "").endsWith(":data_exclusion:2026-09-05"),
+    "keying on the end would close one row and open another every week, each closure reading as 'the condition cleared'");
+  ok("…and it claims no dollar saving",
+    exclusionRow?.estImpactCents === 0 && /not what is recoverable/.test(exclusionRow?.impactAssumption ?? ""));
+  const exclPayload = exclusionRow!.changePayload!;
+  ok("…and it carries a change through the guarded path", exclPayload.op === "dataExclusions");
+  const exclBody = (exclPayload.body as { campaigns: string[]; campaignNames: string[]; startDateTime: string; endDateTime: string }[])[0]!;
+  ok("…scoped to the campaigns that actually bid on the conversion column",
+    exclBody.campaigns.length === 2 && !exclBody.campaignNames.includes("Search — Broad Prospecting"),
+    `${exclBody.campaignNames.join(", ")} — a manually bid campaign is unaffected either way, so scoping one would be a change that does nothing`);
+  ok("…and the plain English says the tag is still broken",
+    /still broken/.test(exclPayload.plainEnglish), exclPayload.plainEnglish.slice(0, 110));
+  ok("no exclusion is offered where nothing on the account bids on conversions",
+    dataExclusionProposal(outage, [{ id: "1", name: "Manual", resourceName: "customers/1/campaigns/1", smartBidding: false }], { accountLabel: "the account", lagLine: null }) === null,
+    "a button that does nothing is worse than no button");
+  ok("…nor where the break is longer than the platform allows",
+    dataExclusionProposal(longOutage, [{ id: "1", name: "S", resourceName: "customers/1/campaigns/1", smartBidding: true }], { accountLabel: "the account", lagLine: null }) === null);
+
+  const exclCs: ChangeSet = { client: "(harness)", dataExclusions: exclPayload.body as ChangeSet["dataExclusions"] };
+  const exclRec = recorder();
+  const exclOut = await applyChangeSet(exclRec.customer, FIXTURE.accountId, exclCs, { apply: true, onLog: () => {} });
+  ok("every mutate was preceded by its own validate_only, as for every other operation",
+    exclRec.calls.length >= 2 && exclRec.calls[0]!.validateOnly && exclRec.calls.some((c) => !c.validateOnly),
+    "the recorder throws otherwise");
+  const exclPv = exclOut.priorValues.find((pv2) => pv2.kind === "data_exclusion_created");
+  ok("…and the created exclusion's own resource name is recorded, so removing it is one step",
+    exclPv?.kind === "data_exclusion_created" && exclPv.resourceNames.length > 0);
+  const exclBack = recorder();
+  const exclRb = await rollbackChangeSet(exclBack.customer, exclOut.priorValues as PriorValue[], { apply: false, onLog: () => {} });
+  ok("…and rolling it back puts those days back in front of the bidding",
+    exclRb.restored.some((r) => /counts those days again/.test(r)), exclRb.restored.join(" · "));
+
+  // THE GUARD THIS OPERATION EXISTS WITH. Conversions backfill into the click's
+  // own date, so a range that was empty when the audit ran can be full by the
+  // time somebody presses Approve — and excluding it then throws away signal
+  // that is really there, with nothing on any screen going red.
+  const filledLines: string[] = [];
+  const filled = await applyChangeSet(
+    recorder({ conversionsInRange: 9 }).customer, FIXTURE.accountId, exclCs,
+    { apply: true, onLog: (l: string) => filledLines.push(l) });
+  ok("a date range that has since filled in with real conversions is REFUSED",
+    !filled.priorValues.some((pv2) => pv2.kind === "data_exclusion_created"),
+    "conversions arrive days after the click; excluding a range that has filled in throws real signal away");
+  ok("…and the run says what moved",
+    filledLines.some((l) => /filled in since/.test(l)), filledLines.join(" | ").slice(0, 130));
+
+  const overlapLines: string[] = [];
+  const overlapped = await applyChangeSet(
+    recorder({ existingExclusions: [{ name: "Existing outage", start: "2026-09-01", end: "2026-09-09" }] }).customer,
+    FIXTURE.accountId, exclCs, { apply: true, onLog: (l: string) => overlapLines.push(l) });
+  ok("an overlapping exclusion already on the account is skipped, not duplicated",
+    !overlapped.priorValues.some((pv2) => pv2.kind === "data_exclusion_created")
+      && overlapLines.some((l) => /skipped, not duplicated/.test(l)),
+    overlapLines.join(" | ").slice(0, 120));
+
+  const futureLines: string[] = [];
+  const future = await applyChangeSet(recorder().customer, FIXTURE.accountId, {
+    client: "(harness)",
+    dataExclusions: [{ ...exclBody, startDateTime: "2099-01-01 00:00:00", endDateTime: "2099-01-05 23:59:59", observedConversionsInRange: 0, name: "Future", reason: "r" }],
+  }, { apply: true, onLog: (l: string) => futureLines.push(l) });
+  ok("a range that is not yet over is refused — this is a retrospective correction, not a forecast",
+    !future.priorValues.some((pv2) => pv2.kind === "data_exclusion_created")
+      && futureLines.some((l) => /not yet over/.test(l)),
+    futureLines.join(" | ").slice(0, 110));
+
+  const longLines: string[] = [];
+  const tooLong = await applyChangeSet(recorder().customer, FIXTURE.accountId, {
+    client: "(harness)",
+    dataExclusions: [{ ...exclBody, startDateTime: "2026-08-01 00:00:00", endDateTime: "2026-08-25 23:59:59", observedConversionsInRange: 0, name: "Long", reason: "r" }],
+  }, { apply: true, onLog: (l: string) => longLines.push(l) });
+  ok(`the ${MAX_DATA_EXCLUSION_DAYS}-day ceiling is enforced at the apply path too, not only at detection`,
+    !tooLong.priorValues.some((pv2) => pv2.kind === "data_exclusion_created")
+      && longLines.some((l) => /at most/.test(l)),
+    "this function is the last thing standing between a proposal and a live account");
+
+  // ── 15. What one lead is worth ───────────────────────────────────────────
+  console.log("\n15. A proxy value on the conversion, and the absences it refuses to fill");
+
+  const proxyRow = a.find((f) => f.findingType === "proxy_conversion_value");
+  ok("an account with both figures and no value on the action gets a row", Boolean(proxyRow), proxyRow?.title ?? "none");
+  ok("…carrying the modelled figure, with the word in the sentence",
+    proxyRow!.evidence.lines.some((l) => /^Modelled, not measured/.test(l))
+      && proxyRow!.evidence.metrics.modelledLeadValueCents === 12_000,
+    "$2,400 a customer at a 5% close rate is $120 a lead");
+  ok("…and the row proposes nothing, because setting a value changes what the account bids toward",
+    proxyRow?.changePayload === null && proxyRow?.applicability === "vendor" && proxyRow?.estImpactCents === 0);
+  ok("…and it does not claim the change is worth the lead value",
+    /not what setting it is worth/.test(proxyRow?.impactAssumption ?? ""),
+    "multiplying a lead value by a conversion count would claim the account gains the whole value of every lead");
+  ok("…and it tells the person to leave the campaign alone afterwards",
+    proxyRow!.evidence.lines.some((l) => /fortnight/.test(l)),
+    "changing what a conversion is worth changes what the bidding optimises for");
+
+  const noRate = proxyConversionValue({ customerValueCents: 240_000, customerValueFromClient: true, closeRatePct: null },
+    [{ name: "Contact form", category: "SUBMIT_LEAD_FORM", countsIntoConversionsColumn: true, defaultValue: null, alwaysUseDefaultValue: null }],
+    "yes", null);
+  ok("a missing close rate names itself and produces no figure",
+    noRate.state === "missing_inputs" && noRate.valueCents === null && noRate.missing.length === 1
+      && /share of leads/.test(noRate.missing[0] ?? ""));
+  ok("…and nothing here picks one",
+    noRate.instruction.some((l) => /Nothing here will pick one/.test(l)),
+    "a value that was guessed reads on a screen exactly like one the client gave us");
+  const zeroes = proxyConversionValue({ customerValueCents: 0, customerValueFromClient: false, closeRatePct: 0 },
+    [{ name: "Contact form", category: "LEAD", countsIntoConversionsColumn: true, defaultValue: null, alwaysUseDefaultValue: null }],
+    "yes", null);
+  ok("a nought in either column is the shape of the blank, never an answer",
+    zeroes.state === "missing_inputs" && zeroes.missing.length === 2,
+    "client_targets.cpl_ceiling_cents and friends are DEFAULT 0 and their own dialog says to leave a field at 0 to skip it");
+
+  const withMeasured = proxyConversionValue(FIXTURE.economics, FIXTURE.tracking!.actions!.map((x) => ({
+    name: x.name, category: x.category, countsIntoConversionsColumn: x.countsIntoConversionsColumn,
+    defaultValue: null, alwaysUseDefaultValue: null,
+  })), "yes", 320_000);
+  ok("a measured value from the CRM is stated beside the modelled one and never blended with it",
+    withMeasured.valueCents === 12_000
+      && withMeasured.lines.some((l) => /is not averaged with it/.test(l)),
+    "one is a price per lead off two typed numbers, the other a price per customer the CRM recorded");
+
+  const valued = proxyConversionValue(FIXTURE.economics, [
+    { name: "Contact form", category: "SUBMIT_LEAD_FORM", countsIntoConversionsColumn: true, defaultValue: 125, alwaysUseDefaultValue: true },
+  ], "yes", null);
+  ok("an account already carrying a value within a quarter of the modelled figure raises nothing",
+    valued.state === "already_valued", `$125 against the modelled $${((valued.valueCents ?? 0) / 100).toFixed(2)}`);
+  const disagrees = proxyConversionValue(FIXTURE.economics, [
+    { name: "Contact form", category: "SUBMIT_LEAD_FORM", countsIntoConversionsColumn: true, defaultValue: 800, alwaysUseDefaultValue: true },
+  ], "yes", null);
+  ok("…and one a long way from it is its own finding, without saying which is right",
+    disagrees.state === "disagrees" && disagrees.instruction.some((l) => /Settle which figure is correct/.test(l)));
+  const shop = proxyConversionValue(FIXTURE.economics, [
+    { name: "Purchase", category: "PURCHASE", countsIntoConversionsColumn: true, defaultValue: null, alwaysUseDefaultValue: null },
+  ], "yes", null);
+  ok("an account counting purchases is left alone — the platform already has the real amount",
+    shop.state === "transaction_valued",
+    "a modelled average over the top of a real transaction value is a worse number replacing a better one");
+  const valuedPageViews = proxyConversionValue(FIXTURE.economics, [
+    { name: "Thank you", category: "PAGE_VIEW", countsIntoConversionsColumn: true, defaultValue: null, alwaysUseDefaultValue: null },
+  ], "no", null);
+  ok("a column counting page views is never given a lead's value",
+    valuedPageViews.state === "column_unreadable" && valuedPageViews.valueCents === null);
+  ok("…and neither is one nobody checked",
+    proxyConversionValue(FIXTURE.economics, null, "unknown", null).state === "column_unreadable");
+  ok("a working account with a value already on it raises no row at all",
+    evaluate({
+      ...FIXTURE,
+      tracking: { ...FIXTURE.tracking!, actions: FIXTURE.tracking!.actions!.map((x) => x.id === "500" ? { ...x, defaultValue: 125, alwaysUseDefaultValue: true } : x) },
+    }).every((f) => f.findingType !== "proxy_conversion_value"),
+    "three rows saying what one row already says is how a queue fills with advice nobody reads");
+
+  // ── 15b. The enums these two readings turn on ────────────────────────────
+  console.log("\n15b. The bidding strategy and the lag bucket are decoded before the rules see them");
+  ok("the bidding strategy integer is decoded to the platform's own word",
+    enumName(BIDDING_STRATEGY_TYPE, 6) === "TARGET_CPA" && enumName(BIDDING_STRATEGY_TYPE, "3") === "MANUAL_CPC");
+  ok("the lag bucket integer is too",
+    enumName(CONVERSION_LAG_BUCKET, 2) === "LESS_THAN_ONE_DAY" && enumName(CONVERSION_LAG_BUCKET, "18") === "THIRTY_TO_FORTY_FIVE_DAYS");
+  ok("an undecoded strategy reads as no target strategy rather than as a target one",
+    onTargetStrategy({ strategyType: "6", hasTarget: true }) === false,
+    "which is why the adapter decodes: a campaign that needs the gate would otherwise never get it");
+  ok("an undecoded lag bucket is counted as unmapped rather than guessed at",
+    lagReading([{ campaignId: "1", bucket: "18", conversions: 100 }]).unmapped === 100);
 
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);
