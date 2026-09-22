@@ -225,17 +225,66 @@ async function main() {
   catch (e) { refused = e instanceof Error ? e.message : String(e); }
   ok("a protected-term negative aborts the WHOLE run", refused.includes("protected pattern"), refused.slice(0, 90));
 
-  const bigBudget: ChangeSet = { client: "(harness)", budgets: [{ campaign: "Search — Core Services", newDailyUsd: 500, reason: "test" }] };
+  // Both of these now carry `fromDailyMicros`: the fixture campaign sits at
+  // $80/day, and a change set that cannot say what it was computed from is
+  // refused before the cap is ever reached (see the staleness guard below).
+  const bigBudget: ChangeSet = { client: "(harness)", budgets: [{ campaign: "Search — Core Services", newDailyUsd: 500, fromDailyMicros: 80_000_000, reason: "test" }] };
   let budgetRefused = "";
   try { await applyChangeSet(recorder().customer, FIXTURE.accountId, bigBudget, { apply: false, onLog: () => {} }); }
   catch (e) { budgetRefused = e instanceof Error ? e.message : String(e); }
   ok("a budget move over the cap is refused", budgetRefused.includes("exceeds"), budgetRefused.slice(0, 90));
 
-  const okBudget: ChangeSet = { client: "(harness)", budgets: [{ campaign: "Search — Core Services", newDailyUsd: 100, reason: "within cap" }] };
+  const okBudget: ChangeSet = { client: "(harness)", budgets: [{ campaign: "Search — Core Services", newDailyUsd: 100, fromDailyMicros: 80_000_000, reason: "within cap" }] };
   const bRec = recorder();
   const bOut = await applyChangeSet(bRec.customer, FIXTURE.accountId, okBudget, { apply: true, onLog: () => {} });
   const pv = bOut.priorValues.find((p) => p.kind === "budget");
   ok("a budget move inside the cap records the exact prior amount", pv?.kind === "budget" && pv.amountMicros === 80_000_000, pv?.kind === "budget" ? usd(pv.amountMicros) : "none");
+
+  // ── 6. A proposal worked out from a budget somebody has since moved ──────
+  // `newDailyUsd` is frozen at detection time and the two caps above only ever
+  // bound a move UP. Without this guard, a finding raised against a $100/day
+  // campaign proposes $125 forever — so once a subcontractor raises that
+  // campaign to $300, approving it writes $300 back DOWN to $125, passes both
+  // caps, and reads in the log as a clean apply.
+  console.log("\n6. A stale budget proposal is refused, not applied");
+
+  const lines: string[] = [];
+  const moved: ChangeSet = {
+    client: "(harness)",
+    // The audit saw $80/day. The fixture account is still at $80 — so to model
+    // somebody having raised it we claim a DIFFERENT starting point, which is
+    // the same comparison from the other side.
+    budgets: [{ campaign: "Search — Core Services", newDailyUsd: 100, fromDailyMicros: 40_000_000, reason: "worked out a week ago" }],
+  };
+  const mRec = recorder();
+  const mOut = await applyChangeSet(mRec.customer, FIXTURE.accountId, moved, { apply: true, onLog: (l: string) => lines.push(l) });
+  ok("a budget that moved since detection is not applied",
+    !mOut.priorValues.some((p) => p.kind === "budget"), JSON.stringify(mOut.priorValues).slice(0, 90));
+  ok("and the run says what moved, so the refusal is readable",
+    lines.some((l) => l.includes("refused")) && lines.some((l) => l.includes("Somebody has moved it")),
+    lines.join(" | ").slice(0, 120));
+
+  const noFrom: ChangeSet = { client: "(harness)", budgets: [{ campaign: "Search — Core Services", newDailyUsd: 100, reason: "no recorded starting point" }] };
+  const nLines: string[] = [];
+  const nOut = await applyChangeSet(recorder().customer, FIXTURE.accountId, noFrom, { apply: true, onLog: (l: string) => nLines.push(l) });
+  ok("a change set with no recorded starting budget is refused",
+    !nOut.priorValues.some((p) => p.kind === "budget"), JSON.stringify(nOut.priorValues).slice(0, 90));
+  ok("and it names the way forward rather than failing silently",
+    nLines.some((l) => l.includes("Check now")), nLines.join(" | ").slice(0, 120));
+
+  // One stale item must not cost the rest of the batch: the guard SKIPS the
+  // item, it does not throw.
+  const mixed: ChangeSet = {
+    client: "(harness)",
+    budgets: [
+      { campaign: "Search — Core Services", newDailyUsd: 100, fromDailyMicros: 40_000_000, reason: "stale" },
+      { campaign: "Search — Core Services", newDailyUsd: 90, fromDailyMicros: 80_000_000, reason: "current" },
+    ],
+  };
+  const xOut = await applyChangeSet(recorder().customer, FIXTURE.accountId, mixed, { apply: true, onLog: () => {} });
+  const xPv = xOut.priorValues.filter((p) => p.kind === "budget");
+  ok("a stale item is skipped without costing a current one in the same set",
+    xPv.length === 1, `${xPv.length} budget prior value(s)`);
 
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

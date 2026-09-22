@@ -48,7 +48,13 @@ export interface ChangeSet {
   protectedPatterns?: string[];
   /** URLs known to be failing policy review. Refuse to point anything at them. */
   brokenUrls?: string[];
-  budgets?: { campaign: string; newDailyUsd: number; reason: string }[];
+  /** `fromDailyMicros` is the live budget this proposal was COMPUTED FROM.
+   *  `newDailyUsd` is a frozen dollar figure rather than a delta, so it is the
+   *  only thing that lets the apply path tell a current +25% step from a
+   *  week-old one somebody has since overtaken. Optional on the type because
+   *  a hand-written change set has no audit behind it; absent means the
+   *  staleness guard below refuses the item. */
+  budgets?: { campaign: string; newDailyUsd: number; fromDailyMicros?: number; reason: string }[];
   campaignNegatives?: { campaign: string; matchType: string; reason: string; keywords: string[] }[];
   removeCampaignNegatives?: { campaign: string; reason: string; keywords: string[] }[];
   keywordFinalUrls?: { reason: string; map: { keyword: string; url: string }[] }[];
@@ -143,6 +149,46 @@ export async function applyChangeSet(
     const cur = Number(rows[0].campaign_budget?.amount_micros ?? 0);
     const next = Math.round(b.newDailyUsd * 1_000_000);
     if (cur === next) { say(`  ·  budget: "${b.campaign}" already ${usd(cur)} — no change`); continue; }
+
+    // ── Staleness guard ──────────────────────────────────────────────────
+    // The two guards below bound how far a budget may move UP. Neither bounds
+    // a move DOWN, and `newDailyUsd` is a dollar figure frozen when the audit
+    // ran — not a delta. So a finding raised against a $100/day campaign
+    // proposes $125 forever, and if somebody raised that campaign to $300 in
+    // the meantime, approving it writes $300 back down to $125: under 2x, and
+    // a negative delta, so both guards pass and it reads in the log as a clean
+    // apply. That is the exact case a subcontractor working an account between
+    // Monday audits produces.
+    //
+    // So the item is refused unless the live budget is still the one this
+    // proposal was computed from. SKIPPED rather than thrown: a throw aborts
+    // the whole change set, and one stale item should not cost the others. An
+    // item that skips captures no prior value, which the adapter reports as a
+    // null and ads-apply-approved treats as a hard failure — the finding goes
+    // back to `proposed` rather than being marked applied. That is the honest
+    // outcome: the next audit re-detects it against the real number, and the
+    // dashboard's own "Check now" makes that minutes rather than a week.
+    //
+    // ABSENT is refused too, not waved through. A change set with no recorded
+    // starting point cannot prove it is current, and "prior values captured or
+    // the change refused" is the rule this path already lives by. Findings
+    // detected before this shipped carry no `fromDailyMicros`; re-running the
+    // audit rewrites change_payload_json in place (see ads/store.ts) and they
+    // become approvable again.
+    const from = b.fromDailyMicros;
+    if (from == null) {
+      say(`  ⚠ budget: "${b.campaign}" carries no recorded starting budget — refused.`);
+      say(`     Re-run the findings audit ("Check now" on the Ads tab) so the proposal is worked out from today's number.`);
+      continue;
+    }
+    // A cent of tolerance, because the platform normalises the amount it
+    // stores. Anything wider would start waving through a real change.
+    if (Math.abs(cur - from) > 10_000) {
+      say(`  ⚠ budget: "${b.campaign}" was ${usd(from)}/day when this was worked out and is ${usd(cur)}/day now — refused.`);
+      say(`     Somebody has moved it since. Applying ${usd(next)} would overwrite their change with a stale figure.`);
+      continue;
+    }
+
     if (next > cur * MAX_BUDGET_FACTOR) throw new Error(`Guard: ${usd(cur)} → ${usd(next)} on "${b.campaign}" exceeds ${MAX_BUDGET_FACTOR}x.`);
     if ((next - cur) / 1_000_000 > MAX_BUDGET_DELTA_USD) throw new Error(`Guard: ${usd(cur)} → ${usd(next)} on "${b.campaign}" exceeds $${MAX_BUDGET_DELTA_USD}/day.`);
 

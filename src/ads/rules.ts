@@ -291,13 +291,18 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         changePayload: converting && c.budgetResourceName
           ? {
               op: "budgets",
-              body: [{ campaign: c.name, newDailyUsd, reason: `Budget-capped: losing ${pct(budgetLost)} of impressions to budget while converting.` }],
+              // `fromDailyMicros` is the budget this proposal was COMPUTED
+              // FROM. `newDailyUsd` is a frozen dollar figure, not a delta, so
+              // without the starting point the apply path cannot tell whether
+              // it is still the +25% step this claims to be. See the staleness
+              // guard in apply-ads-changes.ts.
+              body: [{ campaign: c.name, newDailyUsd, fromDailyMicros: c.dailyBudgetMicros, reason: `Budget-capped: losing ${pct(budgetLost)} of impressions to budget while converting.` }],
               plainEnglish: `Raise "${c.name}" from ${usd(c.dailyBudgetMicros)}/day to $${newDailyUsd.toFixed(2)}/day (+25%).`,
-              guard: `Budget guard: refuses any move above 2× the current budget or more than $100/day in one run. A 25% step is well inside both.`,
+              guard: `Budget guard: refuses any move above 2× the current budget or more than $100/day in one run. A 25% step is well inside both. It also refuses outright if the budget has changed since this was worked out — if somebody has already moved it, this figure is out of date.`,
             }
           : null,
         guardNote: converting
-          ? "Budget guard: max 2× and max $100/day movement per run."
+          ? "Budget guard: max 2× and max $100/day movement per run, and refused entirely if the budget has moved since this was worked out."
           : "No API change proposed — adding budget to a non-converting campaign is refused by rule, not by the API.",
       });
     }
