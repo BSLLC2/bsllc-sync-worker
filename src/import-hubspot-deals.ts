@@ -168,6 +168,15 @@ async function main() {
     // 6) Upsert OPEN deals by hubspot_id (closed history already loaded, untouched).
     let created = 0, updated = 0;
     const heldLines: string[] = [];
+    // The app owns the schema (its ensureSchema runs on boot), and this job can
+    // run before a deploy that added a column has been booted by a request. So
+    // ask once rather than assume: without pipeline_set_at this behaves exactly
+    // as it did before the hold existed, instead of failing the whole import on
+    // a column that is about to appear.
+    const hasHold = (await c.query<{ n: string }>(
+      `SELECT 1 AS n FROM information_schema.columns WHERE table_name = 'deals' AND column_name = 'pipeline_set_at' LIMIT 1`,
+    )).rows.length > 0;
+    if (!hasHold) console.log("  deals.pipeline_set_at is not there yet — not holding anything this run (the app adds it on boot).");
     for (const d of openDeals) {
       const p = d.properties;
       const si = stageMap.get(p.dealstage ?? "");
@@ -184,7 +193,9 @@ async function main() {
       // Only touch a deal if it's new, or the existing one is still OPEN — never
       // reopen or overwrite a deal already marked won/lost in the app.
       const existing = await c.query<{ id: string; status: string; pipeline_set_at: Date | null; pipeline_set_by: string | null }>(
-        `SELECT id, status, pipeline_set_at, pipeline_set_by FROM deals WHERE hubspot_id = $1 LIMIT 1`,
+        hasHold
+          ? `SELECT id, status, pipeline_set_at, pipeline_set_by FROM deals WHERE hubspot_id = $1 LIMIT 1`
+          : `SELECT id, status, NULL::timestamptz AS pipeline_set_at, NULL::text AS pipeline_set_by FROM deals WHERE hubspot_id = $1 LIMIT 1`,
         [d.id],
       );
       if (existing.rows[0]) {
@@ -207,13 +218,16 @@ async function main() {
         // last-contacted keep refreshing on a held deal.
         const held = existing.rows[0].pipeline_set_at !== null;
         await c.query(
-          `UPDATE deals SET name=$1, company_id=COALESCE($2, company_id),
-             stage        = CASE WHEN pipeline_set_at IS NULL THEN $3 ELSE stage END,
-             status='open',
-             amount_cents = CASE WHEN pipeline_set_at IS NULL THEN $4 ELSE amount_cents END,
-             close_date   = CASE WHEN pipeline_set_at IS NULL THEN $5 ELSE close_date END,
-             owner_name   = CASE WHEN pipeline_set_at IS NULL THEN $6 ELSE owner_name END,
-             source=COALESCE(source,'hubspot'), closed_at=NULL, last_contacted_at=$7 WHERE id=$8`,
+          hasHold
+            ? `UPDATE deals SET name=$1, company_id=COALESCE($2, company_id),
+                 stage        = CASE WHEN pipeline_set_at IS NULL THEN $3 ELSE stage END,
+                 status='open',
+                 amount_cents = CASE WHEN pipeline_set_at IS NULL THEN $4 ELSE amount_cents END,
+                 close_date   = CASE WHEN pipeline_set_at IS NULL THEN $5 ELSE close_date END,
+                 owner_name   = CASE WHEN pipeline_set_at IS NULL THEN $6 ELSE owner_name END,
+                 source=COALESCE(source,'hubspot'), closed_at=NULL, last_contacted_at=$7 WHERE id=$8`
+            : `UPDATE deals SET name=$1, company_id=COALESCE($2, company_id), stage=$3, status='open', amount_cents=$4,
+                 close_date=$5, owner_name=$6, source=COALESCE(source,'hubspot'), closed_at=NULL, last_contacted_at=$7 WHERE id=$8`,
           [name, companyId, stage, amountCents, closeDate, ownerName, lastContacted, existing.rows[0].id],
         );
         if (held) {
