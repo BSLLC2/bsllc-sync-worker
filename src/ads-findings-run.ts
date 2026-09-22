@@ -8,7 +8,7 @@ import { evaluate, ADS_RULESET_VERSION, type DerivedFinding } from "./ads/rules.
 import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
-import { upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor, clientEconomicsFor } from "./ads/store.js";
+import { upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor, clientEconomicsFor, outcomeFeedFactsFor } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 
@@ -36,6 +36,8 @@ const DIGEST_FLOOR_CENTS = 25_000;      // $250/month
 const URGENT_FLOOR_CENTS = 100_000;     // $1,000/month
 
 const usd = (cents: number) => `$${Math.round(cents / 100).toLocaleString()}`;
+/** Mirrors shared/schema.ts clientSlug(): web_inquiries is keyed by it. */
+const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
 function ninetyDayWindow(): { start: string; end: string } {
   const d = (offsetDays: number) => new Date(Date.now() - offsetDays * 86_400_000).toISOString().slice(0, 10);
@@ -64,11 +66,19 @@ async function auditOne(
   // keeping it out of the adapter keeps that file one vendor's API. Merged on
   // here so the rules see one input, which is what keeps them pure.
   const economics = await clientEconomicsFor(c, clientId, end);
-  const input = { ...platformInput, economics };
+  // And what the record already holds about those leads becoming customers —
+  // also Postgres, also nothing to do with the ad platform.
+  const outcomes = await outcomeFeedFactsFor(c, clientId, slugify(clientName), start, end);
+  const input = { ...platformInput, economics, outcomes };
   console.log(
     `  goal: ${economics.cplCeilingCents != null ? `$${(economics.cplCeilingCents / 100).toFixed(2)} cost-per-lead ceiling (${economics.cplCeilingMonth})` : "no cost-per-lead ceiling recorded"}`
     + ` · ${economics.customerValueCents != null ? `$${(economics.customerValueCents / 100).toFixed(2)} a customer` : "no customer value recorded"}`
     + ` · ${economics.closeRatePct != null ? `${economics.closeRatePct}% close rate` : "no close rate recorded"}`,
+  );
+  console.log(
+    `  outcomes: ${outcomes == null
+      ? "not gathered"
+      : `${outcomes.gclidLeadsInWindow}/${outcomes.leadsInWindow} leads carry a click id · ${outcomes.crmRowsInWindow} reached the CRM · ${outcomes.wonInWindow} won over ${outcomes.wonWindowMonths} month(s)`}`,
   );
   const t = platformInput.tracking;
   console.log(

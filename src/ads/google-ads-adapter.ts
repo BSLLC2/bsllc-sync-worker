@@ -33,6 +33,52 @@ const MATCH_TYPE: Record<string, string> = {
 };
 const matchType = (v: unknown): string => MATCH_TYPE[String(v ?? "")] ?? String(v ?? "?");
 
+/**
+ * The same indignity, for the enums the conversion-tracking reading decides on.
+ *
+ * `trackingReading` refuses to compute money when a counting action's category
+ * is a page view, and it decides that by comparing the category to Google's own
+ * word for it. Over REST that word arrives as `"3"`. A comparison against
+ * `"PAGE_VIEW"` would therefore never match, on every account, silently — the
+ * rule would read as "nothing wrong here" forever and nothing would say so.
+ * Normalising happens HERE rather than in the rules, because which shape an
+ * enum arrives in is one vendor's API and the rules are platform-neutral.
+ *
+ * Values from the read-only diagnostics that already decode them
+ * (src/dump-ads-conversions.ts, src/diagnose-och-ads.ts). A number this map
+ * does not know passes through as its own digits rather than being guessed at,
+ * and an unknown category reads as ambiguous, which is the safe direction.
+ */
+export const CONVERSION_CATEGORY: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "DEFAULT", "3": "PAGE_VIEW", "4": "PURCHASE",
+  "5": "SIGNUP", "6": "LEAD", "7": "DOWNLOAD", "8": "ADD_TO_CART", "9": "BEGIN_CHECKOUT",
+  "10": "SUBSCRIBE_PAID", "11": "PHONE_CALL_LEAD", "12": "IMPORTED_LEAD", "13": "SUBMIT_LEAD_FORM",
+  "14": "BOOK_APPOINTMENT", "15": "REQUEST_QUOTE", "16": "GET_DIRECTIONS", "17": "OUTBOUND_CLICK",
+  "18": "CONTACT", "19": "ENGAGEMENT", "20": "STORE_VISIT", "21": "STORE_SALE",
+  "22": "QUALIFIED_LEAD", "23": "CONVERTED_LEAD",
+};
+const CONVERSION_STATUS: Record<string, string> = { "2": "ENABLED", "3": "REMOVED", "4": "HIDDEN" };
+const CONVERSION_TYPE: Record<string, string> = {
+  "2": "AD_CALL", "3": "CLICK_TO_CALL", "4": "GOOGLE_PLAY_DOWNLOAD", "5": "GOOGLE_PLAY_IN_APP_PURCHASE",
+  "6": "UPLOAD_CALLS", "7": "UPLOAD_CLICKS", "8": "WEBPAGE", "9": "WEBSITE_CALL",
+  "10": "STORE_SALES_DIRECT_UPLOAD", "11": "STORE_SALES", "12": "FIREBASE_ANDROID_FIRST_OPEN",
+  "16": "GOOGLE_ANALYTICS_4_CUSTOM", "17": "GOOGLE_ANALYTICS_4_PURCHASE",
+};
+/** Only the value the tracking reading actually branches on. */
+export const TRACKING_STATUS: Record<string, string> = {
+  "2": "NOT_CONVERSION_TRACKED", "3": "CONVERSION_TRACKING_MANAGED_BY_SELF",
+  "4": "CONVERSION_TRACKING_MANAGED_BY_THIS_MANAGER", "5": "CONVERSION_TRACKING_MANAGED_BY_ANY_MANAGER",
+};
+/** A string already in Google's own words passes through untouched, so the
+ *  normalisation is safe whichever shape a future client library returns. */
+export function enumName(map: Record<string, string>, v: unknown): string | null {
+  if (v == null) return null;
+  const raw = String(v);
+  if (map[raw]) return map[raw];
+  const upper = raw.toUpperCase();
+  return Object.values(map).includes(upper) ? upper : raw;
+}
+
 /** Run a GAQL query, returning [] and logging rather than throwing — one
  *  unsupported field must not sink the whole audit. */
 async function safeQuery(customer: any, label: string, gaql: string, onLog?: (s: string) => void): Promise<any[]> {
@@ -287,24 +333,26 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     const statusRows = await safeQuery(customer, "conversion tracking status", `
       SELECT customer.id, customer.conversion_tracking_setting.conversion_tracking_status
         FROM customer LIMIT 1`, log);
-    const rawStatus = statusRows[0]?.customer?.conversion_tracking_setting?.conversion_tracking_status;
-    const status = rawStatus != null ? String(rawStatus) : null;
+    const status = enumName(TRACKING_STATUS, statusRows[0]?.customer?.conversion_tracking_setting?.conversion_tracking_status);
 
     const map = (r: any, recorded: number | null): ConversionActionRow => ({
       id: String(r.conversion_action?.id ?? ""),
       name: String(r.conversion_action?.name ?? ""),
-      status: r.conversion_action?.status != null ? String(r.conversion_action.status) : null,
-      category: r.conversion_action?.category != null ? String(r.conversion_action.category) : null,
-      actionType: r.conversion_action?.type != null ? String(r.conversion_action.type) : null,
+      status: enumName(CONVERSION_STATUS, r.conversion_action?.status),
+      category: enumName(CONVERSION_CATEGORY, r.conversion_action?.category),
+      actionType: enumName(CONVERSION_TYPE, r.conversion_action?.type),
       primaryForGoal: r.conversion_action?.primary_for_goal != null
         ? Boolean(r.conversion_action.primary_for_goal) : null,
+      countsIntoConversionsColumn: r.conversion_action?.include_in_conversions_metric != null
+        ? Boolean(r.conversion_action.include_in_conversions_metric) : null,
       conversionsInWindow: recorded,
     });
 
     const withMetrics = await tryQuery(customer, "conversion actions (with metrics)", `
       SELECT conversion_action.id, conversion_action.name, conversion_action.status,
              conversion_action.category, conversion_action.type,
-             conversion_action.primary_for_goal, metrics.all_conversions
+             conversion_action.primary_for_goal, conversion_action.include_in_conversions_metric,
+             metrics.all_conversions
         FROM conversion_action
        WHERE segments.date BETWEEN '${ctx.windowStart}' AND '${ctx.windowEnd}'`, log);
 
@@ -324,7 +372,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     const settingsOnly = await tryQuery(customer, "conversion actions (settings only)", `
       SELECT conversion_action.id, conversion_action.name, conversion_action.status,
              conversion_action.category, conversion_action.type,
-             conversion_action.primary_for_goal
+             conversion_action.primary_for_goal, conversion_action.include_in_conversions_metric
         FROM conversion_action`, log);
 
     // Null all the way through where nothing came back. An empty array here

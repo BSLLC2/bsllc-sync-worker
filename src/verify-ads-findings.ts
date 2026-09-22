@@ -2,11 +2,13 @@
 import "dotenv/config";
 import {
   evaluate, evidenceHash, materiallyChanged, trackingReading, costTargets, governingTarget,
+  outcomeReadiness, MIN_MONTHLY_OUTCOMES_FOR_BIDDING,
   ADS_RULESET_VERSION, THRESHOLDS,
   type AuditInput, type TrackingFacts, type ClientEconomics,
 } from "./ads/rules.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { applyChangeSet, rollbackChangeSet, type ChangeSet, type PriorValue } from "./apply-ads-changes.js";
+import { enumName, CONVERSION_CATEGORY, TRACKING_STATUS } from "./ads/google-ads-adapter.js";
 
 /**
  * Verifies the ads findings pipeline WITHOUT touching a live ad account.
@@ -107,8 +109,8 @@ const FIXTURE: AuditInput = {
   tracking: {
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
     actions: [
-      { id: "500", name: "Contact form", status: "ENABLED", category: "SUBMIT_LEAD_FORM", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: 40 },
-      { id: "501", name: "Newsletter signup", status: "ENABLED", category: "ENGAGEMENT", actionType: "WEBPAGE", primaryForGoal: false, conversionsInWindow: 310 },
+      { id: "500", name: "Contact form", status: "ENABLED", category: "SUBMIT_LEAD_FORM", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 40 },
+      { id: "501", name: "Newsletter signup", status: "ENABLED", category: "ENGAGEMENT", actionType: "WEBPAGE", primaryForGoal: false, countsIntoConversionsColumn: false, conversionsInWindow: 310 },
     ],
   },
   // What the client has recorded about what a customer is worth. A $95
@@ -350,7 +352,7 @@ async function main() {
 
   const noneEnabled = trackingReading({
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
-    actions: [{ id: "1", name: "Old form", status: "REMOVED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: 0 }],
+    actions: [{ id: "1", name: "Old form", status: "REMOVED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 0 }],
   }, totals);
   ok("an account whose only conversion action is switched off counts nothing",
     noneEnabled.countsAnything === "no" && noneEnabled.defects[0]?.key === "not_tracked");
@@ -358,8 +360,8 @@ async function main() {
   const noPrimary = trackingReading({
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
     actions: [
-      { id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: false, conversionsInWindow: 120 },
-      { id: "2", name: "Phone click", status: "ENABLED", category: "PHONE_CALL_LEAD", actionType: "WEBPAGE", primaryForGoal: false, conversionsInWindow: 60 },
+      { id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: false, countsIntoConversionsColumn: false, conversionsInWindow: 120 },
+      { id: "2", name: "Phone click", status: "ENABLED", category: "PHONE_CALL_LEAD", actionType: "WEBPAGE", primaryForGoal: false, countsIntoConversionsColumn: false, conversionsInWindow: 60 },
     ],
   }, totals);
   ok("actions that all count as secondary leave the conversion column at nought",
@@ -368,14 +370,14 @@ async function main() {
 
   const silent = trackingReading({
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
-    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: 0 }],
+    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 0 }],
   }, totals);
   ok("a counting action that has recorded nothing on real spend reads as a broken tag",
     silent.countsAnything === "no" && silent.defects[0]?.key === "primary_silent");
 
   const quiet = trackingReading({
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
-    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: 0 }],
+    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 0 }],
   }, { costMicros: 20_000_000, clicks: 40, conversions: 0 });
   ok("…but the same silence under the spend floor is unknown, not a defect",
     quiet.countsAnything === "unknown" && quiet.defects.length === 0 && quiet.unread.length > 0,
@@ -383,7 +385,7 @@ async function main() {
 
   const pageViews = trackingReading({
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
-    actions: [{ id: "1", name: "Thank you page", status: "ENABLED", category: "PAGE_VIEW", actionType: "GOOGLE_ANALYTICS_4_CUSTOM", primaryForGoal: true, conversionsInWindow: 900 }],
+    actions: [{ id: "1", name: "Thank you page", status: "ENABLED", category: "PAGE_VIEW", actionType: "GOOGLE_ANALYTICS_4_CUSTOM", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 900 }],
   }, totals);
   ok("a column counting page views records something but records no outcome",
     pageViews.countsAnything === "yes" && pageViews.countsOutcomes === "no"
@@ -392,7 +394,7 @@ async function main() {
 
   const everyEvent = trackingReading({
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
-    actions: [{ id: "1", name: "GA4 import", status: "ENABLED", category: "DEFAULT", actionType: "GOOGLE_ANALYTICS_4_CUSTOM", primaryForGoal: true, conversionsInWindow: 5_000 }],
+    actions: [{ id: "1", name: "GA4 import", status: "ENABLED", category: "DEFAULT", actionType: "GOOGLE_ANALYTICS_4_CUSTOM", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 5_000 }],
   }, { costMicros: 900_000_000, clicks: 2_000, conversions: 5_000 });
   ok("more conversions than clicks is read as a column counting events",
     everyEvent.countsOutcomes === "no" && everyEvent.defects[0]?.key === "implausible_rate",
@@ -405,7 +407,7 @@ async function main() {
 
   const countsUnread = trackingReading({
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
-    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, conversionsInWindow: null }],
+    actions: [{ id: "1", name: "Contact form", status: "ENABLED", category: "LEAD", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: null }],
   }, totals);
   ok("an action whose recorded count was not read is unknown, never a silent tag",
     countsUnread.countsAnything === "unknown" && countsUnread.defects.length === 0,
@@ -510,6 +512,31 @@ async function main() {
     noGoal.every((f) => f.findingType !== "cpa_above_target"),
     "a target nobody stated is never invented");
 
+  // ── 9b. The enum shape, which is where this rule would have died quietly ──
+  // Google returns enums as INTEGERS over REST. `trackingReading` decides
+  // whether to refuse a money figure by comparing a category to Google's own
+  // word for it, so on a live account the category would have arrived as "3"
+  // and the comparison would never have matched — on every account, silently,
+  // forever. The adapter normalises; these checks pin that it does, and that
+  // the rules are strict enough for the normalisation to be load-bearing.
+  console.log("\n9b. Google's integer enums are normalised before the rules see them");
+  ok("the category integer is decoded to the platform's own word",
+    enumName(CONVERSION_CATEGORY, 3) === "PAGE_VIEW" && enumName(CONVERSION_CATEGORY, "3") === "PAGE_VIEW");
+  ok("a word that already arrived as a word passes through untouched",
+    enumName(CONVERSION_CATEGORY, "SUBMIT_LEAD_FORM") === "SUBMIT_LEAD_FORM"
+      && enumName(TRACKING_STATUS, "NOT_CONVERSION_TRACKED") === "NOT_CONVERSION_TRACKED");
+  ok("an integer nothing knows is passed through rather than guessed at",
+    enumName(CONVERSION_CATEGORY, 99) === "99", "an unknown category reads as ambiguous, which is the safe direction");
+  ok("nothing is decoded out of nothing", enumName(CONVERSION_CATEGORY, null) === null);
+  const rawRow = { id: "1", name: "Contact form", actionType: "8", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 40 };
+  const rawEnum = trackingReading(
+    { status: "3", actions: [{ ...rawRow, status: "2", category: "13" }] }, totals);
+  const decoded = trackingReading(
+    { status: enumName(TRACKING_STATUS, "3"), actions: [{ ...rawRow, status: enumName({ "2": "ENABLED" }, "2"), category: enumName(CONVERSION_CATEGORY, "13") }] }, totals);
+  ok("the same healthy account reads as BROKEN if the enums reach the rules undecoded",
+    rawEnum.countsAnything === "no" && decoded.countsAnything === "yes" && decoded.countsOutcomes === "yes",
+    "an ENABLED action arrives as \"2\", reads as not-enabled, and the engine declares a working account untracked — this check fails loudly if anybody routes raw API rows straight into the engine");
+
   // ── 10. An account-level row needs a reason to exist ──────────────────────
   console.log("\n10. Account-level rows carry a spend floor");
   const parked: AuditInput = {
@@ -522,6 +549,88 @@ async function main() {
     `floor ${usd(THRESHOLDS.accountMinSpendMicros)}/window — three rows on every mapped account is how a class of finding gets scrolled past`);
   ok("the same three rows DO appear on the account that is actually spending",
     ["low_quality_score", "thin_ad_group", "weak_ad_strength"].every((t) => a.some((f) => f.findingType === t)));
+
+
+  // ── 11. Does anything tell this account which leads became customers? ─────
+  // This is the reading that answers the question the OCH offline-conversion
+  // upload was the answer to, and it answers it per client rather than by
+  // somebody working it out by hand. It says what an account COULD support. It
+  // never says to change what a bidding strategy optimises toward.
+  console.log("\n11. Closed outcomes: what each account could feed back, and what it could not");
+
+  const noClicks = outcomeReadiness({
+    leadsInWindow: 64, gclidLeadsInWindow: 0, newestGclidLeadOn: null,
+    crmRowsInWindow: 0, wonInWindow: 0, wonWindowMonths: 6,
+    measuredWonValueCents: null, uploadsEver: 0, newestUploadOn: null,
+  }, FIXTURE.economics);
+  ok("an account capturing no click id at all is the first blocker, before anything else",
+    noClicks?.verdict === "no_click_ids" && noClicks.blockers.length > 0,
+    "this is a live state on a real account, not a hypothetical");
+  ok("…and it says a click id not captured today cannot be recovered later",
+    /cannot be recovered/.test(noClicks?.blockers[0] ?? ""));
+
+  const noOutcomes = outcomeReadiness({
+    leadsInWindow: 64, gclidLeadsInWindow: 51, newestGclidLeadOn: "2026-09-18",
+    crmRowsInWindow: 0, wonInWindow: 0, wonWindowMonths: 6,
+    measuredWonValueCents: null, uploadsEver: 0, newestUploadOn: null,
+  }, FIXTURE.economics);
+  ok("clicks arriving with nothing closing the loop is its own verdict",
+    noOutcomes?.verdict === "no_outcomes");
+
+  // THE CASE THAT MATTERS. Small numbers of closed outcomes a month is the
+  // ordinary shape of this book, and it is the shape a bidding strategy cannot
+  // learn from.
+  const thin = outcomeReadiness({
+    leadsInWindow: 64, gclidLeadsInWindow: 51, newestGclidLeadOn: "2026-09-18",
+    crmRowsInWindow: 22, wonInWindow: 18, wonWindowMonths: 6,
+    measuredWonValueCents: 320_000, uploadsEver: 0, newestUploadOn: null,
+  }, FIXTURE.economics);
+  ok("three closed outcomes a month is read as too thin to bid on, not as a success",
+    thin?.verdict === "too_thin_to_bid" && (thin.outcomesPerMonth ?? 0) < MIN_MONTHLY_OUTCOMES_FOR_BIDDING,
+    `${(thin?.outcomesPerMonth ?? 0).toFixed(1)}/month against a ${MIN_MONTHLY_OUTCOMES_FOR_BIDDING}/month convention`);
+
+  const thick = outcomeReadiness({
+    leadsInWindow: 900, gclidLeadsInWindow: 700, newestGclidLeadOn: "2026-09-18",
+    crmRowsInWindow: 400, wonInWindow: 300, wonWindowMonths: 6,
+    measuredWonValueCents: 120_000, uploadsEver: 0, newestUploadOn: null,
+  }, FIXTURE.economics);
+  ok("an account with real volume reads as a decision, never as a recommendation",
+    thick?.verdict === "enough_to_consider");
+
+  const noValue = outcomeReadiness({
+    leadsInWindow: 900, gclidLeadsInWindow: 700, newestGclidLeadOn: "2026-09-18",
+    crmRowsInWindow: 400, wonInWindow: 300, wonWindowMonths: 6,
+    measuredWonValueCents: null, uploadsEver: 0, newestUploadOn: null,
+  }, { ...FIXTURE.economics!, customerValueFromClient: false });
+  ok("a value nobody measured is a blocker, and the figure on the client record does not fill it",
+    noValue?.measuredValueCents === null
+      && noValue.blockers.some((b) => /assumed value|ours, not theirs/.test(b)),
+    "sending an assumed value teaches the platform a preference nobody measured");
+
+  ok("nothing was gathered reads as nothing gathered, never as an account with no outcomes",
+    outcomeReadiness(null, FIXTURE.economics) === null);
+
+  const withOutcomes = evaluate({
+    ...FIXTURE,
+    outcomes: {
+      leadsInWindow: 64, gclidLeadsInWindow: 51, newestGclidLeadOn: "2026-09-18",
+      crmRowsInWindow: 22, wonInWindow: 18, wonWindowMonths: 6,
+      measuredWonValueCents: 320_000, uploadsEver: 0, newestUploadOn: null,
+    },
+  });
+  const feedback = withOutcomes.find((f) => f.findingType === "outcome_feedback_gap");
+  ok("the account gets one row saying what it could feed back", Boolean(feedback), feedback?.title ?? "none");
+  ok("…and the row proposes nothing and claims no money",
+    feedback?.changePayload === null && feedback?.estImpactCents === 0 && feedback?.applicability === "vendor",
+    "there is no guarded path for changing what an account bids toward, and there should not be");
+  ok("…and it never tells anybody to point bidding at it",
+    !/switch|point bidding|use it as|set it as the/i.test(`${feedback?.title} ${feedback?.summary}`),
+    "that was tried on the one account with the data and was rolled back");
+  ok("…and the measured value is stated as context, never multiplied by anything",
+    /measured rather than assumed/.test(feedback?.impactAssumption ?? "")
+      && /would be a claim/.test(feedback?.impactAssumption ?? ""));
+  ok("no row at all where nothing was gathered",
+    evaluate(FIXTURE).every((f) => f.findingType !== "outcome_feedback_gap"));
 
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

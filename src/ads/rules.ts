@@ -184,9 +184,18 @@ export interface ConversionActionRow {
   category: string | null;
   /** WEBPAGE, GOOGLE_ANALYTICS_4_CUSTOM, UPLOAD_CLICKS… verbatim. */
   actionType: string | null;
-  /** Does this action count into the platform's headline `conversions` column?
-   *  Null where the platform does not report it — never read as false. */
+  /** Is this action marked as counting toward the account's goal? Null where
+   *  the platform does not report it — never read as false. */
   primaryForGoal: boolean | null;
+  /**
+   * Does this action actually count into the headline `conversions` column?
+   * Google reports this directly (`conversion_action.include_in_conversions_metric`)
+   * and it is the better answer: an action can be marked primary and still be
+   * excluded, and the goals model can exclude one that nothing on the action
+   * itself says anything about. Preferred over `primaryForGoal` where both are
+   * reported. Null = not reported, never false.
+   */
+  countsIntoConversionsColumn: boolean | null;
   /**
    * Conversions attributed to this action over the evidence window.
    * NULL MEANS THE COUNT WAS NOT READ, never nought. The whole `primary_silent`
@@ -363,11 +372,16 @@ export function trackingReading(
   // headline `conversions` column. Null means the platform did not report it,
   // which is not the same as false — so an account where nothing reports it is
   // unknown rather than broken.
-  const reported = enabled.filter((a) => a.primaryForGoal != null);
+  /** The platform's direct answer wherever it gave one, the goal flag otherwise.
+   *  `include_in_conversions_metric` is what actually decides the column; an
+   *  action can be primary and still excluded from it. */
+  const counts = (a: ConversionActionRow): boolean | null =>
+    a.countsIntoConversionsColumn != null ? a.countsIntoConversionsColumn : a.primaryForGoal;
+  const reported = enabled.filter((a) => counts(a) != null);
   if (reported.length === 0) {
     unread.push("the platform did not say which conversion actions count toward the headline conversion column, so nothing here can check that one does");
   }
-  const primary = enabled.filter((a) => a.primaryForGoal === true);
+  const primary = enabled.filter((a) => counts(a) === true);
 
   if (reported.length > 0 && primary.length === 0) {
     defects.push({
@@ -476,6 +490,160 @@ export function trackingCaveat(t: TrackingReading): string {
   return "the conversion column could not be checked";
 }
 
+
+// ── Can this account learn from its own closed outcomes at all? ─────────────
+/**
+ * What the record already holds about leads becoming customers.
+ *
+ * All of it is in Postgres and none of it is the ad platform's: web leads and
+ * their click ids (`web_inquiries`), what the client's CRM did with them
+ * (`lead_attributions`, written by match-web-leads-to-crm), and what has
+ * already been sent back to a platform (`offline_conversion_uploads`).
+ *
+ * Every count is over a stated window and a null is "not read", never nought.
+ */
+export interface OutcomeFeedFacts {
+  /** Leads captured in the window, and how many carry a Google click id. */
+  leadsInWindow: number;
+  gclidLeadsInWindow: number;
+  /** The newest lead carrying a click id, YYYY-MM-DD. Null = there is none. */
+  newestGclidLeadOn: string | null;
+  /** Does anything tie this client's CRM records to leads we captured? */
+  crmRowsInWindow: number;
+  /** Of those, how many the CRM has closed as won, and over how many months. */
+  wonInWindow: number;
+  wonWindowMonths: number;
+  /**
+   * The average value of those won records, from the CRM's own amounts.
+   * MEASURED. Null where the CRM recorded no amount — and it is never filled in
+   * from `clients.customer_value_cents`, which on at least one account here is
+   * explicitly our assumption rather than the client's figure.
+   */
+  measuredWonValueCents: number | null;
+  /** Have we ever sent an outcome back to a platform for this client? */
+  uploadsEver: number;
+  newestUploadOn: string | null;
+}
+
+/**
+ * THE VOLUME BAR, AND IT IS THE WHOLE ARGUMENT.
+ *
+ * Google's Smart Bidding learns from a conversion action's own volume. The
+ * figure quoted everywhere for a target-cost strategy is about 30 conversions
+ * in 30 days, and about 50 for a target-return one. **This is a widely cited
+ * convention and not something verified here**, which is why it is named on
+ * every sentence that leans on it rather than presented as a fact about the
+ * platform.
+ *
+ * It matters because a CLOSED OUTCOME is a small number on this book. An
+ * account closing a handful a month cannot hand a bidding strategy enough to
+ * learn from, and pointing one at a sparse, months-lagging signal retrains it
+ * on almost nothing. That is not a per-client quirk; it is arithmetic, and it
+ * is the reason this reading exists.
+ */
+export const MIN_MONTHLY_OUTCOMES_FOR_BIDDING = 30;
+
+export type OutcomeReadinessVerdict =
+  /** The click id is not being captured, so nothing can be tied back at all. */
+  | "no_click_ids"
+  /** No CRM outcome reaches this client's record, so there is nothing to send. */
+  | "no_outcomes"
+  /** Both exist, and there are far too few closed outcomes to bid on. */
+  | "too_thin_to_bid"
+  /** Both exist at volume. Still a decision, never a recommendation. */
+  | "enough_to_consider";
+
+export interface OutcomeReadiness {
+  verdict: OutcomeReadinessVerdict;
+  /** Closed outcomes a month, from the CRM's own rows. Null where none. */
+  outcomesPerMonth: number | null;
+  /** What one is worth, measured from the CRM. Null = nobody has measured one. */
+  measuredValueCents: number | null;
+  /** What is missing, in order, each one a thing somebody can act on. */
+  blockers: string[];
+  lines: string[];
+  metrics: Record<string, number>;
+}
+
+/**
+ * Pure. Facts in, one reading out.
+ *
+ * It answers "could this account feed its closed outcomes back to the
+ * platform", and it deliberately does NOT answer "should it". Nothing here
+ * recommends changing what a bidding strategy optimises toward: that has been
+ * tried on the one account that had the data and was rolled back, and a rule
+ * that proposed it across a book of low-volume accounts would repeat that at
+ * scale.
+ */
+export function outcomeReadiness(
+  facts: OutcomeFeedFacts | null | undefined,
+  economics: ClientEconomics | null | undefined,
+): OutcomeReadiness | null {
+  if (!facts) return null;
+  const f = facts;
+  const months = Math.max(1, f.wonWindowMonths);
+  const perMonth = f.wonInWindow > 0 ? f.wonInWindow / months : null;
+  const blockers: string[] = [];
+  const lines: string[] = [];
+
+  const clickShare = f.leadsInWindow > 0 ? f.gclidLeadsInWindow / f.leadsInWindow : 0;
+  lines.push(f.gclidLeadsInWindow > 0
+    ? `${f.gclidLeadsInWindow} of ${f.leadsInWindow} leads in the window carry a Google click id${f.newestGclidLeadOn ? `, the newest on ${f.newestGclidLeadOn}` : ""}`
+    : `Not one of the ${f.leadsInWindow} leads in the window carries a Google click id`);
+  lines.push(f.crmRowsInWindow > 0
+    ? `${f.crmRowsInWindow} of them reached the client's CRM, and ${f.wonInWindow} closed as won over ${months} month(s)`
+    : "None of them reaches a CRM record we can read");
+  lines.push(f.measuredWonValueCents != null
+    ? `Those wins average $${(f.measuredWonValueCents / 100).toFixed(2)} on the CRM's own amounts`
+    : "The CRM records no amount on those wins, so nothing here has measured what one is worth");
+  if (f.uploadsEver > 0) {
+    lines.push(`${f.uploadsEver} outcome(s) have already been sent back to a platform for this client${f.newestUploadOn ? `, the newest on ${f.newestUploadOn}` : ""}`);
+  }
+
+  if (f.gclidLeadsInWindow === 0) {
+    blockers.push("Auto-tagging or the form is not passing the Google click id through to the lead. Nothing can tie a customer back to a click until it does, and a click id not captured today cannot be recovered later.");
+    return {
+      verdict: "no_click_ids", outcomesPerMonth: perMonth, measuredValueCents: f.measuredWonValueCents,
+      blockers, lines,
+      metrics: { leads: f.leadsInWindow, gclidLeads: 0, crmRows: f.crmRowsInWindow, won: f.wonInWindow },
+    };
+  }
+  if (clickShare < 0.25) {
+    blockers.push(`Only ${Math.round(clickShare * 100)}% of leads carry a click id, so at best that share of outcomes could ever be tied back.`);
+  }
+
+  if (f.crmRowsInWindow === 0 || f.wonInWindow === 0) {
+    blockers.push(f.crmRowsInWindow === 0
+      ? "No CRM record on this client is tied to a lead we captured, so there is no closed outcome to send back. Either the CRM is not connected, or the matcher is finding nothing."
+      : "The CRM holds matched leads and has closed none of them as won in the window, so there is nothing to send back yet.");
+    return {
+      verdict: "no_outcomes", outcomesPerMonth: perMonth, measuredValueCents: f.measuredWonValueCents,
+      blockers, lines,
+      metrics: { leads: f.leadsInWindow, gclidLeads: f.gclidLeadsInWindow, crmRows: f.crmRowsInWindow, won: f.wonInWindow },
+    };
+  }
+
+  if (f.measuredWonValueCents == null) {
+    blockers.push("Nothing has measured what one of these outcomes is worth. A figure on the client record is not a measurement unless the client supplied it"
+      + `${economics && economics.customerValueCents != null && !economics.customerValueFromClient ? " — and the one recorded here is ours, not theirs" : ""}`
+      + ", and sending an assumed value teaches the platform a preference nobody measured.");
+  }
+
+  const thin = (perMonth ?? 0) < MIN_MONTHLY_OUTCOMES_FOR_BIDDING;
+  return {
+    verdict: thin ? "too_thin_to_bid" : "enough_to_consider",
+    outcomesPerMonth: perMonth,
+    measuredValueCents: f.measuredWonValueCents,
+    blockers,
+    lines,
+    metrics: {
+      leads: f.leadsInWindow, gclidLeads: f.gclidLeadsInWindow,
+      crmRows: f.crmRowsInWindow, won: f.wonInWindow,
+      outcomesPerMonth: perMonth ?? 0,
+    },
+  };
+}
+
 // ── What a conversion is allowed to cost ────────────────────────────────────
 /**
  * Two kinds of target, never blended and never summed.
@@ -579,6 +747,12 @@ export interface AuditInput {
    * is held back rather than made on a column nobody checked.
    */
   tracking?: TrackingFacts | null;
+  /**
+   * What the record holds about this client's leads becoming customers. Read
+   * from Postgres by the caller, not from the ad platform. Absent means it was
+   * not gathered, never that there are none.
+   */
+  outcomes?: OutcomeFeedFacts | null;
   /**
    * What the client has recorded about what a customer is worth. Absent means
    * nobody has answered; it is never filled in with an assumption.
@@ -1225,5 +1399,65 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       guardNote: "Nothing to apply. Read the account's conversion settings and this row stops being produced.",
     });
   }
+
+  // ── 6. Does anything tell this account which leads became customers? ──────
+  // The account buys form fills, and the platform only ever learns which
+  // clicks produced one. Which of those became a customer is in the client's
+  // CRM and nothing sends it back. This row says whether it COULD be sent, per
+  // client, from data already here — and it deliberately stops short of saying
+  // it should be. See the OCH note in docs/agent-reports/ads-revenue-insights.md.
+  const readiness = outcomeReadiness(input.outcomes, input.economics);
+  if (readiness && accountWorthARow) {
+    const perMonth = readiness.outcomesPerMonth;
+    const thin = readiness.verdict === "too_thin_to_bid";
+    out.push({
+      entityType: "account", entityId: `${input.accountId}:outcome_feedback`, entityName: "Closed outcomes",
+      findingType: "outcome_feedback_gap",
+      severity: readiness.verdict === "no_click_ids" ? "high" : "medium",
+      riskLevel: "medium",
+      // There is no guarded path for writing a conversion action or uploading a
+      // conversion, and there should not be one: it changes what the account
+      // optimises toward, unattended, on a live account.
+      applicability: "vendor",
+      title: readiness.verdict === "no_click_ids"
+        ? "No lead on this account carries a Google click id, so no customer can ever be traced back to a click"
+        : readiness.verdict === "no_outcomes"
+          ? "Clicks are being captured and nothing records which of them became a customer"
+          : thin
+            ? `This account closes about ${(perMonth ?? 0).toFixed(1)} outcome(s) a month — too few for a platform to bid on`
+            : `This account closes about ${(perMonth ?? 0).toFixed(1)} outcomes a month, which is enough volume to be a decision`,
+      summary: readiness.verdict === "no_click_ids"
+        ? "The platform can only ever learn from clicks it can identify. A click id that is not captured today cannot be recovered later, so every day this runs is a day of outcomes that can never be tied back to the campaign that bought them."
+        : readiness.verdict === "no_outcomes"
+          ? "The click ids are arriving and nothing on the other end closes the loop. Until a CRM outcome reaches a lead we captured, the only thing anyone here can say about a campaign is how many forms it filled in."
+          : thin
+            ? "There is a real chain here from click to closed customer, and it is far too thin to be what a bidding strategy learns from: a strategy pointed at a signal this sparse retrains on almost nothing. "
+              + `What it IS enough for is our own decisions — which campaigns to fund, which terms to cut — made weekly by a person, which needs no learning volume at all. The volume figure, not a recommendation, is the finding.`
+            : "The chain from click to closed customer is complete and has volume behind it. Whether the platform should be bidding on it is a decision for a person and is recorded nowhere yet; this row exists so the decision can be made on numbers rather than on an assumption.",
+      evidence: {
+        metrics: readiness.metrics,
+        ...win,
+        lines: [
+          ...readiness.lines,
+          ...readiness.blockers,
+          ...(perMonth != null
+            ? [`About ${perMonth.toFixed(1)} closed outcome(s) a month, against the ${MIN_MONTHLY_OUTCOMES_FOR_BIDDING} a month a bidding strategy is widely said to need — a convention, not something checked here`]
+            : []),
+        ],
+      },
+      // No dollar figure, deliberately. What this is worth is the difference
+      // between the decisions taken on form fills and the ones that would be
+      // taken on customers, and nothing here can price a decision nobody made.
+      estImpactCents: 0,
+      impactUnit: "usd_month",
+      impactAssumption: readiness.measuredValueCents != null
+        ? `No figure claimed. The CRM's own amounts put one of these outcomes at about $${(readiness.measuredValueCents / 100).toFixed(2)}, measured rather than assumed, and it is stated here for context only — `
+          + `multiplying it by anything would be a claim about decisions nobody has taken.`
+        : "No figure claimed, and none can be: nothing has measured what one of these outcomes is worth. A value on the client record is not a measurement unless the client supplied it.",
+      changePayload: null,
+      guardNote: "Nothing here is applied. Uploading an outcome, or changing what a conversion action does, is outside the guarded path on purpose — it changes what a live account bids toward.",
+    });
+  }
+
   return out.sort((a, b) => b.estImpactCents - a.estImpactCents);
 }

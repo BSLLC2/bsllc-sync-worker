@@ -23,7 +23,7 @@
 
 import type pg from "pg";
 import { randomUUID } from "node:crypto";
-import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics } from "./rules.js";
+import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics, type OutcomeFeedFacts } from "./rules.js";
 
 export type Actor = string;
 
@@ -399,4 +399,83 @@ export async function clientEconomicsFor(
   }
 
   return out;
+}
+
+/**
+ * What the record already holds about this client's leads becoming customers.
+ *
+ * Every row read here is one this system already writes: `web_inquiries` (the
+ * leads and their click ids), `lead_attributions` (what the client's CRM did
+ * with them, written daily by match-web-leads-to-crm) and
+ * `offline_conversion_uploads` (what has already been sent back to a platform).
+ * No ad platform is contacted and nothing is written.
+ *
+ * THE WON WINDOW IS DELIBERATELY LONGER THAN THE EVIDENCE WINDOW. A deal closes
+ * months after the click, so counting wins over the same 90 days the campaign
+ * metrics cover would read a healthy account as having none. Six months is used
+ * and the month count travels with the number so the rate can be stated rather
+ * than implied.
+ *
+ * Sample and suspected-sample rows are excluded on the same rule the
+ * attribution chain uses: `is_sample` is confirmed demo data and never counts.
+ */
+export async function outcomeFeedFactsFor(
+  c: pg.Client,
+  clientId: string,
+  clientSlug: string,
+  windowStart: string,
+  windowEnd: string,
+): Promise<OutcomeFeedFacts | null> {
+  const WON_WINDOW_MONTHS = 6;
+  try {
+    const { rows: leadRows } = await c.query<{ leads: string; gclid_leads: string; newest: string | null }>(
+      `SELECT count(*)::text AS leads,
+              count(*) FILTER (WHERE nullif(btrim(gclid), '') IS NOT NULL)::text AS gclid_leads,
+              max(submitted_at) FILTER (WHERE nullif(btrim(gclid), '') IS NOT NULL)::date::text AS newest
+         FROM web_inquiries
+        WHERE client_slug = $1
+          AND submitted_at >= $2::date AND submitted_at < ($3::date + 1)
+          AND status NOT IN ('junk', 'internal_test')`,
+      [clientSlug, windowStart, windowEnd],
+    );
+    const l = leadRows[0];
+
+    const { rows: crmRows } = await c.query<{ matched: string; won: string; avg_value: string | null }>(
+      `SELECT count(*) FILTER (WHERE web_inquiry_at >= $2)::text AS matched,
+              count(*) FILTER (WHERE stage = 'won' AND won_on >= $3)::text AS won,
+              avg(value_cents) FILTER (WHERE stage = 'won' AND won_on >= $3 AND value_cents IS NOT NULL)::text AS avg_value
+         FROM lead_attributions
+        WHERE client_id = $1 AND web_inquiry_id IS NOT NULL AND NOT is_sample`,
+      [
+        clientId,
+        windowStart,
+        new Date(Date.now() - WON_WINDOW_MONTHS * 30 * 86_400_000).toISOString().slice(0, 10),
+      ],
+    );
+    const r = crmRows[0];
+
+    const { rows: upRows } = await c.query<{ n: string; newest: string | null }>(
+      `SELECT count(*)::text AS n, max(uploaded_at)::date::text AS newest
+         FROM offline_conversion_uploads WHERE client_slug = $1`,
+      [clientSlug],
+    );
+    const u = upRows[0];
+
+    const avg = r?.avg_value != null ? Math.round(Number(r.avg_value)) : null;
+    return {
+      leadsInWindow: Number(l?.leads ?? 0),
+      gclidLeadsInWindow: Number(l?.gclid_leads ?? 0),
+      newestGclidLeadOn: l?.newest ?? null,
+      crmRowsInWindow: Number(r?.matched ?? 0),
+      wonInWindow: Number(r?.won ?? 0),
+      wonWindowMonths: WON_WINDOW_MONTHS,
+      measuredWonValueCents: Number.isFinite(avg as number) ? avg : null,
+      uploadsEver: Number(u?.n ?? 0),
+      newestUploadOn: u?.newest ?? null,
+    };
+  } catch {
+    // A table this deploy does not have yet reads as "not gathered", which the
+    // reading treats as unknown rather than as an account with no outcomes.
+    return null;
+  }
 }
