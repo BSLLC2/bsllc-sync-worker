@@ -78,15 +78,15 @@ export const ADS_JOBS: AdsJobSpec[] = [
     quiet: "An account nobody touched genuinely produces no new rows, and a second run inside the same window produces none either — the note carries accounts/read/events counts so both read as what they are. What this job must never do is stop: the platform keeps change_event for 30 DAYS and then deletes it, so a silent stop is account history being lost rather than a stale reading.",
     fix: "Open bsllc-sync-worker → Actions → \"Ads change history capture (read-only)\" and re-run it. It is a SELECT against change_event and writes nothing to any ad account. Fix it the same day: every day it is down is a day of change history that cannot be recovered afterwards, and while it is down the settle-window guard in the dashboard cannot see a change a subcontractor made by hand.",
   },
-  {
-    job: "ads_vendor_briefs",
-    workflow: "ads-vendor-briefs.yml",
-    label: "Ads vendor briefs",
-    cadence: "the 1st and 15th, 07:10 UTC",
-    quiet: "No brief is produced when no client has an open vendor finding. The note says how many clients were considered.",
-    fix: "Open bsllc-sync-worker → Actions → \"Ads — vendor briefs\" and re-run it. It touches no ad platform at all — it reads findings already in Postgres and files a task per brief — so a failure here is a database or a task-creation problem, and the last run's error line names which.",
-  },
 ];
+
+// `ads_vendor_briefs` is deliberately NOT in this list any more (2026-09-22).
+// The generator moved into the dashboard app, where it is a Vercel cron
+// (`GET /api/cron/ads-vendor-briefs`) that stamps the same heartbeat key — it
+// only ever read `ads_findings` out of Postgres and wrote `ads_briefs` and a
+// task, so it never needed to be here. This file reads WORKER jobs; the app's
+// own Data health page reads that heartbeat through its own JOB_SLA_HOURS
+// entry, which is unchanged.
 
 export const ADS_JOB_NAMES = ADS_JOBS.map((j) => j.job);
 
