@@ -24,6 +24,21 @@ function env(n: string): string { const v = process.env[n]; if (!v?.trim()) thro
 
 interface TokenData { refresh_token: string; realm_id?: string; }
 
+/** One billed line on an invoice — which SERVICE was sold, not just what the
+ *  invoice came to. `itemId`/`itemName` are QBO's ItemRef, i.e. a row in the
+ *  Products/Services catalog that `import-qbo-items.ts` already syncs into
+ *  qbo_catalog_items, so a line joins to a real catalog entry rather than to a
+ *  string somebody typed. A line with no ItemRef is kept with nulls: it is
+ *  money that was billed, and dropping it would quietly shrink the total. */
+export type QboInvoiceLine = {
+  lineNum: number;
+  itemId: string | null;
+  itemName: string | null;
+  description: string | null;
+  qty: number | null;
+  amountCents: number;
+};
+
 export class QboClient {
   private accessToken: string | null = null;
   constructor(private db: pg.Client) {}
@@ -220,21 +235,52 @@ export class QboClient {
     return out;
   }
 
-  /** Every invoice — id, doc number, date, total, and which customer it's
-   *  billed to. Paginated the same way. Read-only; this is the real "has
-   *  this customer actually been invoiced" signal our own quote-tracking
-   *  marker can't see for anything billed outside Quote Designer. */
-  async getInvoices(): Promise<{ id: string; docNumber: string | null; txnDate: string | null; dueDate: string | null; totalAmt: number; balance: number; customerId: string | null; customerName: string | null }[]> {
-    const out: { id: string; docNumber: string | null; txnDate: string | null; dueDate: string | null; totalAmt: number; balance: number; customerId: string | null; customerName: string | null }[] = [];
+  /** Every invoice — id, doc number, date, total, which customer it's billed
+   *  to, AND its billed lines.
+   *
+   *  Read-only; this is the real "has this customer actually been invoiced"
+   *  signal our own quote-tracking marker can't see for anything billed
+   *  outside Quote Designer.
+   *
+   *  WHY `SELECT *` RATHER THAN A NAMED COLUMN LIST. QBO's query language will
+   *  not return the Line array for a named projection — asking for `Line` by
+   *  name yields nothing — so the whole entity is the only way to see what was
+   *  sold. It costs a larger payload on one daily job and buys the difference
+   *  between "this customer paid $4,000" and "this customer paid $4,000 for
+   *  branding", which is the only form of the question the service-line mix
+   *  can be built from.
+   *
+   *  Only SalesItemLineDetail lines are returned. QBO also emits SubTotal,
+   *  Discount and Tax lines in the same array; summing those alongside the
+   *  item lines would double-count every invoice that carries one. */
+  async getInvoices(): Promise<{ id: string; docNumber: string | null; txnDate: string | null; dueDate: string | null; totalAmt: number; balance: number; customerId: string | null; customerName: string | null; lines: QboInvoiceLine[] }[]> {
+    type RawLine = {
+      LineNum?: number;
+      Amount?: number;
+      DetailType?: string;
+      Description?: string;
+      SalesItemLineDetail?: { ItemRef?: { value?: string; name?: string }; Qty?: number };
+    };
+    const out: { id: string; docNumber: string | null; txnDate: string | null; dueDate: string | null; totalAmt: number; balance: number; customerId: string | null; customerName: string | null; lines: QboInvoiceLine[] }[] = [];
     let start = 1;
     for (;;) {
-      const q = encodeURIComponent(`SELECT Id, DocNumber, TxnDate, DueDate, TotalAmt, Balance, CustomerRef FROM Invoice STARTPOSITION ${start} MAXRESULTS 1000`);
-      const res = await this.call<{ QueryResponse?: { Invoice?: { Id: string; DocNumber?: string; TxnDate?: string; DueDate?: string; TotalAmt?: number; Balance?: number; CustomerRef?: { value?: string; name?: string } }[] } }>("GET", `query?query=${q}`);
+      const q = encodeURIComponent(`SELECT * FROM Invoice STARTPOSITION ${start} MAXRESULTS 1000`);
+      const res = await this.call<{ QueryResponse?: { Invoice?: { Id: string; DocNumber?: string; TxnDate?: string; DueDate?: string; TotalAmt?: number; Balance?: number; CustomerRef?: { value?: string; name?: string }; Line?: RawLine[] }[] } }>("GET", `query?query=${q}`);
       const page = res.QueryResponse?.Invoice ?? [];
       out.push(...page.map((i) => ({
         id: i.Id, docNumber: i.DocNumber ?? null, txnDate: i.TxnDate ?? null, dueDate: i.DueDate ?? null,
         totalAmt: i.TotalAmt ?? 0, balance: i.Balance ?? 0,
         customerId: i.CustomerRef?.value ?? null, customerName: i.CustomerRef?.name ?? null,
+        lines: (i.Line ?? [])
+          .filter((l) => l.DetailType === "SalesItemLineDetail")
+          .map((l, idx) => ({
+            lineNum: l.LineNum ?? idx + 1,
+            itemId: l.SalesItemLineDetail?.ItemRef?.value ?? null,
+            itemName: l.SalesItemLineDetail?.ItemRef?.name ?? null,
+            description: l.Description ?? null,
+            qty: typeof l.SalesItemLineDetail?.Qty === "number" ? l.SalesItemLineDetail.Qty : null,
+            amountCents: Math.round((l.Amount ?? 0) * 100),
+          })),
       })));
       if (page.length < 1000) break;
       start += 1000;
