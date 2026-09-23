@@ -8,7 +8,10 @@ import { evaluate, platformSignals, ADS_RULESET_VERSION, type DerivedFinding } f
 import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
-import { upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor, clientEconomicsFor, outcomeFeedFactsFor } from "./ads/store.js";
+import {
+  upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor, clientEconomicsFor,
+  outcomeFeedFactsFor, clientServicesFor, researchFactsFor, phoneDemandFor,
+} from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 
@@ -80,7 +83,18 @@ async function auditOne(
   const outcomes = signals.clickIdOnLead
     ? await outcomeFeedFactsFor(c, clientId, slugify(clientName), start, end)
     : null;
-  const input = { ...platformInput, economics, outcomes };
+  // What this client actually SELLS, what demand has already been researched
+  // for them, and how their enquiries arrive. All three are Postgres reads and
+  // none of them is the ad platform's to know — the same reason `economics`
+  // is merged on here rather than pulled inside an adapter.
+  //
+  // The services list is the gate on the keyword-gap reading: a derived
+  // candidate is never returned by `clientServicesFor`, so an unconfirmed list
+  // produces no gap rows and the reading says which answer is missing.
+  const services = await clientServicesFor(c, clientId);
+  const research = await researchFactsFor(c, clientId);
+  const phone = await phoneDemandFor(c, slugify(clientName), start, end);
+  const input = { ...platformInput, economics, outcomes, services, research, phone };
   console.log(
     `  goal: ${economics.cplCeilingCents != null ? `$${(economics.cplCeilingCents / 100).toFixed(2)} cost-per-lead ceiling (${economics.cplCeilingMonth})` : "no cost-per-lead ceiling recorded"}`
     + ` · ${economics.customerValueCents != null ? `$${(economics.customerValueCents / 100).toFixed(2)} a customer` : "no customer value recorded"}`
@@ -116,6 +130,20 @@ async function auditOne(
   }
 
   // Deterministic first. The rules decide everything true about the account.
+  console.log(
+    `  services: ${services.services == null
+      ? `none confirmed${services.candidatesWaiting ? ` (${services.candidatesWaiting} candidate(s) waiting to be ticked)` : ""} — no keyword-gap reading`
+      : `${services.services.length} confirmed${services.confirmedBy ? ` by ${services.confirmedBy}` : ""}${services.confirmedAt ? ` on ${services.confirmedAt}` : ""}`}`,
+  );
+  console.log(
+    `  research: ${research?.keywords == null
+      ? "none stored for this client"
+      : `${research.keywords.length} keyword(s) from the run of ${research.ranAt ?? "an unknown date"}`}`
+    + ` · enquiries: ${phone == null || phone.totalLeads == null
+      ? "lead feed not read"
+      : `${phone.phoneLeads}/${phone.totalLeads} by phone`}`,
+  );
+
   const rulesFindings = evaluate(input);
   // Then, and only then, the language seam — which today is identity.
   const { findings, engine } = refineNarrative(rulesFindings);

@@ -35,6 +35,10 @@ import {
 } from "./query-promotion.js";
 import { headroomReading, headroomClaim } from "./headroom.js";
 import { sequenceFindings } from "./sequence.js";
+import { keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, type ResearchFacts } from "./keyword-gap.js";
+import type { ClientServiceFacts } from "./service-relevance.js";
+import { trafficReadiness, CALL_TRACKING_PHONE_SHARE, type AdDestination, type PhoneDemandFacts } from "./traffic-readiness.js";
+import { rankImpact, type RankReading } from "./impact-rank.js";
 
 /**
  * Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts.
@@ -45,8 +49,18 @@ import { sequenceFindings } from "./sequence.js";
  * alone. A finding records the version that produced it so a row can be read
  * back against the rules of its day, which is why this moves even though no
  * existing threshold changed.
+ *
+ * 6: the two readings that come from OUTSIDE the account — demand this client
+ * sells into that nothing is bidding on (`keyword_gap`, gated on a confirmed
+ * services list), and what has to exist before traffic is worth sending
+ * (`generic_landing_page`, `call_tracking_absent`) — plus one measure every
+ * finding is ranked on. `est_impact_cents` carried three units after version 5
+ * and a single-column sort over it ordered nothing honestly; `rankImpact` puts
+ * every row that can reach one into cents a month with the KIND of claim
+ * attached, and `sequenceFindings` orders groups on that instead of on size.
+ * No existing threshold moved and no existing figure changed.
  */
-export const ADS_RULESET_VERSION = 5;
+export const ADS_RULESET_VERSION = 6;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -265,6 +279,14 @@ export interface AdGroupAdRow {
   adId: string;
   adType: string | null;
   adStrength: string | null;
+  /** The campaign this ad runs in. Null where the adapter does not report it;
+   *  the landing-page reading is then silent for that ad rather than guessing
+   *  which campaign it belongs to from a name. */
+  campaignId?: string | null;
+  /** Where a click on this ad lands, verbatim. NULL MEANS NOT READ — never
+   *  "no landing page". An adapter that does not pull final URLs leaves it
+   *  null and `trafficReadiness` answers `cant_tell`. */
+  finalUrl?: string | null;
 }
 
 /**
@@ -1068,6 +1090,29 @@ export interface AuditInput {
    * the account already holds is the one mistake this rule must not make.
    */
   existingKeywords?: ExistingKeyword[] | null;
+  /**
+   * What a named person confirmed this client actually sells. Read from
+   * Postgres by the caller, not from the ad platform — it is not the platform's
+   * to know. ABSENT means it was not gathered; `services: null` inside it means
+   * nobody has confirmed a list, and the keyword-gap reading refuses on both.
+   */
+  services?: ClientServiceFacts | null;
+  /**
+   * The keyword research already stored for this client (the worker's own
+   * `run-research` job, DataForSEO Labs, written into
+   * `research_requests.result_json`). NOTHING HERE CALLS DATAFORSEO: this is a
+   * Postgres read of what that job stored on somebody's instruction. Absent or
+   * null keywords = no research on record, which is a named silence rather
+   * than an empty gap list.
+   */
+  research?: ResearchFacts | null;
+  /**
+   * How this client's enquiries actually arrive, from their own lead feed.
+   * Postgres again, and absent means it was not read. It exists for one
+   * question — can this account count a phone call at all — and is never read
+   * as nought.
+   */
+  phone?: PhoneDemandFacts | null;
 }
 
 // ── Output ───────────────────────────────────────────────────────────────────
@@ -1101,6 +1146,21 @@ export interface DerivedFinding {
   impactAssumption: string;
   changePayload: { op: string; body: unknown; plainEnglish: string; guard: string } | null;
   guardNote: string;
+  /**
+   * Money a month already riding on the thing this row is about, in cents.
+   *
+   * Set ONLY by the rules whose `RANK_BASIS` is `at_stake`, and set explicitly
+   * rather than inferred from `estImpactCents` — on a `converting_search_term`
+   * that column is deliberately nought, and reading a nought as the size is
+   * exactly the defect the ranking exists to fix.
+   */
+  atStakeCents?: number | null;
+  /**
+   * Where this row sits in one order, and what kind of claim its figure is.
+   * Filled by the rank pass at the end of `evaluate`; absent on a finding that
+   * has not been through it.
+   */
+  rank?: RankReading;
 }
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
@@ -1438,6 +1498,10 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         },
         estImpactCents: microsToCents(c.costMicros),
         impactUnit: "usd_month",
+        // The module's own sentence below says this is the size of the
+        // question rather than a saving, so the rank reads it as `at_stake`
+        // and is handed the same figure explicitly rather than inferring it.
+        atStakeCents: microsToCents(c.costMicros),
         impactAssumption: `The full 30-day spend is at risk, not saved. If tracking is broken the true impact is zero and the fix is tracking; `
           + `if the traffic is genuinely wrong the spend is recoverable. The number is the size of the question, not a promised saving.`,
         changePayload: null,
@@ -1733,6 +1797,11 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       // No dollar and no lead count. See `promotionClaim`.
       estImpactCents: 0,
       impactUnit: "usd_month",
+      // …and yet it has a size, which is what lets it rank without claiming a
+      // gain: the money ALREADY flowing through these queries, at a bid nobody
+      // set, over a ninety-day window read as a month. `estImpactCents` stays
+      // at nought because nothing is gained; this says how big the thing is.
+      atStakeCents: Math.round(microsToCents(cp.totalCostMicros) / 3),
       impactAssumption: promotionClaim(cp, promotions.alreadyKeywords)
         + (seen?.caveat ? ` ${seen.caveat}` : ""),
       changePayload: null,
@@ -2119,6 +2188,115 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     accountCostMicros: accountTotals.costMicros,
   }));
 
+
+  // ── 8. What the account is not bidding on at all ─────────────────────────
+  // THE ONE READING BUILT ON SOMETHING OUTSIDE THE ACCOUNT. Every rule above
+  // reads what is already in it — a query only reaches the search-terms report
+  // because a keyword already matched it — so nothing until now could say a
+  // whole category is uncovered. This reads the keyword research this agency
+  // already runs (the worker's `run-research` job, stored in Postgres) against
+  // what the account holds, and it is gated on a CONFIRMED services list:
+  // without one it produces nothing and says why, because a believable list of
+  // demand for services a client does not offer discredits every other row.
+  const gaps = keywordGaps({
+    research: input.research,
+    services: input.services ?? { services: null, confirmedBy: null, confirmedAt: null, candidatesWaiting: 0 },
+    existingKeywords: input.existingKeywords,
+    seenTerms: input.searchTerms.map((t) => t.term),
+    existingNegatives: input.existingNegatives,
+    // The proof half of relevance: a query that already became an enquiry here
+    // is proof this client provides the thing, not an inference from a name.
+    // Only the primary column, for `query-promotion.ts`'s reason.
+    provenQueries: input.searchTerms
+      .filter((t) => t.conversions > 0)
+      .map((t) => ({ term: t.term, conversions: t.conversions })),
+    protectedPatterns: input.protectedPatterns,
+    // Composed from the coverage the search-terms report actually had, so
+    // "we have not seen this query" is weakened where the report saw little.
+    accountTermCoverage: input.searchTermSpendByCampaign != null && accountTotals.costMicros > 0
+      ? Object.values(input.searchTermSpendByCampaign).reduce((a, b) => a + b, 0) / accountTotals.costMicros
+      : null,
+  });
+  for (const g of gaps.services) {
+    out.push({
+      entityType: "account", entityId: `${input.accountId}:gap:${g.service.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      entityName: g.service, campaignId: null,
+      findingType: "keyword_gap",
+      // Never high. Nothing is going wrong: this is demand nobody has built
+      // for, and building is a project rather than a fix.
+      severity: "medium",
+      riskLevel: "low",
+      // Building for uncovered demand means a campaign or an ad group — a
+      // judgement about structure, budget, copy and a landing page. None of it
+      // is mechanical and none of it is in the guarded operation list.
+      applicability: "vendor",
+      title: `"${g.service}" has ${g.totalVolume.toLocaleString()} searches a month and nothing in this account bids on it`,
+      summary: `These terms are a service this client has on record and the account has never been seen on any of them — they are in no keyword, `
+        + `in ninety days of search terms, or blocked by a negative somebody added deliberately. Whether this is worth building is a judgement about `
+        + `structure, budget, copy and a landing page; nothing here proposes a campaign and nothing here is applied.`,
+      evidence: { metrics: g.metrics, ...win, lines: g.lines },
+      // No gain is claimed. The money below is the SIZE of the demand.
+      estImpactCents: 0,
+      impactUnit: "usd_month",
+      atStakeCents: g.marketCostCents,
+      impactAssumption: gapClaim(g, gaps.coverageTrusted)
+        + ` Terms under ${GAP_MIN_TERM_VOLUME} searches a month are left out, and a service whose uncovered terms come to under ${GAP_MIN_SERVICE_VOLUME} a month is not raised at all.`,
+      changePayload: null,
+      guardNote: "Nothing to apply. Creating a campaign or an ad group is outside the guarded operation list by design.",
+    });
+  }
+
+  // ── 9. What has to exist before traffic is worth sending ─────────────────
+  // Its own module, on `shared/data-gaps.ts`'s rules rather than inside it —
+  // that resolver reads Postgres and the app may never call an ad platform,
+  // and both of these are built on facts only an adapter holds.
+  const trafficChecks = trafficReadiness({
+    campaigns: input.campaigns.map((c) => ({ id: c.id, name: c.name, costMicros: c.costMicros, channelType: c.channelType })),
+    destinations: input.ads
+      .filter((a): a is AdGroupAdRow & { campaignId: string } => Boolean(a.campaignId))
+      .map((a): AdDestination => ({
+        campaignId: a.campaignId, campaignName: a.campaignName,
+        adGroupName: a.adGroupName, finalUrl: a.finalUrl ?? null,
+      })),
+    conversionActions: input.tracking?.actions ?? null,
+    phone: input.phone,
+    campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros,
+    windowDays: 30,
+  });
+  for (const r of trafficChecks) {
+    // `clear` and `cant_tell` are real answers and the module produces them on
+    // purpose, so silence is never read as a pass — but only `open` is a row in
+    // anybody's queue. A line on every campaign saying its landing pages are
+    // fine is a line people learn to scroll past.
+    if (r.state !== "open") continue;
+    out.push({
+      entityType: r.campaignId ? "campaign" : "account",
+      entityId: r.campaignId ? `${r.campaignId}:${r.key}` : `${input.accountId}:${r.key}`,
+      entityName: r.campaignName ?? input.accountId,
+      campaignId: r.campaignId,
+      findingType: r.key,
+      severity: r.key === "generic_landing_page" ? "high" : "medium",
+      riskLevel: "low",
+      applicability: "vendor",
+      title: r.title,
+      summary: r.summary,
+      evidence: { metrics: r.metrics, ...win, lines: r.lines },
+      estImpactCents: 0,
+      impactUnit: "usd_month",
+      atStakeCents: r.atStakeCents,
+      impactAssumption: r.key === "generic_landing_page"
+        ? `The figure is this campaign's own monthly spend — the money currently landing on a page that cannot answer what was searched. `
+          + `It is not a saving: a better page does not return the spend, it changes what the spend buys, and by how much is not something this can know.`
+        : `The figure is the account's own monthly spend — the money whose phone enquiries are not being counted. `
+          + `It is not a saving and not a gain: counting the calls changes what every figure on this account MEANS, and the share is read from the client's own lead feed `
+          + `against the ${Math.round(CALL_TRACKING_PHONE_SHARE * 100)}% at which a conversion column is measuring a minority of the outcome.`,
+      changePayload: null,
+      guardNote: r.key === "generic_landing_page"
+        ? "Nothing to apply. Choosing a landing page, or writing one, is not a guarded operation and is not mechanical."
+        : "Nothing to apply. Creating or configuring a conversion action changes what a live account bids toward and is outside the guarded path on purpose.",
+    });
+  }
+
   /**
    * ONE CAMPAIGN'S FINDINGS, READ TOGETHER.
    *
@@ -2128,6 +2306,18 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
    * nothing, re-prices nothing and re-severities nothing; the group holding the
    * biggest single figure still comes first, so the queue reads the same at the
    * top as it did before.
+   *
+   * ONE MEASURE, FIRST, so the ordering has something honest to sort on.
+   * `est_impact_cents` carries dollars on one row, leads on another and nought
+   * on a third; `rankImpact` puts every row that can reach one into cents a
+   * month and says what KIND of claim the figure is. It changes no figure and
+   * suppresses nothing — `estImpactCents`, `impactUnit`, severity and risk are
+   * all untouched — and a row it cannot price keeps its campaign group and its
+   * stage rather than being sunk or floated.
    */
-  return sequenceFindings(out);
+  const ranked = out.map((f) => ({
+    ...f,
+    rank: rankImpact(f, targets, input.economics, f.atStakeCents ?? null),
+  }));
+  return sequenceFindings(ranked);
 }

@@ -363,9 +363,15 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     // Scope to live ad groups in live campaigns. Filtering on ad_group_ad.status
     // alone still counts enabled ads sitting inside paused ad groups or paused
     // campaigns, which invents coverage gaps in parts of the account nobody runs.
+    // `campaign.id` and `ad_group_ad.ad.final_urls` are here for the
+    // landing-page reading: it asks whether every enabled ad in a campaign
+    // sends its clicks to the site's front page, which needs the campaign each
+    // ad belongs to (by id, never by name — two accounts can run campaigns
+    // with the same name) and where the ad actually points.
     const adRows = await safeQuery(customer, "ads", `
-      SELECT campaign.name, ad_group.id, ad_group.name,
-             ad_group_ad.ad.id, ad_group_ad.ad.type, ad_group_ad.ad_strength, ad_group_ad.status
+      SELECT campaign.id, campaign.name, ad_group.id, ad_group.name,
+             ad_group_ad.ad.id, ad_group_ad.ad.type, ad_group_ad.ad.final_urls,
+             ad_group_ad.ad_strength, ad_group_ad.status
         FROM ad_group_ad
        WHERE ad_group_ad.status = 'ENABLED'
          AND ad_group.status = 'ENABLED'
@@ -378,6 +384,14 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       adId: String(r.ad_group_ad?.ad?.id ?? ""),
       adType: r.ad_group_ad?.ad?.type != null ? String(r.ad_group_ad.ad.type) : null,
       adStrength: r.ad_group_ad?.ad_strength != null ? String(r.ad_group_ad.ad_strength) : null,
+      campaignId: r.campaign?.id != null ? String(r.campaign.id) : null,
+      // The first final URL, or null. NULL IS "NOT READ" all the way through:
+      // an ad type that carries no final URL of its own (an expanded text ad
+      // inheriting one, a PMax asset group) leaves it null, and the reading
+      // answers `cant_tell` for that campaign rather than calling its landing
+      // pages fine.
+      finalUrl: Array.isArray(r.ad_group_ad?.ad?.final_urls) && r.ad_group_ad.ad.final_urls.length > 0
+        ? String(r.ad_group_ad.ad.final_urls[0]) : null,
     }));
 
     // ── How much of each campaign's money the search-terms report shows ────

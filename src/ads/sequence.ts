@@ -73,9 +73,11 @@ export const FINDING_STAGE: Record<string, FindingStage> = {
   bidding_not_ready: "measure",
   bidding_data_exclusion: "measure",
   proxy_conversion_value: "measure",
+  call_tracking_absent: "measure",
   outcome_feedback_gap: "measure",
 
   // Relevance and coverage.
+  generic_landing_page: "improve",
   low_quality_score: "improve",
   thin_ad_group: "improve",
   weak_ad_strength: "improve",
@@ -87,6 +89,7 @@ export const FINDING_STAGE: Record<string, FindingStage> = {
   budget_limited: "grow",
   headroom: "grow",
   converting_search_term: "grow",
+  keyword_gap: "grow",
 };
 
 /**
@@ -133,12 +136,19 @@ function groupKey(f: DerivedFinding): string {
 /**
  * Pure. The same findings, sequenced.
  *
- * Group order keeps what the old sort gave: the group holding the biggest
- * single figure comes first, so the account's loudest campaign is still the
- * first thing read. Inside a group the stages decide, and `estImpactCents`
- * breaks ties within a stage exactly as it did before. The original index is
- * the last tiebreak, so the pass is stable and two runs over one account
- * produce a byte-identical order — which the determinism check depends on.
+ * Group order keeps what the old sort gave in shape and fixes what it gave in
+ * substance: the group holding the biggest single figure comes first, but the
+ * figure is now `rank.cents` (cents a month, the same unit on every row) rather
+ * than `estImpactCents`, which since version 5 carried dollars on one row,
+ * leads on another and nought on a third. A row this engine could not price
+ * contributes nothing to its group's position and is neither sunk nor floated —
+ * it keeps its group and its stage, so it is read with that campaign's work.
+ *
+ * Inside a group the stages decide, exactly as before. `rank.cents` breaks
+ * ties within a stage, with `estImpactCents` behind it so two rows this
+ * ranking cannot separate still order as they used to, and the original index
+ * last — so the pass is stable and two runs over one account produce a
+ * byte-identical order, which the determinism check depends on.
  */
 export function sequenceFindings(findings: DerivedFinding[]): DerivedFinding[] {
   const groups = new Map<string, { index: number; rows: { f: DerivedFinding; i: number }[] }>();
@@ -150,15 +160,18 @@ export function sequenceFindings(findings: DerivedFinding[]): DerivedFinding[] {
   });
 
   const out: DerivedFinding[] = [];
-  const ordered = Array.from(groups.entries()).sort((a, b) => {
-    const maxA = Math.max(...a[1].rows.map((r) => r.f.estImpactCents));
-    const maxB = Math.max(...b[1].rows.map((r) => r.f.estImpactCents));
-    return maxB - maxA || a[1].index - b[1].index;
-  });
+  /** The best comparable figure in a group. A row with no rank contributes
+   *  nothing, which is what keeps an unpriced row from moving its group. */
+  const best = (rows: { f: DerivedFinding }[]) =>
+    Math.max(0, ...rows.map((r) => r.f.rank?.cents ?? 0));
+
+  const ordered = Array.from(groups.entries()).sort((a, b) =>
+    best(b[1].rows) - best(a[1].rows) || a[1].index - b[1].index);
 
   for (const [key, g] of ordered) {
     const rows = [...g.rows].sort((a, b) =>
       STAGE_INDEX[stageOf(a.f.findingType)] - STAGE_INDEX[stageOf(b.f.findingType)]
+      || (b.f.rank?.cents ?? 0) - (a.f.rank?.cents ?? 0)
       || b.f.estImpactCents - a.f.estImpactCents
       || a.i - b.i);
 
