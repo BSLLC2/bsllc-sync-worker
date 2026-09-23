@@ -67,6 +67,10 @@ export const FINDING_STAGE: Record<string, FindingStage> = {
   no_conversions: "stop",
   broken_final_url: "stop",
   cpa_above_target: "stop",
+  // Over target with no target set. `stop` alongside the row it replaces, and
+  // for the same reason: the money is going out now at a price nobody agreed,
+  // and every later stage is measured against the figures it changes.
+  bid_target_absent: "stop",
 
   // Figures everything else is decided from.
   conversion_tracking_gap: "measure",

@@ -9,7 +9,7 @@ import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import {
-  upsertFinding, sweepResolved, mappedAccounts, protectedPatternsFor, clientEconomicsFor,
+  upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, protectedPatternsFor, clientEconomicsFor,
   outcomeFeedFactsFor, clientServicesFor, researchFactsFor, phoneDemandFor,
 } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
@@ -164,6 +164,20 @@ async function auditOne(
     console.log(`    · ${r.outcome.padEnd(16)} [${f.findingType}] ${f.title}${impact}`);
     if (engine !== "rules") {
       await c.query(`UPDATE ads_findings SET narrative_engine = $2 WHERE id = $1`, [r.id, engine]);
+    }
+  }
+
+  // A sharper reading of a fact closes the weaker row it replaced, BY NAME and
+  // BEFORE the sweep. The sweep's own sentence is "the condition cleared on its
+  // own", which is false here — the condition did not clear, it got a better
+  // explanation — and a row somebody is working must never disappear under a
+  // reason that is not true. Going first means the sweep finds it already
+  // closed and leaves it alone.
+  if (!dryRun) {
+    const items = findings.flatMap((f) => f.supersedes ?? []);
+    if (items.length) {
+      const closed = await supersedeFindings(c, clientId, platform, accountId, items, ACTOR);
+      if (closed) console.log(`    · ${closed} finding(s) replaced by a sharper reading of the same campaign`);
     }
   }
 

@@ -39,6 +39,7 @@ import { keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, typ
 import type { ClientServiceFacts } from "./service-relevance.js";
 import { trafficReadiness, CALL_TRACKING_PHONE_SHARE, type AdDestination, type PhoneDemandFacts } from "./traffic-readiness.js";
 import { rankImpact, type RankReading } from "./impact-rank.js";
+import { bidTargetEvidenceLine, bidTargetReading, supersedeReason, targetIsAbsent } from "./bid-target.js";
 
 /**
  * Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts.
@@ -60,7 +61,7 @@ import { rankImpact, type RankReading } from "./impact-rank.js";
  * attached, and `sequenceFindings` orders groups on that instead of on size.
  * No existing threshold moved and no existing figure changed.
  */
-export const ADS_RULESET_VERSION = 6;
+export const ADS_RULESET_VERSION = 7;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -200,8 +201,22 @@ export interface CampaignRow {
   bidStrategyType?: string | null;
   /** Does that strategy carry an actual target figure? Null = not reported.
    *  Maximize Conversions with no target is the recommended low-volume
-   *  strategy; with one it carries the same volume floor as Target CPA. */
+   *  strategy; with one it carries the same volume floor as Target CPA.
+   *
+   *  It counts a target held on a PORTFOLIO strategy as well as one held on
+   *  the campaign, because a campaign on a shared Target CPA strategy returns
+   *  no campaign-level target field at all and reading that as "no target" was
+   *  wrong on every portfolio-managed campaign. */
   hasBidTarget?: boolean | null;
+  /**
+   * Did the run get to LOOK at where the target would be?
+   *
+   * False where the campaign sits on a portfolio bid strategy whose own record
+   * could not be read, so `hasBidTarget: false` there is unanswered rather
+   * than an answer. Absent means the adapter does not report it, which is the
+   * same silence. Only `bidTargetReading` consults it.
+   */
+  bidTargetRead?: boolean | null;
 }
 
 /**
@@ -1161,6 +1176,20 @@ export interface DerivedFinding {
    * has not been through it.
    */
   rank?: RankReading;
+  /**
+   * Rows this one REPLACES, because it is a sharper reading of the same fact.
+   *
+   * Not producing the weaker row would be enough on its own if nothing had
+   * already been written — but a row somebody is working does not vanish
+   * quietly. `sweepResolved` closes a row that stops being produced with "the
+   * condition cleared on its own", which is FALSE here: the condition did not
+   * clear, it got a better explanation. So the run closes the named row itself,
+   * first, with the sentence below, and the sweep then finds it already closed.
+   *
+   * A row a person has already acted on is never touched: only `open` and
+   * `proposed` are superseded.
+   */
+  supersedes?: { entityId: string; findingType: string; reason: string }[];
 }
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
@@ -1518,7 +1547,89 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     // worked out AND a target exists to measure it against — never on an
     // invented target, and never on a conversion column that is counting page
     // views.
-    if (overTarget && cpaCents != null && target != null) {
+    /**
+     * WAS THE PLATFORM EVER TOLD WHAT A CONVERSION MAY COST?
+     *
+     * Read from the account, never inferred from the cost per conversion.
+     * Silent wherever the strategy or its target could not be read — see
+     * `bid-target.ts`, which holds the whole decision.
+     */
+    const bidTarget = bidTargetReading({
+      strategyType: c.bidStrategyType ?? null,
+      hasTarget: c.hasBidTarget ?? null,
+      targetRead: c.bidTargetRead !== false,
+    });
+    /**
+     * The sharper row REPLACES `cpa_above_target` on this campaign.
+     *
+     * One cause, one row. Both rows would be true at once and they would say
+     * the same money twice, and the queue filling with two rows per problem is
+     * the thing this engine spends most of its design avoiding — `no_conversions`
+     * already stands down for the tracking row on exactly this argument. The
+     * replaced row is not simply dropped: it carries the same cost evidence and
+     * the same figure, and the run closes the old row by name with a sentence
+     * saying what took its place, so nobody working the queue loses it.
+     *
+     * It fires only where the cost is ALREADY over target. A campaign on
+     * Maximize Conversions hitting its cost is a campaign nobody needs to hear
+     * about, and a row on every untargeted campaign in the book would be the
+     * noise that teaches people to scroll past the queue.
+     */
+    const bidTargetAbsent = overTarget && cpaCents != null && target != null && targetIsAbsent(bidTarget);
+
+    if (bidTargetAbsent && cpaCents != null && target != null) {
+      const overCents = cpaCents - target.cents;
+      const monthlyGapCents = Math.max(0, Math.round(overCents * c.conversions));
+      out.push({
+        entityType: "campaign", entityId: `${c.id}:bid_target`, entityName: c.name, campaignId: c.id,
+        findingType: "bid_target_absent",
+        severity: cpaCents > target.cents * 2 ? "high" : "medium",
+        riskLevel: "medium",
+        // A bid strategy change has no guarded path here — the adapter's own
+        // capability block says so in as many words — so there is no payload
+        // for a machine to apply and this is a brief. It would be one anyway:
+        // switching the bidding on a live healthcare account is exactly the
+        // change the propose/approve split exists for.
+        applicability: "vendor",
+        title: `"${c.name}" pays $${(cpaCents / 100).toFixed(2)} a conversion, and ${bidTarget.headline}`,
+        summary: `${bidTarget.explanation} `
+          + (target.basis === "stated"
+            ? `The ceiling recorded for this client is $${(target.cents / 100).toFixed(2)} a conversion and the platform has not been given it.`
+            : `The $${(target.cents / 100).toFixed(2)} figure this is measured against is an estimate from the client's recorded customer value and close rate, not something they stated, so agree the number before setting it on the strategy.`),
+        evidence: {
+          metrics: {
+            costMicros: c.costMicros, clicks: c.clicks, conversions: c.conversions,
+            costPerConversionCents: cpaCents, targetCents: target.cents, overByCents: overCents,
+          },
+          ...win,
+          lines: [
+            `${usd(c.costMicros)} · ${c.clicks} clicks · ${c.conversions.toFixed(1)} conversions (30 days)`,
+            `$${(cpaCents / 100).toFixed(2)} a conversion, $${(overCents / 100).toFixed(2)} over`,
+            bidTargetEvidenceLine(bidTarget),
+            ...targetLines,
+          ],
+        },
+        // The gap between what conversions cost and what they were meant to
+        // cost. It is the SIZE OF THE QUESTION and not a saving: nothing here
+        // can price what setting a target would do, because the platform will
+        // buy fewer conversions at the lower price and how many fewer is not
+        // knowable from anything on this row.
+        estImpactCents: monthlyGapCents,
+        impactUnit: "usd_month",
+        atStakeCents: monthlyGapCents,
+        impactAssumption: `${c.conversions.toFixed(1)} conversions a month at $${(overCents / 100).toFixed(2)} over the target. `
+          + `That is the size of the gap riding on a setting nobody has made, not a saving anybody has promised — setting a target buys fewer conversions as well as cheaper ones, and nothing here can say how many fewer.`,
+        changePayload: null,
+        guardNote: "Bid strategy changes have no guarded path here, so nothing about this is applied automatically. Set the target in the account.",
+        supersedes: [{
+          entityId: `${c.id}:cost_target`,
+          findingType: "cpa_above_target",
+          reason: supersedeReason(c.name),
+        }],
+      });
+    }
+
+    if (overTarget && !bidTargetAbsent && cpaCents != null && target != null) {
       const overCents = cpaCents - target.cents;
       // A month of the window, so the figure is comparable with every other
       // monthly impact on the queue. The campaign metrics are the 30-day pull,

@@ -108,6 +108,14 @@ export const RANK_BASIS: Record<string, RankBasis> = {
   headroom: "projected",
 
   // Money already flowing through the thing the row is about. No gain claimed.
+  //
+  // `bid_target_absent` is at_stake rather than recoverable, which is where it
+  // parts company with the `cpa_above_target` row it replaces. Stopping a
+  // wasted search term keeps the money it was spending. Setting a cost target
+  // buys fewer conversions as well as cheaper ones, and how many fewer is not
+  // knowable from anything on the row — so the figure is the size of the gap
+  // and not a saving.
+  bid_target_absent: "at_stake",
   no_conversions: "at_stake",
   converting_search_term: "at_stake",
   keyword_gap: "at_stake",

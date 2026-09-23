@@ -79,6 +79,11 @@ if (WF_DIR) {
     ads_findings: { hours: 168, why: "Mondays only — a week" },
     ads_apply_approved: { hours: 1, why: "hourly at :15" },
     ads_verify_outcomes: { hours: 24, why: "daily 06:40 UTC" },
+    ads_change_history: { hours: 6, why: "every six hours at :10" },
+    // A missed day here is a date nothing can answer "what was live then" for,
+    // and there is no catching up afterwards, so the derived window matters as
+    // much as it does for the change capture the line above covers.
+    ads_structure_snapshot: { hours: 24, why: "daily 03:40 UTC" },
   };
   for (const [job, exp] of Object.entries(EXPECT)) {
     const c = cad.get(job);
