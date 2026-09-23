@@ -1,0 +1,83 @@
+name: Ads structure snapshot (read-only)
+
+# A record of what each mapped ad account IS, on a date: every campaign, ad
+# group, keyword, budget and bid strategy, so any two dates can be diffed.
+#
+# WHY THIS AS WELL AS ads-change-history.yml. That job captures what somebody
+# DID, from Google's own change_event feed, which the platform deletes after 30
+# days. A change log cannot say what the account looks like now, cannot survive
+# a gap in its own capture, and cannot answer "what was live on 1 September" if
+# it was down that week. A snapshot taken on the day answers all three, and a
+# snapshot disagreeing with the change log is itself a finding neither one
+# produces alone.
+#
+# WHY DAILY. The question is about a DATE and a date has one answer a day.
+# Running this six-hourly beside the change job would write four readings of
+# one date. The cost, stated: a change made and undone inside one day is
+# invisible here, and the change log has it with the hour.
+#
+# READ-ONLY. Every query is a SELECT. This writes nothing to any ad account,
+# proposes nothing and applies nothing.
+on:
+  schedule:
+    # 03:40 UTC daily. Clear of the change-history capture (:10 past 02, 08, 14,
+    # 20) and of the metric importers on the hour.
+    - cron: "40 3 * * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug. Blank = every mapped account."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: ads-structure-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Take the snapshot
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          # No literal fallback here on purpose: an ad account number does not
+          # belong in a file. Where the secret is unset the run fails by name on
+          # startup, which is the visible failure rather than the silent one.
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.client }}" ] && ARGS="--client=${{ inputs.client }}"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run ads-structure-snapshot -- $ARGS 2>&1 | tee run.log
+
+      # Without this, a job that quietly stopped firing leaves a table that
+      # looks exactly like an account nobody touched — and here that reads as a
+      # stable account rather than as a day nobody captured. `if: always()` so a
+      # FAILED run is recorded as a failure rather than as silence, and the
+      # run's own counts become the note, so a green heartbeat says what it
+      # actually read.
+      - name: Heartbeat
+        # A dry run and a single-account run are both excluded. The heartbeat is
+        # ONE row for the whole book, so stamping it from a run that read one
+        # account would claim every other account was snapshotted today.
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=ads_structure_snapshot --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log

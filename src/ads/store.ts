@@ -220,6 +220,49 @@ export async function sweepResolved(
   return rows.length;
 }
 
+/**
+ * Close the rows a sharper finding replaced.
+ *
+ * WHY THIS IS NOT LEFT TO `sweepResolved`. That function closes anything that
+ * stopped being produced with "No longer present in the account — the
+ * condition cleared on its own." For a superseded row that sentence is false
+ * twice over: the condition did not clear, and the row did not go away for
+ * want of evidence. Somebody working the queue would read it as fixed.
+ *
+ * So this runs FIRST, names the row that took its place, and writes the same
+ * event history every other decision writes. The sweep afterwards finds the
+ * row already dismissed and leaves it alone.
+ *
+ * A row already APPROVED, APPLIED or MEASURED is never touched — a person
+ * acted on it and this is not a machine's decision to undo.
+ */
+export async function supersedeFindings(
+  c: pg.Client,
+  clientId: string,
+  platform: string,
+  accountId: string,
+  items: { entityId: string; findingType: string; reason: string }[],
+  actor: Actor,
+): Promise<number> {
+  let closed = 0;
+  for (const it of items) {
+    const { rows } = await c.query<{ id: string }>(
+      `UPDATE ads_findings
+          SET status = 'dismissed', dismissed_by = $5, dismissed_at = now(), dismissed_reason = $6
+        WHERE client_id = $1 AND platform = $2 AND account_id = $3
+          AND entity_id = $4 AND finding_type = $7
+          AND status IN ('open','proposed')
+        RETURNING id`,
+      [clientId, platform, accountId, it.entityId, actor, it.reason, it.findingType],
+    );
+    for (const r of rows) {
+      await logEvent(c, r.id, "dismissed", actor, it.reason, null);
+      closed += 1;
+    }
+  }
+  return closed;
+}
+
 export async function logEvent(
   c: pg.Client,
   findingId: string,

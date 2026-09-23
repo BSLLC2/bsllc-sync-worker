@@ -211,6 +211,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     const campaignRows = await safeQuery(customer, "campaign 30d", `
       SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
              campaign.resource_name, campaign.bidding_strategy_type,
+             campaign.bidding_strategy,
              campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas,
              campaign.maximize_conversions.target_cpa_micros,
              campaign.maximize_conversion_value.target_roas,
@@ -220,6 +221,72 @@ export class GoogleAdsAdapter implements PlatformAdapter {
              metrics.search_rank_lost_impression_share
         FROM campaign
        WHERE segments.date DURING LAST_30_DAYS AND campaign.status = 'ENABLED'`, log);
+
+    /**
+     * PORTFOLIO BID STRATEGIES, and why the campaign fields alone are not
+     * enough.
+     *
+     * A campaign on a SHARED (portfolio) strategy reports its type on
+     * `campaign.bidding_strategy_type` and holds its target on the strategy
+     * resource, not on the campaign. So a campaign on a portfolio Target CPA
+     * returns no `campaign.target_cpa.target_cpa_micros` at all — and reading
+     * that absence as "no target is set" would call every portfolio-managed
+     * campaign in the book untargeted, which is the confident-and-wrong a
+     * bid-target finding must never be.
+     *
+     * `tryQuery` returns NULL where the query failed, and null all the way
+     * through is what makes the reading say it could not look rather than say
+     * there is nothing there.
+     */
+    const strategyRows = await tryQuery(customer, "portfolio bid strategies", `
+      SELECT bidding_strategy.id, bidding_strategy.type,
+             bidding_strategy.target_cpa.target_cpa_micros,
+             bidding_strategy.target_roas.target_roas,
+             bidding_strategy.maximize_conversions.target_cpa_micros,
+             bidding_strategy.maximize_conversion_value.target_roas
+        FROM bidding_strategy`, log);
+    const portfolioHasTarget: Map<string, boolean> | null = strategyRows
+      ? new Map(strategyRows.map((r: any) => [
+          String(r.bidding_strategy?.id ?? ""),
+          [
+            r.bidding_strategy?.target_cpa?.target_cpa_micros,
+            r.bidding_strategy?.target_roas?.target_roas,
+            r.bidding_strategy?.maximize_conversions?.target_cpa_micros,
+            r.bidding_strategy?.maximize_conversion_value?.target_roas,
+          ].some((v) => v != null && Number(v) > 0),
+        ]))
+      : null;
+    /** The digits at the tail of a resource name, or null. */
+    const strategyIdOf = (rn: unknown): string | null => {
+      const last = String(rn ?? "").trim().split("/").pop() ?? "";
+      return /^\d+$/.test(last) ? last : null;
+    };
+
+    /** A target figure on the campaign's own strategy. Google returns one of
+     *  these fields only where a target is set, so a nought and an absence are
+     *  the same answer here: no target. */
+    const campaignCarriesTarget = (r: any): boolean => [
+      r.campaign?.target_cpa?.target_cpa_micros,
+      r.campaign?.target_roas?.target_roas,
+      r.campaign?.maximize_conversions?.target_cpa_micros,
+      r.campaign?.maximize_conversion_value?.target_roas,
+    ].some((v) => v != null && Number(v) > 0);
+
+    /**
+     * A target figure on the PORTFOLIO strategy this campaign is on.
+     *
+     * true  — it is on one and that one carries a target
+     * false — it is on one and that one carries none, or it is on none at all
+     * null  — it is on one and we could not read the strategies, so nothing
+     *         here knows; the reading stays silent rather than guessing
+     */
+    const portfolioCarriesTarget = (r: any): boolean | null => {
+      const id = strategyIdOf(r.campaign?.bidding_strategy);
+      if (!id) return false;
+      if (!portfolioHasTarget) return null;
+      const hit = portfolioHasTarget.get(id);
+      return hit == null ? null : hit;
+    };
 
     const campaigns: CampaignRow[] = campaignRows.map((r: any) => ({
       id: String(r.campaign?.id ?? ""),
@@ -245,12 +312,14 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       // the answer that decides whether the conversion floor applies to it at
       // all — so it is computed from the fields that came back rather than left
       // null, and the campaign query either ran for every row or for none.
-      hasBidTarget: [
-        r.campaign?.target_cpa?.target_cpa_micros,
-        r.campaign?.target_roas?.target_roas,
-        r.campaign?.maximize_conversions?.target_cpa_micros,
-        r.campaign?.maximize_conversion_value?.target_roas,
-      ].some((v) => v != null && Number(v) > 0),
+      hasBidTarget: campaignCarriesTarget(r) || portfolioCarriesTarget(r) === true,
+      // Did this run get to LOOK at where the target would be? True where the
+      // campaign holds its own strategy, and where it sits on a portfolio
+      // strategy we successfully read. False where the strategy query failed
+      // or the campaign points at a strategy that query did not return — and a
+      // false here is what makes the bid-target reading stay silent instead of
+      // reporting a target that may well be set.
+      bidTargetRead: portfolioCarriesTarget(r) !== null,
     }));
 
     // Existing negatives, so we never propose a duplicate.

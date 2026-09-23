@@ -42,8 +42,8 @@ export interface AdsJobSpec {
 /**
  * The five jobs. `job` names are also what `deriveJobCadences` picks up from
  * the workflow files, so the SLA for each comes from its own cron rather than
- * a number typed here: hourly for apply, daily for verify, weekly for
- * findings, fortnightly for briefs.
+ * a number typed here: hourly for apply, daily for verify and for the
+ * structure snapshot, six-hourly for change capture, weekly for findings.
  */
 export const ADS_JOBS: AdsJobSpec[] = [
   {
@@ -77,6 +77,14 @@ export const ADS_JOBS: AdsJobSpec[] = [
     cadence: "every six hours, at :10",
     quiet: "An account nobody touched genuinely produces no new rows, and a second run inside the same window produces none either — the note carries accounts/read/events counts so both read as what they are. What this job must never do is stop: the platform keeps change_event for 30 DAYS and then deletes it, so a silent stop is account history being lost rather than a stale reading.",
     fix: "Open bsllc-sync-worker → Actions → \"Ads change history capture (read-only)\" and re-run it. It is a SELECT against change_event and writes nothing to any ad account. Fix it the same day: every day it is down is a day of change history that cannot be recovered afterwards, and while it is down the settle-window guard in the dashboard cannot see a change a subcontractor made by hand.",
+  },
+  {
+    job: "ads_structure_snapshot",
+    workflow: "ads-structure-snapshot.yml",
+    label: "Ads structure snapshot",
+    cadence: "daily 03:40 UTC",
+    quiet: "An account nobody changed genuinely produces no new interval rows, and the note's entities/changed counts are what say so. What this job must never do is stop: a day with no snapshot is a date nothing can answer \"what was live then\" for, and unlike the change feed there is no window to catch up inside — a missed day is missed for good.",
+    fix: "Open bsllc-sync-worker \u2192 Actions \u2192 \"Ads structure snapshot (read-only)\" and re-run it. Every query it makes is a SELECT and it writes nothing to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account; a missing GOOGLE_ADS_LOGIN_CUSTOMER_ID fails on startup by name. Today's snapshot is still takeable until midnight UTC; after that the day has no row and the intervals either side carry the gap.",
   },
 ];
 
