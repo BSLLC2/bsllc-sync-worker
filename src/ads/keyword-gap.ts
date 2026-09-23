@@ -44,6 +44,16 @@
  *  4. A NULL IS UNANSWERED. No research stored for a client is no reading,
  *     named — never an empty gap list, which on screen reads as "nothing
  *     missing" and is the opposite of the truth.
+ *  5. A RECORDED SERVICE IS NOT AUTOMATICALLY A SEED (2026-09-23). The company
+ *     owner, refusing a proposal built out of a real client's own list:
+ *     "keywords like day program won't do anything for our keywords when not
+ *     more tightly associated to the core services — in fact it will likely
+ *     burn spend." A services list and a keyword strategy are two different
+ *     things. `service-seed.ts` decides which phrases may be expanded from,
+ *     every one it holds back is NAMED here and on the queue, and the service
+ *     itself is untouched: still recorded, still suppressing exactly what it
+ *     suppressed. Seeding and suppression are separate jobs, and a client who
+ *     does not offer a broad category may rule it out broadly.
  */
 
 import { normalizeQueryText, type ExistingKeyword } from "./query-promotion.js";
@@ -51,6 +61,7 @@ import {
   relevanceOf, relevanceLine, noServicesLine,
   type ClientServiceFacts, type ProvenQuery, type Relevance,
 } from "./service-relevance.js";
+import { splitSeeds, skippedSeedsLine, type SkippedSeed } from "./service-seed.js";
 
 /**
  * One keyword as the stored research gave it.
@@ -153,7 +164,17 @@ export type GapVerdict =
   /** No keyword research is stored for this client. */
   | "no_research"
   /** The account's keyword list could not be read, so absence cannot be shown. */
-  | "keywords_unread";
+  | "keywords_unread"
+  /**
+   * Every confirmed service is too broad to research from.
+   *
+   * A SEPARATE ANSWER FROM `no_services_recorded`, and the difference is the
+   * whole point: somebody HAS done the work and the list they wrote cannot
+   * carry a keyword strategy. "Day program" is a true statement about what a
+   * client sells and a seed that expands into everybody's traffic, so
+   * researching off it proposes head terms a person then spends money on.
+   */
+  | "no_usable_seeds";
 
 /** One uncovered term, with everything the row says about it. */
 export interface GapTerm {
@@ -201,6 +222,14 @@ export interface GapReading {
   /** True where the account's search-terms report accounts for enough of its
    *  spend that "not seen" is decent evidence. False weakens every row. */
   coverageTrusted: boolean;
+  /**
+   * Services that ARE recorded and were not researched from, each named.
+   *
+   * Nothing is dropped silently. The service stays on the record, it still
+   * suppresses what a recorded service suppresses, and the only thing it loses
+   * is the right to expand keyword research.
+   */
+  skippedSeeds: SkippedSeed[];
 }
 
 export interface GapInput {
@@ -239,9 +268,9 @@ function blockedBy(term: string, blocker: string): boolean {
  * is bidding on.
  */
 export function keywordGaps(i: GapInput): GapReading {
-  const empty = (verdict: GapVerdict, silence: string): GapReading => ({
+  const empty = (verdict: GapVerdict, silence: string, skippedSeeds: SkippedSeed[] = []): GapReading => ({
     verdict, services: [], alreadyCovered: 0, droppedAsIrrelevant: 0,
-    silence, coverageTrusted: false,
+    silence, coverageTrusted: false, skippedSeeds,
   });
 
   // The relevance gate comes FIRST, before the research is even looked at.
@@ -261,6 +290,38 @@ export function keywordGaps(i: GapInput): GapReading {
       + "A term cannot be called a gap in a list nobody could see.");
   }
 
+  // ── WHICH RECORDED SERVICES MAY SEED RESEARCH ────────────────────────────
+  // A services list and a keyword strategy are different things, and this
+  // reading is where the difference costs money: a broad seed expands into
+  // neighbouring demand that has nothing to do with the client, and a person
+  // acting on the row buys traffic that will not convert. The rule is
+  // `service-seed.ts`, copied byte for byte into the app so the review a person
+  // ticks and this run agree about which phrases are worth expanding.
+  //
+  // It changes SEEDING and nothing else. Every confirmed service still
+  // suppresses exactly what it suppressed, because a client who genuinely does
+  // not offer a broad category is entitled to say so broadly.
+  const seedSplit = splitSeeds(i.services.services, {
+    // The account's own proof: a query it already turns into an enquiry. The
+    // search-terms report as a whole is not used — it holds everything a broad
+    // keyword ever matched, which is the opposite of the client's own words.
+    accountTerms: i.provenQueries.map((q) => q.term),
+    research: i.research.keywords.map((k) => ({ keyword: k.keyword, intent: k.intent, volume: k.volume })),
+  });
+  if (seedSplit.seeds.length === 0) {
+    return empty(
+      "no_usable_seeds",
+      `${skippedSeedsLine(seedSplit.skipped) ?? "Every recorded service is too broad to research from."}`
+      + " Each one is still recorded and still rules out what it ruled out. What none of them can do is say which searches to look at."
+      + " Sharpen one on the client page — say what the work treats or sells — and this reads on the next audit.",
+      seedSplit.skipped,
+    );
+  }
+  const seedable: ClientServiceFacts = {
+    ...i.services,
+    services: i.services.services.filter((s) => seedSplit.seeds.includes(s.name)),
+  };
+
   const coverageTrusted = i.accountTermCoverage != null && i.accountTermCoverage >= GAP_COVERAGE_TRUSTED;
   const keywordSet = new Set(i.existingKeywords.map((k) => normalizeQueryText(k.text)).filter(Boolean));
   const seenSet = new Set(i.seenTerms.map((t) => normalizeQueryText(t)).filter(Boolean));
@@ -276,7 +337,7 @@ export function keywordGaps(i: GapInput): GapReading {
     if (!text) continue;
     if (k.volume == null || k.volume < GAP_MIN_TERM_VOLUME) continue;
 
-    const rel = relevanceOf(text, i.services, i.provenQueries);
+    const rel = relevanceOf(text, seedable, i.provenQueries);
     if (rel.verdict !== "matched" || !rel.service) { droppedAsIrrelevant++; continue; }
 
     // A term the client told us to leave alone is not a gap, it is a decision.
@@ -341,6 +402,8 @@ export function keywordGaps(i: GapInput): GapReading {
         ? ""
         : " The search-terms report accounts for a minority of this account's spend, so 'not seen' is weaker evidence here than it looks: a broad keyword may already be reaching some of this."),
     );
+    const skippedLine = skippedSeedsLine(seedSplit.skipped);
+    if (skippedLine) lines.push(skippedLine);
     if (i.research?.ranAt) {
       lines.push(
         `Research run ${i.research.ranAt}${i.research.location ? ` for ${i.research.location}` : ""}`
@@ -370,12 +433,16 @@ export function keywordGaps(i: GapInput): GapReading {
   if (services.length === 0) {
     return {
       verdict: "covered", services: [], alreadyCovered, droppedAsIrrelevant,
-      coverageTrusted,
+      coverageTrusted, skippedSeeds: seedSplit.skipped,
       silence: `Every recorded service this client sells is already covered by a keyword, a query the account has been seen on, or a negative somebody added on purpose`
-        + ` — ${alreadyCovered} research term(s) matched a service and are already reached, and ${droppedAsIrrelevant} were dropped as nothing this client provides.`,
+        + ` — ${alreadyCovered} research term(s) matched a service and are already reached, and ${droppedAsIrrelevant} were dropped as nothing this client provides.`
+        + (skippedSeedsLine(seedSplit.skipped) ? ` ${skippedSeedsLine(seedSplit.skipped)}` : ""),
     };
   }
-  return { verdict: "found", services, alreadyCovered, droppedAsIrrelevant, silence: null, coverageTrusted };
+  return {
+    verdict: "found", services, alreadyCovered, droppedAsIrrelevant,
+    silence: null, coverageTrusted, skippedSeeds: seedSplit.skipped,
+  };
 }
 
 /**

@@ -38,6 +38,7 @@ import {
   keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, GAP_CLICK_RATE,
   type ResearchFacts,
 } from "./ads/keyword-gap.js";
+import { splitSeeds, skippedSeedsLine } from "./ads/service-seed.js";
 import {
   trafficReadiness, isSiteRoot, CALL_TRACKING_PHONE_SHARE, CALL_TRACKING_MIN_LEADS,
 } from "./ads/traffic-readiness.js";
@@ -1659,6 +1660,91 @@ async function main() {
       "'we have not seen it' is only as good as what the report saw");
     ok("every service covered is a real answer and says how many were checked",
       keywordGaps({ ...gapInput, seenTerms: research.keywords!.map((k) => k.keyword) }).verdict === "covered");
+
+    // ── 20b. A SERVICES LIST IS NOT A KEYWORD STRATEGY (2026-09-23) ────────
+    //
+    // The company owner, handed a proposal built out of a real client's own
+    // service list: "keywords like day program won't do anything for our
+    // keywords when not more tightly associated to the core services — in fact
+    // it will likely burn spend." The list parsed correctly. What was wrong is
+    // that a recorded service was being treated as a research seed, and those
+    // are two different things.
+    //
+    // The rule is `service-seed.ts`, copied byte for byte into the app's
+    // shared/ so the review a person ticks and this run cannot disagree. What
+    // matters here is the BOUNDARY: it skips SEEDING and it changes nothing
+    // else about a recorded service.
+    //
+    // Every service and every figure below is invented. Nothing was read from
+    // production and no ad account was touched.
+    const roofList = [
+      "roofing services", "gutter services", "emergency services", "inspection services",
+      "roofing repair", "roofing replacement", "skylight installation",
+      "flat roof coating", "day services", "commercial roofing", "gutter installation",
+    ];
+    const seedFacts: ClientServiceFacts = {
+      services: roofList.map((name) => ({ name, note: null })),
+      confirmedBy: "Katy Adams", confirmedAt: "2026-09-20", candidatesWaiting: 0,
+    };
+    const split = splitSeeds(seedFacts.services!, {
+      accountTerms: proven.map((q) => q.term),
+      research: research.keywords!.map((k) => ({ keyword: k.keyword, intent: k.intent, volume: k.volume })),
+    });
+    ok("a phrase that names the shape and nothing it is for is not researched from",
+      split.skipped.some((x) => x.service === "day services"),
+      split.skipped.map((x) => `${x.service} (${x.mark})`).join(", ") || "nothing skipped");
+    ok("…and a phrase carrying a subject still is",
+      split.seeds.includes("commercial roofing") && split.seeds.includes("gutter installation"),
+      "a rule that eats a real service is worse than the broad seed it removes");
+    ok("every skip is NAMED, with what is wrong and what it was measured from",
+      split.skipped.every((x) => Boolean(x.service && x.mark && x.line && x.basis)));
+    ok("…and the line the run and the queue both print names them",
+      /day services/.test(skippedSeedsLine(split.skipped) ?? ""));
+
+    // A RESEARCH TERM ONLY A WEAK SEED COVERS. This is the row somebody would
+    // act on: 900 searches a month, and the only recorded service that lets it
+    // through names a shape and nothing it is for.
+    const seedResearch = {
+      ...research,
+      keywords: [
+        ...research.keywords!,
+        { keyword: "same day services near me", volume: 900, cpcDollars: 6, difficulty: 20,
+          intent: "commercial", clientRank: null, competitorRank: null },
+      ],
+    };
+    const seedGaps = keywordGaps({ ...gapInput, services: seedFacts, research: seedResearch });
+    ok("the reading carries every skipped seed so nothing is dropped in silence",
+      seedGaps.skippedSeeds.length === split.skipped.length && seedGaps.skippedSeeds.length > 0);
+    ok("a research term only a weak seed covers is dropped, never raised",
+      seedGaps.services.every((g) => g.terms.every((t) => t.keyword !== "same day services near me"))
+      && seedGaps.droppedAsIrrelevant >= 1,
+      "this is the row somebody would have bought traffic on");
+
+    // EVERY CONFIRMED SERVICE TOO BROAD TO SEED IS ITS OWN ANSWER, and it is
+    // not the same answer as nobody having recorded anything. Somebody DID the
+    // work; the list they wrote cannot carry a keyword strategy.
+    const allBroad: ClientServiceFacts = {
+      ...seedFacts,
+      services: [{ name: "day and evening", note: null }, { name: "individual", note: null }],
+    };
+    const broadGaps = keywordGaps({ ...gapInput, services: allBroad });
+    ok("every service being too broad is a DIFFERENT refusal from nobody recording one",
+      broadGaps.verdict === "no_usable_seeds" && broadGaps.services.length === 0);
+    ok("…and it names each one and says the services are still recorded",
+      /day and evening/.test(broadGaps.silence ?? "") && /still recorded/i.test(broadGaps.silence ?? ""));
+    ok("…and it never reads as nobody having done the work",
+      !/nobody has/i.test(broadGaps.silence ?? "") && !/nothing on this client's record/i.test(broadGaps.silence ?? ""));
+
+    // THE BOUNDARY. Seeding and suppression are separate jobs. Nothing here
+    // touches what a recorded service rules out, and a client who does not
+    // offer a broad category is entitled to rule it out broadly.
+    ok("a weak seed is still a recorded service — nothing here removes or rewrites one",
+      seedFacts.services!.some((x) => x.name === "day services")
+      && split.skipped.length + split.seeds.length === seedFacts.services!.length,
+      "every service is accounted for on one side or the other");
+    ok("…and a phrase nobody can judge seeds exactly as it did before",
+      splitSeeds([{ name: "partial hospitalization" }], { accountTerms: [], research: null }).seeds.length === 1,
+      "a null is unanswered and is never a no");
 
     // ── 21. What has to exist before traffic is worth sending ──────────────
     console.log(`\n${"─".repeat(72)}\n21. Traffic readiness\n${"─".repeat(72)}`);
