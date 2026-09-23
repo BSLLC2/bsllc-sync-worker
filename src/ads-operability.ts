@@ -67,8 +67,8 @@ export const ADS_JOBS: AdsJobSpec[] = [
     workflow: "ads-verify-outcomes.yml",
     label: "Ads outcome verification",
     cadence: "daily 06:40 UTC",
-    quiet: "Nothing due is normal — an after-check only exists 14 and 28 days after a change was applied, and nothing has been applied yet.",
-    fix: "Open bsllc-sync-worker → Actions → \"Ads — verify outcomes (read-only)\" and re-run it. It is read-only against every platform; it writes outcomes onto findings. While it is down, applied changes silently never get a verdict, which is precisely the record the pipeline exists to build — so this one being quietly broken costs more the longer it lasts.",
+    quiet: "Two passes, and \"nothing due\" means different things in each. Pass one only ever measures a finding WE applied, and nothing has been applied yet, so nought there is the normal state. Pass two measures every captured change, so its counts — accounts, episodes, measured — are what say whether this job is doing anything. episodes=0 with change history being captured means nothing has reached its 14-day horizon yet; accounts=0 means no change history has been captured at all, which is the capture job's problem rather than this one's.",
+    fix: "Open bsllc-sync-worker → Actions → \"Ads — verify outcomes (read-only)\" and re-run it. It is read-only against every platform; it writes outcomes onto findings and rows into ads_change_outcomes. While it is down, nothing builds the record of what actually worked — and the change feed it reads is deleted by the platform after 30 days, so a long outage here is a stretch of account history that gets captured and then never measured.",
   },
   {
     job: "ads_change_history",

@@ -141,6 +141,7 @@
     "ads-apply-approved": "tsx src/ads-apply-approved.ts",
     "ads-verify-outcomes": "tsx src/ads-verify-outcomes.ts",
     "verify-ads-change-history": "tsx src/verify-ads-change-history.ts",
+    "verify-ads-outcome-record": "tsx src/verify-ads-outcome-record.ts",
     "verify-ads-findings": "tsx src/verify-ads-findings.ts",
     "verify-ads-write": "tsx src/verify-ads-write.ts",
     "apply-ads-changes": "tsx src/apply-ads-changes.ts",

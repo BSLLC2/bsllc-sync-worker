@@ -1,10 +1,20 @@
 name: Ads — verify outcomes (read-only)
 
-# The after-check. Re-reads the entity a change was made to, 14 and 28 days
-# later, and writes the comparison onto the finding. Over months this becomes
-# the record no chat session can have: what actually worked, per client and per
-# tactic. A loss is recorded as plainly as a win — that is what stops us
-# re-recommending something already tried and failed here.
+# The after-check. Two passes, one job, one decision module
+# (src/ads/outcome-record.ts) so they cannot measure the same thing differently.
+#
+#   1. Findings WE applied — the entity is re-read 14 and 28 days later and the
+#      comparison is written onto the finding, with its own before-snapshot.
+#   2. Every captured change, whoever made it (ads_change_events, v194), rolled
+#      into episodes and written to ads_change_outcomes. This is the pass that
+#      actually produces a record: nothing has ever been applied through pass
+#      one, because clients.ads_write_authority is null on every client.
+#
+# Over months this becomes the record no chat session can have: what happened
+# after a change, per client and per tactic. A fall is recorded as plainly as a
+# rise — that is what stops us re-recommending something already tried here.
+# Every row says it observed rather than proved, and states the smallest move
+# its own window could tell apart from noise.
 #
 # READ-ONLY against every ad platform.
 on:
