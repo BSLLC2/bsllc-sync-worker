@@ -30,6 +30,21 @@ import {
   headroomReading, HEADROOM_COMFORT_RATIO, HEADROOM_MIN_CONVERSIONS, HEADROOM_MIN_LOST_SHARE,
 } from "./ads/headroom.js";
 import { sequenceFindings, stageOf, FINDING_STAGE, DEFAULT_STAGE } from "./ads/sequence.js";
+import {
+  relevanceOf, termCoversService, relevanceLine, noServicesLine,
+  MIN_SERVICE_TOKEN_LENGTH, type ClientServiceFacts,
+} from "./ads/service-relevance.js";
+import {
+  keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, GAP_CLICK_RATE,
+  type ResearchFacts,
+} from "./ads/keyword-gap.js";
+import {
+  trafficReadiness, isSiteRoot, CALL_TRACKING_PHONE_SHARE, CALL_TRACKING_MIN_LEADS,
+} from "./ads/traffic-readiness.js";
+import {
+  rankImpact, rankBasisOf, rankedAmount, leadValueCents,
+  RANK_BASIS, DEFAULT_RANK_BASIS,
+} from "./ads/impact-rank.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { applyChangeSet, rollbackChangeSet, type ChangeSet, type PriorValue } from "./apply-ads-changes.js";
 import { enumName, CONVERSION_CATEGORY, TRACKING_STATUS, BIDDING_STRATEGY_TYPE, CONVERSION_LAG_BUCKET } from "./ads/google-ads-adapter.js";
@@ -1518,6 +1533,307 @@ async function main() {
   ok("every finding type this engine produces has a declared stage",
     Array.from(new Set(grown.map((f) => f.findingType))).every((t) => FINDING_STAGE[t] != null),
     Array.from(new Set(grown.map((f) => f.findingType))).filter((t) => FINDING_STAGE[t] == null).join(", ") || "all declared");
+
+
+  // ── 19. Is a term something this client actually sells? ──────────────────
+  console.log(`\n${"─".repeat(72)}\n19. Relevance — a recorded answer, never a guess\n${"─".repeat(72)}`);
+  {
+    const confirmed: ClientServiceFacts = {
+      services: [{ name: "Commercial Roofing", note: null }, { name: "Gutter Installation", note: null }],
+      confirmedBy: "Katy Adams", confirmedAt: "2026-09-20", candidatesWaiting: 2,
+    };
+    const nobody: ClientServiceFacts =
+      { services: null, confirmedBy: null, confirmedAt: null, candidatesWaiting: 5 };
+    const proven = [{ term: "commercial roofing contractors", conversions: 6 }];
+
+    ok("a term that covers a confirmed service is relevant",
+      relevanceOf("emergency commercial roofing repair", confirmed, proven).verdict === "matched");
+    ok("…and it names WHICH service, so the row can say why it is there",
+      relevanceOf("emergency commercial roofing repair", confirmed, proven).service === "Commercial Roofing");
+    ok("a term missing a word that says which half of the market they are in is NOT relevant",
+      relevanceOf("residential roofing repair", confirmed, proven).verdict === "unmatched",
+      '"Commercial Roofing" must not match "residential roofing" — that is the failure this whole gate exists for');
+    ok("containment runs one way only",
+      termCoversService("emergency commercial roofing", "commercial roofing")
+      && !termCoversService("roofing", "commercial roofing"));
+    ok("case, punctuation and spacing fold and nothing else does",
+      termCoversService("COMMERCIAL-ROOFING!! repair", "Commercial Roofing")
+      && !termCoversService("commercial roofs", "commercial roofing"),
+      "no stemming and no plurals, so a person decides rather than the matcher");
+    ok("a converting query under the same service is named as proof",
+      relevanceOf("commercial roofing installation", confirmed, proven).provenBy === "commercial roofing contractors");
+    ok("…and its absence is not a mark against the term",
+      relevanceOf("gutter installation cost", confirmed, proven).verdict === "matched"
+      && relevanceOf("gutter installation cost", confirmed, proven).provenBy === null);
+    ok("NO CONFIRMED LIST MEANS NO ANSWER AT ALL",
+      relevanceOf("commercial roofing", nobody, proven).verdict === "no_services_recorded",
+      "not a volume fallback, not the seeds — the reading is refused");
+    ok("…and a converting query cannot let one through on its own",
+      relevanceOf("commercial roofing contractors", nobody, proven).verdict === "no_services_recorded",
+      "a single-term exception would be the volume-only fallback under another name");
+    ok("an empty list is treated the same as none",
+      relevanceOf("anything", { ...confirmed, services: [] }, proven).verdict === "no_services_recorded");
+    ok("a service too short to match safely matches nothing",
+      !termCoversService("ac repair near me", "AC"),
+      `under ${MIN_SERVICE_TOKEN_LENGTH} characters an abbreviation appears inside ordinary words`);
+    ok("the relevance line names the record and the person",
+      /Commercial Roofing/.test(relevanceLine(relevanceOf("commercial roofing repair", confirmed, proven), confirmed))
+      && /Katy Adams/.test(relevanceLine(relevanceOf("commercial roofing repair", confirmed, proven), confirmed)));
+    ok("the refusal says where to answer it and counts what is waiting",
+      /client page/i.test(noServicesLine(nobody)) && /5 candidate/.test(noServicesLine(nobody)));
+
+    // ── 20. The gap reading itself ─────────────────────────────────────────
+    console.log(`\n${"─".repeat(72)}\n20. What the account is not bidding on\n${"─".repeat(72)}`);
+    const research: ResearchFacts = {
+      ranAt: "2026-09-15", location: "United States", seeds: ["commercial roofing", "gutters"],
+      keywords: [
+        // Relevant, uncovered, priced — the row this exists to produce.
+        { keyword: "commercial roofing contractors near me", volume: 2_400, cpcDollars: 18.5, difficulty: 42, intent: "commercial", clientRank: 14, competitorRank: null },
+        { keyword: "commercial roofing replacement cost", volume: 880, cpcDollars: 12.0, difficulty: 38, intent: "commercial", clientRank: null, competitorRank: 3 },
+        // Relevant but already a keyword in the account.
+        { keyword: "commercial roofing", volume: 5_000, cpcDollars: 20, difficulty: 50, intent: "commercial", clientRank: 9, competitorRank: null },
+        // Relevant but already seen in the search-terms report.
+        { keyword: "commercial roofing contractors", volume: 1_100, cpcDollars: 17, difficulty: 40, intent: "commercial", clientRank: null, competitorRank: null },
+        // Under the per-term floor.
+        { keyword: "commercial roofing warranty transfer", volume: 40, cpcDollars: 9, difficulty: 10, intent: "informational", clientRank: null, competitorRank: null },
+        // Huge and NOT something they sell. The one that must never appear.
+        { keyword: "roofing jobs hiring", volume: 33_000, cpcDollars: 4, difficulty: 20, intent: "informational", clientRank: null, competitorRank: null },
+        // Relevant to the second service but under the per-service floor.
+        { keyword: "gutter installation near me", volume: 150, cpcDollars: 8, difficulty: 25, intent: "commercial", clientRank: null, competitorRank: null },
+      ],
+    };
+    const gapInput = {
+      research, services: confirmed,
+      existingKeywords: [{ text: "Commercial Roofing", matchType: "PHRASE", adGroupName: "Core", campaignName: "Search" }],
+      seenTerms: ["commercial roofing contractors", "flat roof repair"],
+      existingNegatives: new Set<string>(["jobs"]),
+      provenQueries: proven,
+      protectedPatterns: [] as string[],
+      accountTermCoverage: 0.82,
+    };
+    const gaps = keywordGaps(gapInput);
+    ok("a service with uncovered demand over the floors produces one row",
+      gaps.verdict === "found" && gaps.services.length === 1 && gaps.services[0]!.service === "Commercial Roofing");
+    ok("…and it is ONE row per service, not one per term",
+      gaps.services[0]!.terms.length === 2,
+      "a category nobody bids on, not a list of phrases");
+    ok("a term with 33,000 searches for something they do not sell is DROPPED",
+      gaps.services.every((g) => g.terms.every((t) => !/jobs/.test(t.keyword))) && gaps.droppedAsIrrelevant >= 1,
+      "volume is not relevance, and this is the row that would discredit the page");
+    ok("a term already in the account as a keyword is not a gap",
+      gaps.services[0]!.terms.every((t) => t.keyword !== "commercial roofing"));
+    ok("a term the account has been SEEN on is not a gap",
+      gaps.services[0]!.terms.every((t) => t.keyword !== "commercial roofing contractors"));
+    ok("a term under the per-term volume floor is not a gap",
+      gaps.services[0]!.terms.every((t) => t.volume >= GAP_MIN_TERM_VOLUME));
+    ok("a service whose uncovered demand is under the per-service floor raises nothing",
+      gaps.services.every((g) => g.service !== "Gutter Installation" && g.totalVolume >= GAP_MIN_SERVICE_VOLUME));
+    ok("the figure is searches x click rate x cost per click, and nothing else",
+      gaps.services[0]!.marketCostCents === Math.round(2_400 * GAP_CLICK_RATE * 18.5 * 100) + Math.round(880 * GAP_CLICK_RATE * 12 * 100));
+    ok("…and the claim says it is the SIZE of the demand rather than a gain",
+      /size of what is uncovered/i.test(gapClaim(gaps.services[0]!, gaps.coverageTrusted))
+      && !/would earn|this client would make|revenue/i.test(gapClaim(gaps.services[0]!, gaps.coverageTrusted)));
+    ok("the row says what makes it relevant",
+      gaps.services[0]!.lines.some((l) => /Relevant because/.test(l)));
+    ok("…and names the converting query that proves the service sells here",
+      gaps.services[0]!.lines.some((l) => /commercial roofing contractors/.test(l) && /enquiries/.test(l)));
+    ok("no confirmed list means no reading at all",
+      keywordGaps({ ...gapInput, services: nobody }).verdict === "no_services_recorded");
+    ok("…and no gap rows are produced on that verdict",
+      keywordGaps({ ...gapInput, services: nobody }).services.length === 0,
+      "a plausible list of services a client does not offer is worse than no list");
+    ok("no stored research means no reading, named",
+      keywordGaps({ ...gapInput, research: { ...research, keywords: null } }).verdict === "no_research");
+    ok("an unread keyword list means nothing can be called missing from it",
+      keywordGaps({ ...gapInput, existingKeywords: null }).verdict === "keywords_unread",
+      "the same refusal query-promotion makes, for the same reason");
+    ok("a negative somebody added deliberately blocks the term rather than raising it",
+      keywordGaps({
+        ...gapInput,
+        existingNegatives: new Set<string>(["cost"]),
+      }).services[0]!.terms.every((t) => !/cost/.test(t.keyword)));
+    ok("thin search-term coverage weakens the row in words",
+      /may already be reached/i.test(gapClaim(
+        keywordGaps({ ...gapInput, accountTermCoverage: 0.2 }).services[0]!,
+        keywordGaps({ ...gapInput, accountTermCoverage: 0.2 }).coverageTrusted)),
+      "'we have not seen it' is only as good as what the report saw");
+    ok("every service covered is a real answer and says how many were checked",
+      keywordGaps({ ...gapInput, seenTerms: research.keywords!.map((k) => k.keyword) }).verdict === "covered");
+
+    // ── 21. What has to exist before traffic is worth sending ──────────────
+    console.log(`\n${"─".repeat(72)}\n21. Traffic readiness\n${"─".repeat(72)}`);
+    ok("a bare site root is a bare site root, however it is written",
+      isSiteRoot("https://example.com") && isSiteRoot("example.com/") && isSiteRoot("http://example.com"));
+    ok("…and anything with a path, a query or a fragment is not",
+      !isSiteRoot("https://example.com/commercial-roofing")
+      && !isSiteRoot("https://example.com/?utm=x") && !isSiteRoot("https://example.com/#quote"));
+
+    const readinessCampaigns = [
+      { id: "100", name: "Search — Core Services", costMicros: 2_400_000_000, channelType: "SEARCH" },
+      { id: "200", name: "Search — Parked", costMicros: 1_000_000, channelType: "SEARCH" },
+    ];
+    const allRoot = trafficReadiness({
+      campaigns: readinessCampaigns,
+      destinations: [
+        { campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", finalUrl: "https://example.com/" },
+        { campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", finalUrl: "https://example.com" },
+      ],
+      conversionActions: [{ id: "1", name: "Form", status: "ENABLED", category: "SUBMIT_LEAD_FORM", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 40 }],
+      phone: { phoneLeads: 44, totalLeads: 70 },
+      campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros,
+      windowDays: 30,
+    });
+    const lp = allRoot.find((r) => r.key === "generic_landing_page" && r.campaignId === "100")!;
+    ok("a campaign whose every ad points at the front page is a finding", lp.state === "open");
+    ok("…and its figure is the campaign's own monthly spend, at stake rather than saved",
+      lp.atStakeCents === Math.round((2_400_000_000 / 10_000) * 1));
+    ok("a campaign under the spend floor raises nothing",
+      !allRoot.some((r) => r.campaignId === "200"),
+      "a parked campaign produces the same row as a live one otherwise");
+    const mixed = trafficReadiness({
+      campaigns: readinessCampaigns,
+      destinations: [
+        { campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", finalUrl: "https://example.com/" },
+        { campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", finalUrl: "https://example.com/roofing" },
+      ],
+      conversionActions: [], phone: { phoneLeads: 1, totalLeads: 70 },
+      campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros, windowDays: 30,
+    });
+    ok("a campaign with a mix of pages is CLEAR rather than absent",
+      mixed.find((r) => r.key === "generic_landing_page")!.state === "clear",
+      "silence is not a pass — the reading answers clear, open or cant_tell on every check");
+    const unreadUrls = trafficReadiness({
+      campaigns: readinessCampaigns,
+      destinations: [{ campaignId: "100", campaignName: "Search — Core Services", adGroupName: "Core", finalUrl: null }],
+      conversionActions: null, phone: null,
+      campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros, windowDays: 30,
+    });
+    ok("an unread final URL is cant_tell and never a good landing page",
+      unreadUrls.find((r) => r.key === "generic_landing_page")!.state === "cant_tell");
+    ok("unread conversion actions are cant_tell too",
+      unreadUrls.find((r) => r.key === "call_tracking_absent")!.state === "cant_tell");
+    const call = allRoot.find((r) => r.key === "call_tracking_absent")!;
+    ok("an account whose enquiries are mostly calls and which counts none is a finding",
+      call.state === "open" && 44 / 70 >= CALL_TRACKING_PHONE_SHARE);
+    ok("…and an account that DOES count calls is clear",
+      trafficReadiness({
+        campaigns: readinessCampaigns, destinations: [],
+        conversionActions: [{ id: "2", name: "Calls", status: "ENABLED", category: "PHONE_CALL_LEAD", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 12 }],
+        phone: { phoneLeads: 44, totalLeads: 70 },
+        campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros, windowDays: 30,
+      }).find((r) => r.key === "call_tracking_absent")!.state === "clear");
+    ok("too few leads to read a share is cant_tell rather than clear",
+      trafficReadiness({
+        campaigns: readinessCampaigns, destinations: [], conversionActions: [],
+        phone: { phoneLeads: 3, totalLeads: CALL_TRACKING_MIN_LEADS - 1 },
+        campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros, windowDays: 30,
+      }).find((r) => r.key === "call_tracking_absent")!.state === "cant_tell");
+    ok("a lead feed that was not read is never reported as no calls",
+      trafficReadiness({
+        campaigns: readinessCampaigns, destinations: [], conversionActions: [],
+        phone: { phoneLeads: null, totalLeads: null },
+        campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros, windowDays: 30,
+      }).find((r) => r.key === "call_tracking_absent")!.state === "cant_tell");
+
+    // ── 22. One measure, so a queue can be ordered ─────────────────────────
+    console.log(`\n${"─".repeat(72)}\n22. The ranking\n${"─".repeat(72)}`);
+    const rich: ClientEconomics = {
+      customerValueCents: 400_000, customerValueFromClient: true,
+      closeRatePct: 25, cplCeilingCents: 9_500, cplCeilingMonth: "2026-09",
+    };
+    const bare: ClientEconomics = {
+      customerValueCents: null, customerValueFromClient: false,
+      closeRatePct: null, cplCeilingCents: null, cplCeilingMonth: null,
+    };
+    const richTargets = costTargets(rich);
+    const bareTargets = costTargets(bare);
+
+    ok("a lead is worth the same in a rank as in a cost target",
+      leadValueCents(richTargets) === governingTarget(costTargets(rich).filter((t) => t.basis === "modelled"))!.cents,
+      "composed from costTargets rather than worked out again from the same columns");
+    const waste = rankImpact({ findingType: "wasted_search_term", estImpactCents: 64_500, impactUnit: "usd_month" }, richTargets, rich, null);
+    ok("a waste row ranks on the money it keeps", waste.cents === 64_500 && waste.basis === "recoverable");
+    const head = rankImpact({ findingType: "headroom", estImpactCents: 2_100, impactUnit: "leads_month" }, richTargets, rich, null);
+    ok("a LEADS row is turned into money through the client's own figures",
+      head.cents === Math.round(21 * (400_000 * 0.25)) && head.basis === "projected");
+    ok("…and it beats the waste row, which is the whole defect",
+      head.cents! > waste.cents!,
+      "a $645 saving used to outrank a growth finding worth three times it because one column held two units");
+    ok("a row that claims nothing on purpose still ranks, on what is already riding on it",
+      rankImpact({ findingType: "converting_search_term", estImpactCents: 0, impactUnit: "usd_month" }, richTargets, rich, 80_000).basis === "at_stake",
+      "the conversions already happen, so pricing them as a gain counts one twice");
+    ok("…and that row's figure is the money at stake, not a gain",
+      rankImpact({ findingType: "converting_search_term", estImpactCents: 0, impactUnit: "usd_month" }, richTargets, rich, 80_000).cents === 80_000);
+    ok("a leads row on a client with no recorded value is UNPRICED and names the figure",
+      rankImpact({ findingType: "headroom", estImpactCents: 2_100, impactUnit: "leads_month" }, bareTargets, bare, null).basis === "unpriced"
+      && /what one customer is worth/.test(rankImpact({ findingType: "headroom", estImpactCents: 2_100, impactUnit: "leads_month" }, bareTargets, bare, null).why));
+    ok("…and it is not given a nought, which would sink it silently",
+      rankImpact({ findingType: "headroom", estImpactCents: 2_100, impactUnit: "leads_month" }, bareTargets, bare, null).cents === null);
+    ok("a measurement row has no size in money and is not pretended to",
+      rankImpact({ findingType: "conversion_tracking_gap", estImpactCents: 0, impactUnit: "usd_month" }, richTargets, rich, null).basis === "none");
+    ok("a type nobody has placed claims no money",
+      rankBasisOf("something_new_entirely") === DEFAULT_RANK_BASIS && DEFAULT_RANK_BASIS === "none");
+    ok("a figure is never printed without the word that says what it is",
+      rankedAmount({ cents: 64_500, basis: "recoverable" }).includes("recoverable")
+      && rankedAmount({ cents: 64_500, basis: "projected" }).includes("projected")
+      && rankedAmount({ cents: 64_500, basis: "at_stake" }).includes("at stake"));
+    ok("…and an unpriced row prints a word rather than a number",
+      !/\d/.test(rankedAmount({ cents: null, basis: "unpriced" })));
+
+    const ranked = evaluate({ ...FIXTURE, services: confirmed, research, phone: { phoneLeads: 44, totalLeads: 70 } });
+    ok("every finding the engine produces carries a rank reading",
+      ranked.every((f) => f.rank != null));
+    ok("…and every type it produces has a declared basis",
+      Array.from(new Set(ranked.map((f) => f.findingType))).every((t) => RANK_BASIS[t] != null || stageOf(t) != null),
+      Array.from(new Set(ranked.map((f) => f.findingType))).filter((t) => RANK_BASIS[t] == null).join(", ") || "all placed or deliberately none");
+    ok("the ranking changes no figure, no severity and no risk",
+      ranked.every((f, i) => {
+        const plain = evaluate({ ...FIXTURE, services: confirmed, research, phone: { phoneLeads: 44, totalLeads: 70 } })[i]!;
+        return f.estImpactCents === plain.estImpactCents && f.severity === plain.severity && f.riskLevel === plain.riskLevel;
+      }));
+    ok("an unpriced row does not move its campaign group",
+      sequenceFindings(ranked).length === ranked.length,
+      "nothing is suppressed; a row this engine could not price keeps its group and its stage");
+    ok("the keyword-gap row reaches the engine's output",
+      ranked.some((f) => f.findingType === "keyword_gap"));
+    ok("…and the whole account falls silent on it with no confirmed services",
+      !evaluate({ ...FIXTURE, services: nobody, research }).some((f) => f.findingType === "keyword_gap"));
+    ok("the engine still produces nothing new on the untouched fixture",
+      !evaluate(FIXTURE).some((f) => ["keyword_gap", "generic_landing_page", "call_tracking_absent"].includes(f.findingType)),
+      "an adapter that reads none of the new inputs behaves exactly as it did");
+    // THE ORDER ITSELF. Two campaigns, and the one whose only figure is a
+    // LEADS row ranks first once that figure is money — which is the whole
+    // point. Ordering on `est_impact_cents` puts it second, because 21 leads
+    // is stored as 2,100 and a $645 saving as 64,500.
+    {
+      const mk = (id: string, type: string, est: number, unit: "usd_month" | "leads_month", rankCents: number) => ({
+        entityType: "campaign" as const, entityId: `${id}:${type}`, entityName: `Campaign ${id}`,
+        campaignId: id, findingType: type,
+        severity: "medium" as const, riskLevel: "low" as const, applicability: "vendor" as const,
+        title: `${type} on ${id}`, summary: "",
+        evidence: { metrics: {}, windowStart: "2026-06-13", windowEnd: "2026-09-10", lines: [] },
+        estImpactCents: est, impactUnit: unit, impactAssumption: "",
+        changePayload: null, guardNote: "",
+        rank: { cents: rankCents, basis: "projected" as const, why: "", blockedBy: null },
+      });
+      const pair = sequenceFindings([
+        mk("A", "wasted_search_term", 64_500, "usd_month", 64_500),
+        mk("B", "headroom", 2_100, "leads_month", 210_000),
+      ]);
+      ok("the queue is ordered on the one comparable figure, not on est_impact_cents",
+        pair[0]!.campaignId === "B",
+        "21 leads at $1,000 each is $21,000 a month and is stored in that column as 2,100");
+      const unpriced = sequenceFindings([
+        mk("A", "wasted_search_term", 64_500, "usd_month", 64_500),
+        { ...mk("B", "headroom", 2_100, "leads_month", 0), rank: { cents: null, basis: "unpriced" as const, why: "", blockedBy: null } },
+      ]);
+      ok("…and a row this engine could not price does not move its group either way",
+        unpriced[0]!.campaignId === "A" && unpriced.length === 2,
+        "neither sunk nor floated — it keeps its group and its stage");
+    }
+
+    ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 6);
+  }
 
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

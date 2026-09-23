@@ -24,6 +24,9 @@
 import type pg from "pg";
 import { randomUUID } from "node:crypto";
 import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics, type OutcomeFeedFacts } from "./rules.js";
+import type { ClientServiceFacts } from "./service-relevance.js";
+import type { ResearchFacts, ResearchKeyword } from "./keyword-gap.js";
+import type { PhoneDemandFacts } from "./traffic-readiness.js";
 
 export type Actor = string;
 
@@ -45,6 +48,19 @@ export async function upsertFinding(
   actor: Actor,
 ): Promise<UpsertResult> {
   const hash = evidenceHash(f.evidence.metrics);
+  /**
+   * WHERE THE ORDER IS PERSISTED, so the app never re-decides it.
+   *
+   * `evaluate` ranks every finding it produces and the reading rides on the
+   * row. A finding written before ruleset 6 carries no basis at all, which the
+   * dashboard reads as "not ranked yet" and says so rather than filling in a
+   * nought — every open finding is re-ranked by the next weekly audit, so
+   * nothing is backfilled and nothing stays unranked for long.
+   *
+   * It is NOT derived from `est_impact_cents`: that column carries dollars on
+   * one row, leads on another and a deliberate nought on a third.
+   */
+  const rank = f.rank ?? { cents: null, basis: "none" as const, why: "", blockedBy: null };
   const evidenceJson = JSON.stringify(f.evidence);
   const changePayloadJson = f.changePayload ? JSON.stringify(f.changePayload) : null;
   // A finding with a ready payload is already a proposal — there is nothing
@@ -68,13 +84,15 @@ export async function upsertFinding(
          status, severity, risk_level, applicability, title, summary,
          evidence_json, evidence_hash, window_start, window_end,
          est_impact_cents, impact_unit, impact_assumption,
-         change_payload_json, guard_note, ruleset_version, proposed_at
+         change_payload_json, guard_note, ruleset_version, proposed_at,
+         rank_cents, rank_basis, rank_why
        ) VALUES (
          $24, $1,$2,$3,$4,$5,$6,$7,
          $8,$9,$10,$11,$12,$13,
          $14,$15,$16,$17,
          $18,$19,$20,
-         $21,$22,$23, CASE WHEN $21::text IS NULL THEN NULL ELSE now() END
+         $21,$22,$23, CASE WHEN $21::text IS NULL THEN NULL ELSE now() END,
+         $25,$26,$27
        ) RETURNING id`,
       [
         clientId, platform, accountId, f.entityType, f.entityId, f.entityName, f.findingType,
@@ -82,6 +100,7 @@ export async function upsertFinding(
         evidenceJson, hash, f.evidence.windowStart, f.evidence.windowEnd,
         f.estImpactCents, f.impactUnit, f.impactAssumption,
         changePayloadJson, f.guardNote, ADS_RULESET_VERSION, randomUUID(),
+        rank.cents, rank.basis, rank.why,
       ],
     );
     const newId = rows[0]?.id;
@@ -114,6 +133,7 @@ export async function upsertFinding(
          window_start = $10, window_end = $11,
          est_impact_cents = $12, impact_unit = $13, impact_assumption = $14,
          change_payload_json = $15, guard_note = $16, ruleset_version = $17,
+         rank_cents = $18, rank_basis = $19, rank_why = $20,
          last_seen_at = now(), times_seen = times_seen + 1,
          dismissed_by = NULL, dismissed_at = NULL, dismissed_reason = NULL,
          proposed_at = CASE WHEN $15::text IS NULL THEN NULL ELSE now() END
@@ -123,6 +143,7 @@ export async function upsertFinding(
         f.title, f.summary, evidenceJson, hash, f.evidence.windowStart, f.evidence.windowEnd,
         f.estImpactCents, f.impactUnit, f.impactAssumption,
         changePayloadJson, f.guardNote, ADS_RULESET_VERSION,
+        rank.cents, rank.basis, rank.why,
       ],
     );
     await logEvent(
@@ -141,6 +162,7 @@ export async function upsertFinding(
        window_start = $10, window_end = $11,
        est_impact_cents = $12, impact_unit = $13, impact_assumption = $14,
        change_payload_json = $15, guard_note = $16, ruleset_version = $17,
+       rank_cents = $18, rank_basis = $19, rank_why = $20,
        last_seen_at = now(), times_seen = times_seen + 1,
        proposed_at = CASE WHEN $15::text IS NULL THEN NULL ELSE COALESCE(proposed_at, now()) END
      WHERE id = $1`,
@@ -149,6 +171,7 @@ export async function upsertFinding(
       f.title, f.summary, evidenceJson, hash, f.evidence.windowStart, f.evidence.windowEnd,
       f.estImpactCents, f.impactUnit, f.impactAssumption,
       changePayloadJson, f.guardNote, ADS_RULESET_VERSION,
+      rank.cents, rank.basis, rank.why,
     ],
   );
   // Only log when the numbers actually moved. A weekly "evidence refreshed"
@@ -476,6 +499,173 @@ export async function outcomeFeedFactsFor(
   } catch {
     // A table this deploy does not have yet reads as "not gathered", which the
     // reading treats as unknown rather than as an account with no outcomes.
+    return null;
+  }
+}
+
+// ── What this client actually sells ──────────────────────────────────────────
+/**
+ * The CONFIRMED services list, and only the confirmed one.
+ *
+ * `client_services` also holds candidates this system derived from the client's
+ * own SEO targets, their converting queries and their campaign names — and not
+ * one of them is returned here. A derived candidate is a guess, and letting the
+ * seed double as the answer is how nobody ever confirms a list and the
+ * "recorded" services become the guess wearing a better label. The gate is
+ * `confirmed_at IS NOT NULL` on the row AND `clients.services_confirmed_at` on
+ * the account: the first says somebody put this service there, the second says
+ * somebody looked at the whole list. A list nobody has reviewed as a whole is
+ * one ticked service and a wander off.
+ *
+ * A NULL `services` means nobody has confirmed a list, which the keyword-gap
+ * reading refuses on. It is never [] — an empty array would say somebody
+ * looked and recorded none, which is a different answer.
+ */
+export async function clientServicesFor(
+  c: pg.Client,
+  clientId: string,
+): Promise<ClientServiceFacts> {
+  const none: ClientServiceFacts =
+    { services: null, confirmedBy: null, confirmedAt: null, candidatesWaiting: 0 };
+  try {
+    const { rows: clientRows } = await c.query<{ by: string | null; at: string | null }>(
+      `SELECT services_confirmed_by AS by, services_confirmed_at::date::text AS at
+         FROM clients WHERE id = $1`,
+      [clientId],
+    );
+    const stamp = clientRows[0];
+
+    const { rows } = await c.query<{ name: string; note: string | null; confirmed: boolean }>(
+      `SELECT name, note, (confirmed_at IS NOT NULL) AS confirmed
+         FROM client_services
+        WHERE client_id = $1 AND active = true
+        ORDER BY sort_order ASC, name ASC`,
+      [clientId],
+    );
+    const waiting = rows.filter((r) => !r.confirmed).length;
+    if (!stamp?.at) return { ...none, candidatesWaiting: waiting };
+    const confirmed = rows.filter((r) => r.confirmed);
+    if (confirmed.length === 0) return { ...none, candidatesWaiting: waiting };
+    return {
+      services: confirmed.map((r) => ({ name: r.name, note: r.note })),
+      confirmedBy: stamp.by ?? null,
+      confirmedAt: stamp.at,
+      candidatesWaiting: waiting,
+    };
+  } catch {
+    // A table or column this deploy does not have yet reads as "nobody has
+    // confirmed a list", which produces no gap rows and says so.
+    return none;
+  }
+}
+
+// ── The keyword research already on record ───────────────────────────────────
+/**
+ * The newest completed research run for this client.
+ *
+ * NOTHING HERE CALLS DATAFORSEO. `research_requests` is filled by the worker's
+ * own `run-research` job, which an account manager starts from the client's SEO
+ * tab; this is a Postgres read of what that job stored. The rows are
+ * `DiscoveryKeyword`s as the dashboard's shared/schema.ts declares them, and
+ * the mapping to `ResearchKeyword` is the one place the shapes meet.
+ *
+ * Only `kind = 'discovery'`, because that is the only kind scoped to a client
+ * AND carrying the client's own organic position per term. `ideas` and `gap`
+ * runs are keyed to a seed or a competitor rather than to an account, so a
+ * keyword-gap reading built on one would be reading somebody else's research.
+ */
+export async function researchFactsFor(
+  c: pg.Client,
+  clientId: string,
+): Promise<ResearchFacts | null> {
+  try {
+    const { rows } = await c.query<{
+      result_json: string | null; params_json: string | null;
+      location_name: string | null; ran: string | null;
+    }>(
+      `SELECT result_json, params_json, location_name, completed_at::date::text AS ran
+         FROM research_requests
+        WHERE client_id = $1 AND kind = 'discovery' AND status = 'done'
+          AND result_json IS NOT NULL
+        ORDER BY completed_at DESC NULLS LAST
+        LIMIT 1`,
+      [clientId],
+    );
+    const r = rows[0];
+    if (!r?.result_json) return null;
+
+    let parsed: unknown;
+    try { parsed = JSON.parse(r.result_json); } catch { return null; }
+    if (!Array.isArray(parsed)) return null;
+
+    let seeds: string[] = [];
+    if (r.params_json) {
+      try {
+        const p = JSON.parse(r.params_json) as { seeds?: unknown };
+        if (Array.isArray(p?.seeds)) seeds = p.seeds.filter((x): x is string => typeof x === "string");
+      } catch { /* an unreadable params blob costs the seeds line and nothing else */ }
+    }
+
+    const num = (v: unknown): number | null =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+    const keywords: ResearchKeyword[] = parsed
+      .map((raw): ResearchKeyword | null => {
+        const k = raw as Record<string, unknown>;
+        const keyword = typeof k?.keyword === "string" ? k.keyword.trim() : "";
+        if (!keyword) return null;
+        return {
+          keyword,
+          volume: num(k.volume),
+          // DataForSEO reports cost per click in the currency of the location,
+          // as a plain number of DOLLARS. This is the one place that unit
+          // crosses into this engine, and it crosses once.
+          cpcDollars: num(k.cpc),
+          difficulty: num(k.difficulty),
+          intent: typeof k.intent === "string" ? k.intent : null,
+          clientRank: num(k.clientRank),
+          competitorRank: num(k.competitorRank),
+        };
+      })
+      .filter((k): k is ResearchKeyword => k != null);
+
+    return { keywords, ranAt: r.ran ?? null, location: r.location_name ?? null, seeds };
+  } catch {
+    return null;
+  }
+}
+
+// ── How this client's enquiries actually arrive ──────────────────────────────
+/**
+ * Phone leads against every lead, over the window.
+ *
+ * `web_inquiries.form_name` is where a call lands: the dashboard's
+ * `server/webform.ts` labels a post from a call-tracking webhook
+ * `Phone: <source>` and a real form submission with the form's own name, so the
+ * prefix is the recorded distinction rather than an inference from a name.
+ *
+ * NULL EVERYWHERE MEANS NOT READ. An account whose lead feed could not be read
+ * must not report that none of its enquiries are calls.
+ */
+export async function phoneDemandFor(
+  c: pg.Client,
+  clientSlug: string,
+  windowStart: string,
+  windowEnd: string,
+): Promise<PhoneDemandFacts | null> {
+  try {
+    const { rows } = await c.query<{ total: string; phone: string }>(
+      `SELECT count(*)::text AS total,
+              count(*) FILTER (WHERE form_name LIKE 'Phone:%')::text AS phone
+         FROM web_inquiries
+        WHERE client_slug = $1
+          AND submitted_at >= $2::date AND submitted_at < ($3::date + 1)
+          AND status NOT IN ('junk', 'internal_test')`,
+      [clientSlug, windowStart, windowEnd],
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return { totalLeads: Number(r.total), phoneLeads: Number(r.phone) };
+  } catch {
     return null;
   }
 }
