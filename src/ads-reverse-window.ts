@@ -89,17 +89,25 @@ async function campaignNames(
 /**
  * A reversal, as a finding the existing queue understands.
  *
- * `entity_id` carries the WINDOW, so reversing a later window files its own
- * row rather than colliding with an earlier one under
+ * `entity_id` carries the WINDOW and the THING, so reversing a later window
+ * files its own row rather than colliding with an earlier one under
  * `uq_ads_findings_key`, and re-running the same window writes nothing new.
+ *
+ * It is keyed on the entity's own label rather than its position in the plan,
+ * because the plan is sorted newest-change-first: a change landing between two
+ * runs would shift every position after it and file a second row for work
+ * already on the queue.
+ *
  * `upsertFinding`'s own lifecycle rules then do the rest: a reversal somebody
  * dismissed stays dismissed, and one already approved or applied is left
  * exactly where it is.
  */
-function asFinding(item: ReversalItem, windowStart: Date, windowEnd: Date, index: number): DerivedFinding {
+const keySlug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+
+function asFinding(item: ReversalItem, windowStart: Date, windowEnd: Date): DerivedFinding {
   return {
     entityType: "campaign",
-    entityId: `revert:${ymd(windowStart)}:${item.op}:${index}`,
+    entityId: `revert:${ymd(windowStart)}:${item.op}:${keySlug(item.entity)}`,
     entityName: item.entity,
     findingType: "change_reversal",
     severity: "medium",
@@ -221,10 +229,10 @@ async function main() {
         continue;
       }
       let filed = 0;
-      for (const [i, item] of plan.reversible.entries()) {
+      for (const item of plan.reversible) {
         const out = await upsertFinding(
           c, account.client_id, account.platform, account.account_id,
-          asFinding(item, windowStart, windowEnd, i), ACTOR,
+          asFinding(item, windowStart, windowEnd), ACTOR,
         );
         if (out.outcome === "created") filed += 1;
       }
