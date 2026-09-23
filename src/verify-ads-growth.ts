@@ -434,8 +434,15 @@ hr("12. End to end — an over-target account is never told to grow");
   }));
   ok("NO unmet_demand row exists", found.filter((f) => f.findingType === "unmet_demand").length === 0);
   ok("NO headroom row exists either", found.filter((f) => f.findingType === "headroom").length === 0);
+  // The PROPERTY is that a cost row owns this campaign, so growth stands down
+  // rather than going silent for no reason a reader can see. WHICH cost row
+  // depends on the bid strategy: this fixture is MAXIMIZE_CONVERSIONS with no
+  // target, and `bid_target_absent` supersedes `cpa_above_target` there (one
+  // cause, one row). Naming only the older type made this fail the moment the
+  // two rulesets met — the behaviour was right and the assertion was too
+  // specific.
   ok("the cost row that owns this campaign does exist",
-    found.some((f) => f.findingType === "cpa_above_target"));
+    found.some((f) => f.findingType === "cpa_above_target" || f.findingType === "bid_target_absent"));
   ok("nothing anywhere on this account proposes spending more",
     found.every((f) => f.findingType !== "budget_limited"));
 }
