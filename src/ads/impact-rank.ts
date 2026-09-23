@@ -106,6 +106,11 @@ export const RANK_BASIS: Record<string, RankBasis> = {
   // Money that could come in, through the client's own close rate and value.
   budget_limited: "projected",
   headroom: "projected",
+  // v7. Searches this account already bids on and is losing to Ad Rank, sized
+  // from its own impression share, click-through rate and — where the column
+  // can be read — its own conversion rate. A forecast of a change nobody has
+  // made. NEVER `recoverable`: nothing here is money leaving the account now.
+  unmet_demand: "projected",
 
   // Money already flowing through the thing the row is about. No gain claimed.
   no_conversions: "at_stake",

@@ -90,6 +90,14 @@ export const FINDING_STAGE: Record<string, FindingStage> = {
   headroom: "grow",
   converting_search_term: "grow",
   keyword_gap: "grow",
+  unmet_demand: "grow",
+
+  // Not growth and not a repair: it is the reason the growth on this account
+  // cannot be counted. `measure` is where it belongs for the same reason
+  // `conversion_tracking_gap` is — it names figures everything else is decided
+  // from, and it must not queue-jump the waste above it or be pushed below the
+  // growth rows it is standing in for.
+  growth_unreadable: "measure",
 };
 
 /**

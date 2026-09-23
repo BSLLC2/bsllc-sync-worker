@@ -34,11 +34,13 @@ import {
   type ExistingKeyword,
 } from "./query-promotion.js";
 import { headroomReading, headroomClaim } from "./headroom.js";
+import { demandCaptureReading, demandCaptureClaim, type DemandCaptureReading } from "./demand-capture.js";
+import { growthSilenceReading, growthSilenceClaim, type GrowthSilenceFact } from "./growth-silence.js";
 import { sequenceFindings } from "./sequence.js";
 import { keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, type ResearchFacts } from "./keyword-gap.js";
 import type { ClientServiceFacts } from "./service-relevance.js";
 import { trafficReadiness, CALL_TRACKING_PHONE_SHARE, type AdDestination, type PhoneDemandFacts } from "./traffic-readiness.js";
-import { rankImpact, type RankReading } from "./impact-rank.js";
+import { rankImpact, leadValueCents, type RankReading } from "./impact-rank.js";
 
 /**
  * Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts.
@@ -1282,6 +1284,17 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     ? targets.map((t) => t.line)
     : ["No cost-per-lead ceiling and no customer value are recorded for this client, so nothing here can say whether what a conversion costs is acceptable — only what it costs."];
 
+  /** What a lead is worth here, off the `modelled` cost target rather than
+   *  recomputed, so a lead is worth the same in a growth projection as it is in
+   *  every cost target this engine prints. Null where nobody has recorded one. */
+  const perLeadCents = leadValueCents(targets);
+  /** Every campaign's demand reading, kept so the growth-silence row at the
+   *  end can say which of them refused and why. */
+  const demandReadings: DemandCaptureReading[] = [];
+  /** …and every campaign's headroom reading, for the same reason. Both are
+   *  collected rather than re-run: a second pass would be a second answer. */
+  const headroomReadings: { verdict: string; silence: string | null }[] = [];
+
   // ── 1. Campaign-level: budget-limited, rank-limited, converting nothing ────
   for (const c of input.campaigns) {
     if (c.costMicros < THRESHOLDS.campaignMinSpendMicros) continue;
@@ -1598,6 +1611,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       readiness: biddingByCampaign.get(c.id) ?? null,
       rankRuleAlsoFired: rankLost > THRESHOLDS.rankLostShare,
     });
+    headroomReadings.push({ verdict: head.verdict, silence: head.silence });
     if (head.verdict === "room" && head.extraConversions != null && head.extraSpendMicros != null) {
       out.push({
         entityType: "campaign", entityId: `${c.id}:headroom`, entityName: c.name, campaignId: c.id,
@@ -1636,6 +1650,82 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         impactAssumption: headroomClaim(head, BUDGET_CAPTURE_RATE),
         changePayload: null,
         guardNote: "No API change proposed. A bid or a bid target is deliberately outside the guarded path, and the daily cap here is under the floor at which this engine proposes a budget move at all.",
+      });
+    }
+
+    // ── How big is the demand this campaign is already losing? ─────────────
+    // `rank_limited` above says more budget will not fix an Ad Rank problem and
+    // claims no figure, which is right about the FIX — nothing here can say
+    // what a bid change does. This is the other question, which is answerable:
+    // how many searches this campaign already bids on go to somebody else. It
+    // never repeats the fix advice and defers to that row for it.
+    //
+    // A PROJECTION. Never `recoverable`: nothing here is money leaving the
+    // account now, and the basis word travels with the figure.
+    const dem = demandCaptureReading({
+      campaignId: c.id, campaignName: c.name, channelType: c.channelType,
+      costMicros: c.costMicros, clicks: c.clicks, impressions: c.impressions,
+      conversions: c.conversions,
+      impressionShare: c.impressionShare,
+      rankLostShare: c.rankLostShare, budgetLostShare: c.budgetLostShare,
+      // Composed from the one tracking reading, never re-decided. A conversion
+      // rate read off a column counting page views is a page-view rate, and
+      // projecting leads through it is the finding doing harm.
+      columnCountsOutcomes: tracking.countsOutcomes,
+      targetCents: target?.cents ?? null,
+      targetBasis: target?.basis ?? null,
+      leadValueCents: perLeadCents,
+      // Passed, never recomputed: the float-denominator refusal and the
+      // broken-column refusal are both already inside this one figure.
+      costPerConversionCents: cpaCents,
+      // The same haircut the budget rule and the headroom rule apply, so no two
+      // rules can print two different sizes for one campaign.
+      captureRate: BUDGET_CAPTURE_RATE,
+      rankRuleFloor: THRESHOLDS.rankLostShare,
+      minSpendMicros: THRESHOLDS.campaignMinSpendMicros,
+    });
+    demandReadings.push(dem);
+    if (dem.verdict === "demand") {
+      out.push({
+        entityType: "campaign", entityId: `${c.id}:demand`, entityName: c.name, campaignId: c.id,
+        findingType: "unmet_demand",
+        // Never high. Demand nobody is capturing is an opportunity, and putting
+        // it at the weight of money leaving the account for nothing is how a
+        // queue stops sorting anything.
+        severity: "medium",
+        riskLevel: "low",
+        // Ad Rank is bid, expected click-through and landing-page experience.
+        // Bids have no guarded path here by design and the quality half is ad
+        // copy and landing pages. A brief, never a button.
+        applicability: "vendor",
+        title: dem.tier === "money" && dem.netValueCents != null
+          ? `"${c.name}" is losing ${pct(dem.rankLostShare ?? 0)} of the searches it bids on — about ${(dem.extraLeads ?? 0).toFixed(1)} enquiries a month it is not getting`
+          : dem.tier === "leads" && dem.extraLeads != null
+            ? `"${c.name}" is losing ${pct(dem.rankLostShare ?? 0)} of the searches it bids on — about ${dem.extraLeads.toFixed(1)} enquiries a month it is not getting`
+            : `"${c.name}" is losing ${pct(dem.rankLostShare ?? 0)} of the searches it bids on — about ${Math.round(dem.extraClicks ?? 0)} clicks a month it is not getting`,
+        summary: `This is demand the client is ALREADY targeting and already relevant to: every one of these searches matched a keyword `
+          + `in this campaign and the account was in the auction for it. It is not being outspent — the share it gives up goes to Ad Rank, `
+          + `so it is being outranked or held back on quality. That makes it the cheapest growth on the account to reach, because nothing `
+          + `has to be researched, built or written from nothing. `
+          + (dem.tier === "clicks"
+            ? `How much it is worth cannot be said yet, and the reason is on the row rather than assumed away.`
+            : `What it is worth is projected from this campaign's own numbers and is a forecast, not money on the record.`)
+          + ` The fix itself — bid, ad relevance, landing page — is the row on this campaign's Ad Rank, not this one.`,
+        evidence: {
+          metrics: dem.metrics,
+          ...win,
+          lines: [...dem.lines, ...dem.preconditions, ...targetLines],
+        },
+        // LEADS, never dollars, for `headroom`'s reason: the money tier is
+        // already the leads figure multiplied by a recorded lead value, and
+        // claiming both would run one recorded number through the projection
+        // twice. Nought where no leads figure could be reached — and `rankImpact`
+        // reads that as "projects no extra leads this run", which is what it is.
+        estImpactCents: dem.extraLeads != null ? Math.round(dem.extraLeads * 100) : 0,
+        impactUnit: "leads_month",
+        impactAssumption: demandCaptureClaim(dem, BUDGET_CAPTURE_RATE),
+        changePayload: null,
+        guardNote: "No API change proposed and none is possible here. Ad Rank moves on bid, expected click-through and landing-page experience; bids are deliberately outside the guarded path and the other two are people-work.",
       });
     }
   }
@@ -2295,6 +2385,129 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         ? "Nothing to apply. Choosing a landing page, or writing one, is not a guarded operation and is not mechanical."
         : "Nothing to apply. Creating or configuring a conversion action changes what a live account bids toward and is outside the guarded path on purpose.",
     });
+  }
+
+  // ── 10. Why this account has no growth findings ──────────────────────────
+  // THE ROW THAT EXISTS BECAUSE THREE REFUSALS WERE BEING DROPPED ON THE
+  // FLOOR. `gaps`, `promotions`, the headroom readings and the demand readings
+  // above each write a precise sentence when they have nothing to say, and
+  // until this nothing read any of them: the loops iterate the entries, an
+  // empty list has no entries, and the reason left the process with the
+  // process. An account whose growth readings are all blocked therefore looked
+  // exactly like an account with no growth on it, and those are opposite
+  // situations.
+  //
+  // It claims NOTHING — no money, no leads, no opportunity — because it does
+  // not know whether there is one. That is the point of it.
+  {
+    const growthTypes = new Set(["headroom", "converting_search_term", "keyword_gap", "budget_limited", "unmet_demand"]);
+    const growthRaised = out.filter((f) => growthTypes.has(f.findingType)).length;
+
+    const facts: GrowthSilenceFact[] = [];
+
+    // Cheapest to answer first, deliberately. The list is rendered in the
+    // order it is built and never re-sorted by anything computed.
+    if (gaps.verdict !== "found") {
+      const fixable = gaps.verdict === "no_services_recorded" || gaps.verdict === "no_research" || gaps.verdict === "keywords_unread";
+      facts.push({
+        findingType: "keyword_gap",
+        label: "Demand this client sells into that no campaign bids on",
+        verdict: gaps.verdict,
+        silence: gaps.silence,
+        fixable,
+        unlock: gaps.verdict === "no_services_recorded"
+          ? "Confirm what this client actually sells, on their client page. The list is already seeded from their own converting queries, their SEO targets and their campaign names, so it is ticking rather than typing — and until somebody ticks it, a list of demand for services they do not offer is the only thing this could produce."
+          : gaps.verdict === "no_research"
+            ? "Run the keyword research on this client's SEO tab. This reading compares that research against what the account holds, and with no research there is nothing to compare."
+            : gaps.verdict === "keywords_unread"
+              ? "The account's keyword list could not be read this run. Check the connector on Admin -> Connectors; a term cannot be called missing from a list nobody could see."
+              : null,
+        owner: fixable ? "us" : null,
+      });
+    }
+    if (promotions.verdict !== "found") {
+      const fixable = promotions.verdict === "column_not_outcomes" || promotions.verdict === "keywords_unread";
+      facts.push({
+        findingType: "converting_search_term",
+        label: "Searches that already convert and are not keywords yet",
+        verdict: promotions.verdict,
+        silence: promotions.silence,
+        fixable,
+        unlock: promotions.verdict === "column_not_outcomes"
+          ? "Settle what this account counts as a conversion. Until a conversion here is an enquiry, a query that 'converted' may have produced a page view, and bidding deliberately on whichever queries produce the most of those is this reading doing harm rather than nothing."
+          : promotions.verdict === "keywords_unread"
+            ? "The account's keyword list could not be read this run, so nothing can say a converting query is missing from it."
+            : null,
+        owner: fixable ? "us" : null,
+      });
+    }
+    {
+      const blockedHead = headroomReadings.find((h) => h.verdict === "cant_tell");
+      const anyRoom = headroomReadings.some((h) => h.verdict === "room");
+      if (!anyRoom && blockedHead) {
+        facts.push({
+          findingType: "headroom",
+          label: "Campaigns converting cheaply enough to buy more of",
+          verdict: blockedHead.verdict,
+          silence: blockedHead.silence,
+          fixable: true,
+          unlock: target == null
+            ? "Record what a lead may cost this client — a cost-per-lead ceiling, or a customer value and a close rate. This reading is a MARGIN measured against that figure, so without it there is nothing to measure and no campaign on this account can be called cheap enough to buy more of."
+            : "Settle what this account counts as a conversion. This reading divides money by conversions, and that division is refused outright on a column nobody has confirmed is counting enquiries.",
+          owner: target == null ? "client" : "us",
+        });
+      }
+    }
+    {
+      const blockedDem = demandReadings.find((d) => d.verdict === "cant_tell");
+      const anyDemand = demandReadings.some((d) => d.verdict === "demand");
+      if (!anyDemand && blockedDem) {
+        facts.push({
+          findingType: "unmet_demand",
+          label: "Searches this account already bids on and is losing",
+          verdict: blockedDem.verdict,
+          silence: blockedDem.silence,
+          fixable: true,
+          unlock: "The platform reported no impression share for these campaigns. On a search campaign that is a connector or permissions problem worth checking; on a campaign that is not a search campaign there is no such figure to report and this reading has nothing to say about it.",
+          owner: "us",
+        });
+      }
+    }
+
+    const gsr = growthSilenceReading({
+      accountId: input.accountId,
+      accountName: input.accountId,
+      facts,
+      accountCostMicros: accountTotals.costMicros,
+      minSpendMicros: THRESHOLDS.accountMinSpendMicros,
+      growthFindingsRaised: growthRaised,
+    });
+    if (gsr.verdict === "all_blocked" || gsr.verdict === "partly_blocked") {
+      out.push({
+        entityType: "account", entityId: `${input.accountId}:growth_unreadable`,
+        entityName: input.accountId, campaignId: null,
+        findingType: "growth_unreadable",
+        // High only where EVERY growth reading is blocked: a queue that can
+        // physically only ever show waste is a different problem from one
+        // missing a reading or two, and the severity is the only thing on the
+        // row that says which.
+        severity: gsr.verdict === "all_blocked" ? "high" : "medium",
+        riskLevel: "low",
+        applicability: "vendor",
+        title: gsr.title,
+        summary: gsr.summary,
+        evidence: { metrics: gsr.metrics, ...win, lines: gsr.lines },
+        // Nought, and `RANK_BASIS` gives this type `none` rather than
+        // `unpriced`: `unpriced` means a recorded figure would put the row in
+        // the money order, and no figure would. This row is about the question
+        // being unanswerable, not about its answer being unrecorded.
+        estImpactCents: 0,
+        impactUnit: "usd_month",
+        impactAssumption: growthSilenceClaim(gsr),
+        changePayload: null,
+        guardNote: "Nothing to apply. Every line here is a figure somebody records or a connector somebody fixes, and none of it is a change to a live ad account.",
+      });
+    }
   }
 
   /**
