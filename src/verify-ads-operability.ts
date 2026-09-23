@@ -52,7 +52,17 @@ if (!WF_DIR) {
   ok("workflow files are on disk", false, "run this from the worker checkout");
 } else {
   for (const spec of ADS_JOBS) {
-    const text = readFileSync(join(WF_DIR, spec.workflow), "utf8");
+    // A workflow that has been DELETED is the failure this file exists to
+    // catch, so it has to read as a named FAIL. Letting readFileSync throw
+    // gives a stack trace, which reads as "the guard is broken" rather than
+    // "a job is gone" — and a guard nobody trusts is a guard nobody runs.
+    let text: string;
+    try {
+      text = readFileSync(join(WF_DIR, spec.workflow), "utf8");
+    } catch {
+      ok(`${spec.workflow} is on disk`, false, `NOT FOUND — ${spec.job} is in ADS_JOBS but its workflow is gone. Either restore it, or remove the job here and say where it moved to.`);
+      continue;
+    }
     ok(`${spec.workflow} stamps --job=${spec.job}`, text.includes(`heartbeat -- --job=${spec.job}`));
     const hbBlock = text.slice(text.indexOf("- name: Heartbeat"));
     ok(`  …with if: always(), so a FAILED run is recorded, not silent`, /if:\s*always\(\)/.test(hbBlock));
@@ -69,7 +79,6 @@ if (WF_DIR) {
     ads_findings: { hours: 168, why: "Mondays only — a week" },
     ads_apply_approved: { hours: 1, why: "hourly at :15" },
     ads_verify_outcomes: { hours: 24, why: "daily 06:40 UTC" },
-    ads_vendor_briefs: { hours: 17 * 24, why: "the 15th to the 1st of a 31-day month" },
   };
   for (const [job, exp] of Object.entries(EXPECT)) {
     const c = cad.get(job);
@@ -81,7 +90,14 @@ if (WF_DIR) {
   const findings = cad.get("ads_findings")?.slaHours ?? 0;
   const apply = cad.get("ads_apply_approved")?.slaHours ?? 0;
   ok("the weekly job and the hourly job did NOT collapse to one number", findings > apply * 10, `${Math.round(findings)}h vs ${Math.round(apply)}h`);
-  ok("the fortnightly brief cron parses at all", cronMaxGapHours("10 7 1,15 * *") === 17 * 24);
+  // `ads_vendor_briefs` is deliberately absent from EXPECT above (2026-09-22):
+  // the generator moved into the dashboard app and is a Vercel cron there,
+  // stamping the same heartbeat key, which the app's own Data health page reads
+  // through its own JOB_SLA_HOURS entry. This file derives cadence from WORKER
+  // crons, so a job with no worker workflow is correctly not found. The parser
+  // itself still has to handle a day-of-month LIST — no worker cron uses one
+  // today, and the arithmetic is what would silently rot without a caller.
+  ok("a day-of-month list cron still parses (no worker job uses one today)", cronMaxGapHours("10 7 1,15 * *") === 17 * 24);
 
   // GitHub does not deliver this repo's schedules on the cron it is given:
   // sampled 2026-09-14, the last 200 scheduled runs of every sub-hourly and
