@@ -578,10 +578,17 @@ export async function clientServicesFor(
     );
     const stamp = clientRows[0];
 
+    // ONLY WHAT THEY SELL. `stance` (v198) records three different things: a
+    // service they offer, one their own site says they do NOT offer, and one
+    // somebody looked for and found no sign of. Reading all three as "their
+    // services" fed the second list into the keyword-gap rule as a SEED — so a
+    // clinic that refers detox out would have had research expanded from
+    // "detox", which is the one row that discredits the whole page. The second
+    // list's own job, suppression, is unchanged and is done in the dashboard.
     const { rows } = await c.query<{ name: string; note: string | null; confirmed: boolean }>(
       `SELECT name, note, (confirmed_at IS NOT NULL) AS confirmed
          FROM client_services
-        WHERE client_id = $1 AND active = true
+        WHERE client_id = $1 AND active = true AND stance = 'offers'
         ORDER BY sort_order ASC, name ASC`,
       [clientId],
     );

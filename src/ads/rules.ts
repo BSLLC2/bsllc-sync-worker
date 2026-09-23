@@ -38,6 +38,7 @@ import { demandCaptureReading, demandCaptureClaim, type DemandCaptureReading } f
 import { growthSilenceReading, growthSilenceClaim, type GrowthSilenceFact } from "./growth-silence.js";
 import { sequenceFindings } from "./sequence.js";
 import { keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, type ResearchFacts } from "./keyword-gap.js";
+import { skippedSeedsLine } from "./service-seed.js";
 import type { ClientServiceFacts } from "./service-relevance.js";
 import { trafficReadiness, CALL_TRACKING_PHONE_SHARE, type AdDestination, type PhoneDemandFacts } from "./traffic-readiness.js";
 import { rankImpact, leadValueCents, type RankReading } from "./impact-rank.js";
@@ -2657,7 +2658,8 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     // Cheapest to answer first, deliberately. The list is rendered in the
     // order it is built and never re-sorted by anything computed.
     if (gaps.verdict !== "found") {
-      const fixable = gaps.verdict === "no_services_recorded" || gaps.verdict === "no_research" || gaps.verdict === "keywords_unread";
+      const fixable = gaps.verdict === "no_services_recorded" || gaps.verdict === "no_research"
+        || gaps.verdict === "keywords_unread" || gaps.verdict === "no_usable_seeds";
       facts.push({
         findingType: "keyword_gap",
         label: "Demand this client sells into that no campaign bids on",
@@ -2666,12 +2668,29 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         fixable,
         unlock: gaps.verdict === "no_services_recorded"
           ? "Confirm what this client actually sells, on their client page. The list is already seeded from their own converting queries, their SEO targets and their campaign names, so it is ticking rather than typing — and until somebody ticks it, a list of demand for services they do not offer is the only thing this could produce."
-          : gaps.verdict === "no_research"
-            ? "Run the keyword research on this client's SEO tab. This reading compares that research against what the account holds, and with no research there is nothing to compare."
-            : gaps.verdict === "keywords_unread"
-              ? "The account's keyword list could not be read this run. Check the connector on Admin -> Connectors; a term cannot be called missing from a list nobody could see."
-              : null,
+          : gaps.verdict === "no_usable_seeds"
+            ? "Sharpen at least one recorded service on the client page so it names what the work treats or sells. Every service on this account is on record and every one of them is broad enough that researching from it would return anybody's traffic, which is the spend this refuses to propose."
+            : gaps.verdict === "no_research"
+              ? "Run the keyword research on this client's SEO tab. This reading compares that research against what the account holds, and with no research there is nothing to compare."
+              : gaps.verdict === "keywords_unread"
+                ? "The account's keyword list could not be read this run. Check the connector on Admin -> Connectors; a term cannot be called missing from a list nobody could see."
+                : null,
         owner: fixable ? "us" : null,
+      });
+    } else if (gaps.skippedSeeds.length > 0) {
+      // SOME SERVICES WERE RESEARCHED FROM AND SOME WERE HELD BACK. There is a
+      // gap row on the queue, so nothing is blocked outright — but what is on
+      // it is less than what is on the account, which is exactly what this row
+      // exists to say. Named here as well as on the finding itself, because the
+      // finding only appears for services that DID produce something.
+      facts.push({
+        findingType: "keyword_gap",
+        label: "Recorded services too broad to research from",
+        verdict: "found",
+        silence: skippedSeedsLine(gaps.skippedSeeds),
+        fixable: true,
+        unlock: "Sharpen these on the client page so each one names what the work treats or sells. They stay recorded either way, and they still rule out what they rule out; what they cannot do is say which searches are worth looking at.",
+        owner: "us",
       });
     }
     if (promotions.verdict !== "found") {

@@ -447,6 +447,66 @@ hr("12. End to end — an over-target account is never told to grow");
     found.every((f) => f.findingType !== "budget_limited"));
 }
 
+hr("11c. A services list is not a keyword strategy — the skip reaches the queue");
+{
+  // The company owner, on a proposal built out of a real client's own service
+  // list: "keywords like day program won't do anything for our keywords when
+  // not more tightly associated to the core services — in fact it will likely
+  // burn spend." A recorded service and a research seed are two different
+  // things, and a seed dropped with nobody told is the failure this checks.
+  //
+  // Every service, keyword and figure below is invented. Nothing was read from
+  // production and no ad account was touched.
+  const RESEARCH = {
+    ranAt: "2026-09-20", location: "United States", seeds: ["brazing"],
+    keywords: [
+      { keyword: "brazing repair near me", volume: 2_400, cpcDollars: 12, difficulty: 30,
+        intent: "commercial", clientRank: null, competitorRank: null },
+    ],
+  };
+  const withServices = (names: string[]) => ACCOUNT({
+    research: RESEARCH,
+    services: {
+      services: names.map((name) => ({ name, note: null })),
+      confirmedBy: "Katy Adams", confirmedAt: "2026-09-20", candidatesWaiting: 0,
+    },
+  });
+
+  // SOME SEEDED, ONE HELD BACK. There IS a gap row, so nothing is blocked
+  // outright — and what is on the queue is still less than what is on the
+  // account, which is exactly what the absence row exists to say.
+  const mixed = evaluate(withServices(["brazing repair", "day and evening"]));
+  const gapRows = mixed.filter((f) => f.findingType === "keyword_gap");
+  ok("the service carrying a subject still produces its gap row",
+    gapRows.length === 1 && gapRows[0]!.entityName === "brazing repair",
+    gapRows.map((f) => String(f.entityName)).join(", ") || "none");
+  const mixedSilence = mixed.filter((f) => f.findingType === "growth_unreadable");
+  ok("…and the one held back is named on the queue beside it",
+    mixedSilence.length === 1
+    && [mixedSilence[0]?.summary, ...(mixedSilence[0]?.evidence.lines ?? [])].join(" ").includes("day and evening"),
+    mixedSilence.length ? "named" : "no absence row at all");
+  ok("…as something somebody can end, and owned by us",
+    mixedSilence[0]!.evidence.lines.some((l) => /Sharpen these on the client page/.test(l)));
+  ok("…and the absence row still claims no figure",
+    mixedSilence[0]!.estImpactCents === 0 && !hasMoney(mixedSilence[0]!.impactAssumption));
+
+  // EVERY SERVICE TOO BROAD IS ITS OWN ANSWER. Somebody did the work; the list
+  // they wrote cannot carry a keyword strategy. That is not the same sentence
+  // as nobody having recorded anything, and the row must not say it is.
+  const broad = evaluate(withServices(["day and evening", "individual"]));
+  ok("no gap row is produced when every recorded service is too broad to seed",
+    broad.filter((f) => f.findingType === "keyword_gap").length === 0);
+  const broadSilence = broad.filter((f) => f.findingType === "growth_unreadable");
+  ok("the absence row says the list is recorded and too broad, never that it is missing",
+    broadSilence.length === 1
+    && /still recorded/i.test([broadSilence[0]?.summary, ...(broadSilence[0]?.evidence.lines ?? [])].join(" ")),
+    broadSilence.length ? "said" : "no absence row at all");
+  ok("…and it tells somebody to sharpen a service, not to confirm one",
+    broadSilence[0]!.evidence.lines.some((l) => /Sharpen at least one recorded service/.test(l)));
+  ok("…and nothing on it reads as an opportunity",
+    /must not be read as one/.test(broadSilence[0]!.impactAssumption));
+}
+
 console.log(`\n${"═".repeat(72)}`);
 console.log(failures === 0 ? "✅ growth guard: all checks passed" : `❌ growth guard: ${failures} check(s) failed`);
 console.log("Every figure above is an invented fixture. No production database and no ad account was read.");

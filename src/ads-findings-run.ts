@@ -14,6 +14,7 @@ import {
 } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
+import { splitSeeds } from "./ads/service-seed.js";
 
 /**
  * The cadenced deep audit — the job that gives the ads analysis a memory.
@@ -145,6 +146,19 @@ async function auditOne(
       ? `none confirmed${services.candidatesWaiting ? ` (${services.candidatesWaiting} candidate(s) waiting to be ticked)` : ""} — no keyword-gap reading`
       : `${services.services.length} confirmed${services.confirmedBy ? ` by ${services.confirmedBy}` : ""}${services.confirmedAt ? ` on ${services.confirmedAt}` : ""}`}`,
   );
+  // WHICH OF THOSE MAY SEED RESEARCH, and every one held back named. A
+  // recorded service that is too broad to expand from is skipped for SEEDING
+  // and for nothing else — it stays on the record and still rules out what it
+  // rules out. A seed dropped with nobody told is the failure this prints
+  // against.
+  if (services.services != null && research?.keywords != null) {
+    const split = splitSeeds(services.services, {
+      accountTerms: platformInput.searchTerms.filter((t) => t.conversions > 0).map((t) => t.term),
+      research: research.keywords.map((k) => ({ keyword: k.keyword, intent: k.intent, volume: k.volume })),
+    });
+    console.log(`  seeds: ${split.seeds.length} of ${services.services.length} recorded service(s) are worth researching from`);
+    for (const sk of split.skipped) console.log(`    · skipped "${sk.service}" — ${sk.mark}: ${sk.basis}`);
+  }
   console.log(
     `  research: ${research?.keywords == null
       ? "none stored for this client"
