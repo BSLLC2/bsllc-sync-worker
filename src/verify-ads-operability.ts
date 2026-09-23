@@ -179,6 +179,38 @@ ok("blocked approvals → one P1 blocked task naming the client", blocked.length
 ok("  …and it says unrecorded is INTENDED, not a bug", /intended behaviour, not a bug/.test(blocked[0]?.description ?? ""));
 ok("  …and names both honest answers", /Reporting only/.test(blocked[0]!.description) && /approved changes/.test(blocked[0]!.description));
 
+// ── 6. The capture has a second reader, and the fix text has to say so ──────
+//
+// `ads_change_events` fed one thing until 2026-09-23: the dashboard's
+// settle-window guard. It now also feeds a weekly line on each client's own
+// timeline (`GET /api/cron/ads-change-digest` in the app). That digest keeps
+// its OWN heartbeat green while this capture is dead — it runs, finds no
+// events, and writes nothing — so the only place the outage is visible is
+// here. An engineer reading this job's fix text has to be told what stops, or
+// they will fix it in their own time and never know a week of somebody's
+// account history went unwritten.
+console.log("\n6. This capture's fix text names BOTH things that stop when it does");
+{
+  const spec = ADS_JOBS.find((j) => j.job === "ads_change_history");
+  ok("ads_change_history is still in the registry", Boolean(spec));
+  if (spec) {
+    const NAMES_DIGEST = /timeline digest/i;
+    ok("  its quiet case names the timeline digest as a second reader", NAMES_DIGEST.test(spec.quiet));
+    ok("  its fix text names the timeline digest as a second casualty", NAMES_DIGEST.test(spec.fix));
+    ok("  …and still names the settle-window guard", /settle-window guard/.test(spec.fix));
+    ok("  …and still says the lost history cannot be recovered",
+      /cannot be recovered|cannot be filled in later/.test(spec.fix));
+    // Self-test: the scan has to match when the phrase IS there, or it is
+    // asserting nothing.
+    ok("  self-test: the scan matches a sentence that does name it",
+      NAMES_DIGEST.test("the weekly timeline digest stops writing a line"));
+  }
+  // THE DIGEST ITSELF IS NOT A WORKER JOB. It holds no credential and calls no
+  // ad platform, and this file derives every window from a worker cron — so a
+  // job in here with no workflow on disk fails section 1 by name.
+  ok("the app's own digest is not listed as a worker job", !ADS_JOB_NAMES.includes("ads_change_digest"));
+}
+
 console.log(`\n${"─".repeat(72)}`);
 console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);
 console.log("─".repeat(72));
