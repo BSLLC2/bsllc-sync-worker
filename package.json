@@ -147,6 +147,7 @@
     "verify-ads-outcome-record": "tsx src/verify-ads-outcome-record.ts",
     "verify-ads-reversal": "tsx src/verify-ads-reversal.ts",
     "verify-ads-findings": "tsx src/verify-ads-findings.ts",
+    "verify-ads-keyword-coverage": "tsx src/verify-ads-keyword-coverage.ts",
     "verify-ads-growth": "tsx src/verify-ads-growth.ts",
     "verify-ads-write": "tsx src/verify-ads-write.ts",
     "apply-ads-changes": "tsx src/apply-ads-changes.ts",

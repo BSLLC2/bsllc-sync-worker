@@ -62,7 +62,17 @@ async function auditOne(
   if (protectedPatterns.length) console.log(`  protected terms: ${protectedPatterns.join(", ")}`);
 
   const platformInput = await adapter.read({ accountId, windowStart: start, windowEnd: end, protectedPatterns });
-  console.log(`  read: ${platformInput.campaigns.length} campaigns · ${platformInput.searchTerms.length} search terms · ${platformInput.keywords.length} keywords · ${platformInput.ads.length} ads · ${platformInput.existingNegatives.size} negatives in place`);
+  // Two keyword numbers, because they are two different lists and one of them
+  // used to stand in for the other. `keywords` is what SPENT in the window, cut
+  // at the top spenders; `existingKeywords` is what the account HOLDS, read
+  // whole. A run where the second is missing is a run where the dedupe and the
+  // quality-score count are both working from the first, which is why it says
+  // so rather than printing one figure.
+  const held = platformInput.existingKeywords;
+  console.log(`  read: ${platformInput.campaigns.length} campaigns · ${platformInput.searchTerms.length} search terms`
+    + ` · ${platformInput.keywords.length} keywords with spend${platformInput.keywordsTruncated ? " (cut — the pull came back full)" : ""}`
+    + ` · ${held == null ? "keyword list UNREAD" : `${held.length} keywords held`}`
+    + ` · ${platformInput.ads.length} ads · ${platformInput.existingNegatives.size} negatives in place`);
 
   // What the CLIENT has recorded about what a customer is worth. The adapter
   // does not read it and should not: it is not the ad platform's to know, and

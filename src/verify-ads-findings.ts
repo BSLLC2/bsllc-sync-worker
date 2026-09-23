@@ -23,7 +23,7 @@ import {
 } from "./ads/tracking-outage.js";
 import { proxyConversionValue } from "./ads/proxy-value.js";
 import {
-  queryPromotions, normalizeQueryText, keywordIndex,
+  queryPromotions, normalizeQueryText, keywordIndex, keywordCanServe, dormantBecause,
   PROMOTE_MIN_CONVERSIONS, PROMOTE_MIN_COST_MICROS,
 } from "./ads/query-promotion.js";
 import {
@@ -227,16 +227,42 @@ const FIXTURE: AuditInput = {
   // searches looks like from the outside, and is the case the waste rule has
   // always reasoned over without saying so.
   searchTermSpendByCampaign: { "100": 2_000_000_000, "200": 250_000_000, "300": 500_000_000, "400": 700_000_000 },
-  // Every enabled keyword the account holds, as a settings read. Deliberately
-  // NOT the same list as `keywords` above — that one is the performance pull
-  // and is filtered to keywords that spent, so a keyword sitting in the account
-  // taking no clicks is absent from it. "[emergency service]" is here and in no
+  // Every keyword the account HOLDS, as a settings read. Deliberately NOT the
+  // same list as `keywords` above — that one is the performance pull and is
+  // filtered to keywords that spent, so a keyword sitting in the account taking
+  // no clicks is absent from it. "[emergency service]" is here and in no
   // performance row, which is exactly the case that would produce a duplicate
   // proposal if this rule checked the wrong list.
+  //
+  // SYNTHETIC, like everything else in this file. The SHAPE is taken from a
+  // live account a reviewer checked by hand on 2026-09-23; none of that
+  // account's own text, spend or scores is here.
   existingKeywords: [
-    { text: "service near me", matchType: "BROAD", adGroupName: "Broad", campaignName: "Search — Broad Prospecting" },
-    { text: "best service provider", matchType: "PHRASE", adGroupName: "Core", campaignName: "Search — Core Services" },
-    { text: "[emergency service]", matchType: "EXACT", adGroupName: "Core", campaignName: "Search — Core Services" },
+    { text: "service near me", matchType: "BROAD", adGroupName: "Broad", campaignName: "Search — Broad Prospecting",
+      criterionResourceName: "customers/1234567890/adGroupCriteria/300~1",
+      criterionStatus: "ENABLED", adGroupStatus: "ENABLED", campaignStatus: "ENABLED", qualityScore: 3 },
+    { text: "best service provider", matchType: "PHRASE", adGroupName: "Core", campaignName: "Search — Core Services",
+      criterionResourceName: "customers/1234567890/adGroupCriteria/300~2",
+      criterionStatus: "ENABLED", adGroupStatus: "ENABLED", campaignStatus: "ENABLED", qualityScore: 6 },
+    // Live, under the quality-score floor, and it took no clicks in the window.
+    // The performance pull therefore does not hold it, which is how the count
+    // came to report one keyword under the floor on an account holding two.
+    { text: "[emergency service]", matchType: "EXACT", adGroupName: "Core", campaignName: "Search — Core Services",
+      criterionResourceName: "customers/1234567890/adGroupCriteria/300~3",
+      criterionStatus: "ENABLED", adGroupStatus: "ENABLED", campaignStatus: "ENABLED", qualityScore: 2 },
+    // THE REPORTED FAILURE, in fixture form. Enabled, broad, verbatim the text
+    // of a query that converts — sitting in an ad group nobody turned back on.
+    // It spent nothing in the window, so no performance row holds it either.
+    // A dedupe that cannot see this recommends creating a second copy of it.
+    { text: "same day service booking", matchType: "BROAD", adGroupName: "Paused — Weekend Push", campaignName: "Search — Core Services",
+      criterionResourceName: "customers/1234567890/adGroupCriteria/301~1",
+      criterionStatus: "ENABLED", adGroupStatus: "PAUSED", campaignStatus: "ENABLED", qualityScore: 1 },
+    // In a paused CAMPAIGN, and under the quality-score floor. Neither reading
+    // may count it: it is not demand nobody thought of, and it is charged no
+    // relevance premium, because it takes no clicks.
+    { text: "weekend service call", matchType: "PHRASE", adGroupName: "Retired", campaignName: "Search — Retired 2025",
+      criterionResourceName: "customers/1234567890/adGroupCriteria/302~1",
+      criterionStatus: "ENABLED", adGroupStatus: "ENABLED", campaignStatus: "PAUSED", qualityScore: 1 },
   ],
   // A day-by-day series with a break in it: 84 healthy days, then six days on
   // which the account carried on buying clicks and recorded nothing.
@@ -1372,10 +1398,14 @@ async function main() {
   const promo = grown.filter((f) => f.findingType === "converting_search_term");
   ok("the converting queries produce a row", promo.length === 1, promo[0]?.title ?? "none");
   const promoLines = promo[0]?.evidence.lines.join("\n") ?? "";
-  ok("…naming the two queries that clear both floors and are in no keyword",
-    /emergency service downtown/.test(promoLines) && /same day service booking/.test(promoLines));
+  // `lines` carries the proposals AND the sentence naming the switched-off
+  // matches, so a test that greps the whole block cannot tell a proposal from a
+  // refusal. `queries` is the proposal list and is what these assert on.
+  const proposed = (promo[0]?.evidence.lines ?? []).filter((l) => /^\d/.test(l)).join("\n");
+  ok("…naming the one query that clears both floors and is in no keyword at all",
+    /emergency service downtown/.test(proposed) && promo[0]?.evidence.metrics.queryCount === 1);
   ok("…and not the one that is already a keyword in different case",
-    !/Best Service Provider/i.test(promoLines) && promo[0]?.evidence.metrics.queryCount === 2,
+    !/Best Service Provider/i.test(proposed),
     "case and punctuation cannot hide a duplicate, or the rule proposes a keyword the account already holds");
   ok("…and not the one under the spend floor",
     !/urgent service quote/.test(promoLines),
@@ -1412,8 +1442,103 @@ async function main() {
     && normalizeQueryText("services") !== normalizeQueryText("service"),
     "it does not stem or fold plurals, so it says 'already there' less often than Google would — which proposes a redundant keyword rather than swallowing a real find");
   ok("the row says how many converting queries it checked and found already there",
-    promo[0]?.evidence.metrics.alreadyKeywords === 1,
+    promo[0]?.evidence.metrics.alreadyKeywords === 2
+    && promo[0]?.evidence.metrics.alreadyServing === 1
+    && promo[0]?.evidence.metrics.alreadyDormant === 1,
     "a check nobody can see the result of is a check nobody trusts");
+
+  // ── 16b. THE KEYWORD IN A PAUSED AD GROUP ────────────────────────────────
+  // The reported failure, driven end to end. On 2026-09-23 a reviewer checked
+  // this rule against a live account and found it telling somebody to add a
+  // keyword that account already held — enabled, broad, verbatim — in an ad
+  // group nobody had turned back on. The settings pull behind the dedupe was
+  // filtered to enabled ad groups in enabled campaigns, so the one check whose
+  // job is to see a duplicate was the one thing that could not see it, while
+  // its own evidence line claimed it had checked every keyword in the account.
+  //
+  // Every figure here is a fixture. No ad account was read to write this.
+  console.log("\n16b. A keyword that exists and cannot serve");
+  const dormantRun = queryPromotions({
+    terms: FIXTURE.searchTerms, existingKeywords: FIXTURE.existingKeywords!,
+    columnCountsOutcomes: "yes", protectedPatterns: FIXTURE.protectedPatterns,
+  });
+  const proposedTerms = dormantRun.byCampaign.flatMap((c) => c.queries.map((q) => q.term.toLowerCase()));
+  ok("A KEYWORD IN A PAUSED AD GROUP IS NEVER PROPOSED AS A NEW ONE",
+    !proposedTerms.includes("same day service booking"),
+    "it is enabled, broad and verbatim the query — creating a second copy is the duplicate this whole reading exists to prevent");
+  ok("…and it is not filed away as a live duplicate either",
+    dormantRun.dormant.some((d) => d.term === "same day service booking") && dormantRun.alreadyServing === 1,
+    "a live duplicate means there is nothing to do; this means somebody already decided to bid on the query and switched it off");
+  ok("…the row names where the existing keyword sits and which level is off",
+    /Paused — Weekend Push/.test(promoLines) && /ad group is paused/.test(promoLines),
+    "somebody has to find it before they can turn it back on");
+  ok("…and says the work is turning it back on rather than adding another",
+    /turning the existing keyword back on/i.test(promoLines)
+    && /compete with the first/i.test(promoLines),
+    "the reviewer's own reading: the fix is to reactivate the ad group or move the keyword");
+  ok("a keyword in a paused CAMPAIGN is refused on the same rule",
+    keywordCanServe(FIXTURE.existingKeywords!.find((k) => k.text === "weekend service call")!) === "no",
+    "a second copy beside a paused one becomes a live duplicate the day anybody turns the paused one back on");
+  ok("…and a status the platform did not report reads as unknown, never as enabled",
+    keywordCanServe({ text: "x", matchType: "BROAD", adGroupName: null, campaignName: null }) === "unknown"
+    && keywordCanServe({ text: "x", matchType: "BROAD", adGroupName: null, campaignName: null,
+      criterionStatus: "ENABLED", adGroupStatus: "ENABLED", campaignStatus: "ENABLED" }) === "yes",
+    "an unread status must not let this rule be confident about which of the two a match is");
+  {
+    // With no new query left to carry the sentence, the reading still has to
+    // say the switched-off ones are there — otherwise the only case where the
+    // dormant match is the WHOLE finding is the case that goes silent.
+    const onlyDormant = queryPromotions({
+      terms: FIXTURE.searchTerms.filter((t) => t.term === "same day service booking"),
+      existingKeywords: FIXTURE.existingKeywords!,
+      columnCountsOutcomes: "yes", protectedPatterns: [],
+    });
+    ok("with nothing new to propose, the silence names the switched-off keyword rather than closing",
+      onlyDormant.verdict === "none"
+      && /cannot serve/.test(onlyDormant.silence ?? "")
+      && !/nothing to add\.$/.test(onlyDormant.silence ?? ""),
+      "'every query is already a keyword, so there is nothing to add' was true of a live duplicate and false of a switched-off one");
+  }
+
+  // ── 16c. The quality-score count measures what it counts ─────────────────
+  // It read the PERFORMANCE pull, which is filtered to keywords that spent and
+  // cut at the top spenders, and published the answer as a total. The same
+  // reviewer found an account with three keywords under the floor reported as
+  // one. Fixture figures throughout.
+  console.log("\n16c. Quality score is counted over the keywords it can see");
+  const qs = grown.find((f) => f.findingType === "low_quality_score");
+  ok("a keyword under the floor that took no clicks in the window IS counted",
+    /emergency service/.test(qs?.evidence.lines.join("\n") ?? ""),
+    "the performance pull does not hold it, and it is charged the relevance premium the moment it serves");
+  ok("…so the count is every serving keyword under the floor, not every spending one",
+    qs?.evidence.metrics.keywordCount === 2,
+    "QS 3 on a keyword that spent and QS 2 on one that did not — the second is the one the old reading lost");
+  ok("a keyword that cannot serve is left out of the count",
+    !/weekend service call/.test(qs?.evidence.lines.join("\n") ?? "")
+    && !/Paused — Weekend Push/.test(qs?.evidence.lines.join("\n") ?? ""),
+    "it takes no clicks, so no relevance premium is being charged on it — this is the one place this reading stays narrow where the dedupe went wide");
+  ok("THE COUNT CARRIES WHAT IT WAS COUNTED OVER",
+    typeof qs?.evidence.metrics.keywordsRead === "number"
+    && /with no spend filter and no row limit/.test(qs?.evidence.lines.join("\n") ?? ""),
+    "a figure carries its basis or it is not printed");
+  ok("…and names the keywords it could not score rather than counting them as nought",
+    /carr(y|ies) no quality score yet/.test(qs?.evidence.lines.join("\n") ?? "")
+    && typeof qs?.evidence.metrics.withoutAScore === "number",
+    "Google reports no score until a keyword has served enough to earn one, so null is unanswered");
+  {
+    // Announced, never silent. With no settings list the count falls back to
+    // the spenders, which is what it always read — and the title stops
+    // claiming a total it did not measure.
+    const noList = evaluate({ ...FIXTURE, existingKeywords: null });
+    const qsFallback = noList.find((f) => f.findingType === "low_quality_score");
+    ok("with no keyword list, the count falls back to the spenders AND SAYS SO",
+      /^At least /.test(qsFallback?.title ?? "")
+      && /floor rather than a total/.test(qsFallback?.evidence.lines.join("\n") ?? ""),
+      "the reading is still worth having; a total it did not measure is not");
+    ok("…and the fallback shows in the claim a person reads, not only in the lines",
+      /floor rather than a total/.test(qsFallback?.impactAssumption ?? ""),
+      "announce every fallback; never take one silently");
+  }
 
   // ── 17. Converting profitably, with room to spend more ───────────────────
   console.log("\n17. A campaign converting under target with impressions to buy");

@@ -27,9 +27,11 @@
  *     not relevance: ten thousand searches for something they do not sell is
  *     ten thousand searches of noise.
  *  2. ABSENCE IS PROVED, NOT ASSUMED — as far as it can be, and the limit is
- *     stated. Three things are checked: the term is in no enabled keyword in
- *     the account; it has not appeared in ninety days of search terms; and it
- *     is not blocked by a negative somebody added on purpose. What CANNOT be
+ *     stated. Three things are checked: the term is in no keyword the account
+ *     can serve today; it has not appeared in ninety days of search terms; and
+ *     it is not blocked by a negative somebody added on purpose. A keyword in
+ *     a paused ad group does not count as covering the term, because nobody is
+ *     bidding through it. What CANNOT be
  *     established is whether a broad-match keyword would match it, because
  *     Google's matching is semantic and unpublished. So the row says the term
  *     has not been SEEN rather than that it cannot be reached, and where the
@@ -46,7 +48,7 @@
  *     missing" and is the opposite of the truth.
  */
 
-import { normalizeQueryText, type ExistingKeyword } from "./query-promotion.js";
+import { normalizeQueryText, keywordCanServe, type ExistingKeyword } from "./query-promotion.js";
 import {
   relevanceOf, relevanceLine, noServicesLine,
   type ClientServiceFacts, type ProvenQuery, type Relevance,
@@ -206,7 +208,17 @@ export interface GapReading {
 export interface GapInput {
   research: ResearchFacts | null | undefined;
   services: ClientServiceFacts;
-  /** Every enabled keyword in the account. NULL = the read failed. */
+  /**
+   * Every keyword the account holds that has not been removed. NULL = the read
+   * failed.
+   *
+   * This reading uses only the ones that CAN SERVE, and the distinction is the
+   * whole claim: the row says nothing is bidding on this demand, and nobody is
+   * bidding through a keyword sitting in a paused ad group. A keyword whose
+   * status this run could not read counts as covering, which suppresses a gap
+   * rather than inventing one — a list of demand for things the account already
+   * runs discredits every other row on the page.
+   */
   existingKeywords: ExistingKeyword[] | null | undefined;
   /** Every search term seen over the long window, whatever it cost. */
   seenTerms: string[];
@@ -262,7 +274,12 @@ export function keywordGaps(i: GapInput): GapReading {
   }
 
   const coverageTrusted = i.accountTermCoverage != null && i.accountTermCoverage >= GAP_COVERAGE_TRUSTED;
-  const keywordSet = new Set(i.existingKeywords.map((k) => normalizeQueryText(k.text)).filter(Boolean));
+  const keywordSet = new Set(
+    i.existingKeywords
+      .filter((k) => keywordCanServe(k) !== "no")
+      .map((k) => normalizeQueryText(k.text))
+      .filter(Boolean),
+  );
   const seenSet = new Set(i.seenTerms.map((t) => normalizeQueryText(t)).filter(Boolean));
   const negatives = Array.from(i.existingNegatives).map((n) => String(n)).filter(Boolean);
   const protectedLower = i.protectedPatterns.map((p) => p.toLowerCase()).filter(Boolean);
@@ -336,7 +353,8 @@ export function keywordGaps(i: GapInput): GapReading {
       lines.push(`${unpricedTerms} of these term(s) carry no cost per click in the research, so they are counted and not valued.`);
     }
     lines.push(
-      `Checked against every enabled keyword in the account, ninety days of search terms and the negatives already in place — none of these has been seen.`
+      `Checked against every keyword the account holds that can serve today, ninety days of search terms and the negatives already in place — none of these has been seen. `
+      + `A keyword sitting in a paused ad group or a paused campaign is not counted as covering the demand, because nobody is bidding through it.`
       + (coverageTrusted
         ? ""
         : " The search-terms report accounts for a minority of this account's spend, so 'not seen' is weaker evidence here than it looks: a broad keyword may already be reaching some of this."),

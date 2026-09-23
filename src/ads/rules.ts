@@ -29,7 +29,7 @@ import { spendVisibility, coverageChangesTheClaim, type SpendVisibility } from "
 import type { DailyConversionRow } from "./tracking-outage.js";
 import { readinessFindings } from "./readiness-findings.js";
 import {
-  queryPromotions, promotionClaim,
+  queryPromotions, promotionClaim, dormantLine, keywordCanServe,
   PROMOTE_MIN_CONVERSIONS, PROMOTE_MIN_COST_MICROS,
   type ExistingKeyword,
 } from "./query-promotion.js";
@@ -1096,17 +1096,40 @@ export interface AuditInput {
    */
   searchTermSpendByCampaign?: Record<string, number> | null;
   /**
-   * EVERY enabled keyword in the account, as a settings read rather than a
-   * performance one. ABSENT OR NULL MEANS THE READ FAILED, and the promotion
-   * rule then proposes nothing at all: a query cannot be called a gap in a
-   * keyword list nobody could see.
+   * EVERY keyword the account holds that has not been removed, as a settings
+   * read rather than a performance one — paused ad groups and paused campaigns
+   * included, each row carrying the three statuses that say whether it can
+   * serve. ABSENT OR NULL MEANS THE READ FAILED, and the promotion rule then
+   * proposes nothing at all: a query cannot be called a gap in a keyword list
+   * nobody could see.
    *
    * It is a separate input from `keywords` above deliberately. That pull is
-   * filtered to `cost_micros > 0` and capped at 300 rows, so a keyword that
-   * took no clicks in the window is missing from it — and proposing a keyword
-   * the account already holds is the one mistake this rule must not make.
+   * filtered to `cost_micros > 0` and cut at the top spenders, so a keyword
+   * that took no clicks in the window is missing from it — and proposing a
+   * keyword the account already holds is the one mistake this rule must not
+   * make.
+   *
+   * THREE READINGS USE IT AND THEY NARROW IT DIFFERENTLY, on purpose:
+   *   · the dedupe behind `converting_search_term` uses the WHOLE list,
+   *     because a paused keyword is still a keyword and a second copy of it
+   *     becomes a live duplicate the day anybody turns the first back on;
+   *   · `low_quality_score` counts only what can SERVE, because a keyword
+   *     taking no clicks is charged no relevance premium;
+   *   · `keyword_gap` treats only what can SERVE as covering demand, because
+   *     its whole claim is that nothing is bidding on the term.
    */
   existingKeywords?: ExistingKeyword[] | null;
+  /**
+   * True where the keyword PERFORMANCE pull came back full, so there were
+   * probably more keywords behind the cut.
+   *
+   * It is ordered by spend, so what a cut drops is the cheap tail, and the one
+   * rule reading that list (`dead_keyword`) raises a row per keyword rather
+   * than a total — a cut therefore costs rows and never makes a figure wrong.
+   * Absent means the caller did not say, which is read as "not known to be
+   * cut" and never as "read whole".
+   */
+  keywordsTruncated?: boolean;
   /**
    * What a named person confirmed this client actually sells. Read from
    * Postgres by the caller, not from the ad platform — it is not the platform's
@@ -1986,12 +2009,32 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         + `Adding each one — usually as a phrase or exact keyword in the ad group whose ads already answer it — gives it its own bid, its own match `
         + `type and its own reporting line. Read each one before adding it: a query that converts twice is not always a query worth its own keyword.`,
       evidence: {
-        metrics: { ...cp.metrics, alreadyKeywords: promotions.alreadyKeywords },
+        metrics: {
+          ...cp.metrics,
+          alreadyKeywords: promotions.alreadyKeywords,
+          alreadyServing: promotions.alreadyServing,
+          alreadyDormant: promotions.dormant.length,
+          alreadyStateUnread: promotions.alreadyStateUnread,
+        },
         ...win,
         lines: [
           ...cp.lines,
           `Floor: at least ${PROMOTE_MIN_CONVERSIONS} conversions and ${usd(PROMOTE_MIN_COST_MICROS)} over the 90-day window, on the column this account actually counts.`,
-          `Checked against every enabled keyword in the account, matched on letters and digits only, so case and punctuation cannot hide a duplicate.`,
+          // THE SENTENCE THAT WAS FALSE. It claimed every enabled keyword in
+          // the account while the list behind it was filtered to enabled ad
+          // groups in enabled campaigns, so a duplicate sitting in a paused ad
+          // group passed the check and the row told somebody to create it. The
+          // list is wider now, and what it still does not catch is named here
+          // rather than left for somebody to find on a live account.
+          `Checked against every keyword the account holds that has not been removed, paused ad groups and paused campaigns included, matched on letters and digits only, so case and punctuation cannot hide a duplicate.`,
+          `The match is on the text as written. Google treats a close variant as the same keyword and this does not, so a plural or a reordering of an existing keyword can still reach this list. Read each one against the account before adding it.`,
+          ...(promotions.alreadyStateUnread > 0
+            ? [`${promotions.alreadyStateUnread} other converting quer${promotions.alreadyStateUnread === 1 ? "y is" : "ies are"} already in the account as a keyword whose status this run could not read. They are left out of this row either way.`]
+            : []),
+          // The switched-off matches are named on whichever row is going out,
+          // because each is work somebody has to decide about and none of it
+          // is "add a keyword".
+          ...(dormantLine(promotions.dormant) ? [dormantLine(promotions.dormant) as string] : []),
           ...(seen && seen.verdict !== "not_applicable" ? [seen.line] : []),
         ],
       },
@@ -2003,7 +2046,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       // set, over a ninety-day window read as a month. `estImpactCents` stays
       // at nought because nothing is gained; this says how big the thing is.
       atStakeCents: Math.round(microsToCents(cp.totalCostMicros) / 3),
-      impactAssumption: promotionClaim(cp, promotions.alreadyKeywords)
+      impactAssumption: promotionClaim(cp, promotions)
         + (seen?.caveat ? ` ${seen.caveat}` : ""),
       changePayload: null,
       guardNote: "Nothing to apply. Creating a keyword needs an ad group, a match type and a bid chosen for it, none of which is mechanical, and none of which is in the guarded operation list.",
@@ -2057,24 +2100,119 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   // how a queue teaches people to scroll past a whole class of finding.
   const accountWorthARow = accountTotals.costMicros >= THRESHOLDS.accountMinSpendMicros;
 
-  const lowQs = input.keywords.filter((k) => (k.qualityScore ?? 0) > 0 && (k.qualityScore as number) < THRESHOLDS.qualityScoreFloor);
-  if (accountWorthARow && lowQs.length) {
-    const spend = lowQs.reduce((s, k) => s + k.costMicros, 0);
+  // ── Quality score ─────────────────────────────────────────────────────────
+  // THIS USED TO READ THE PERFORMANCE PULL, AND UNDERCOUNTED BECAUSE OF IT.
+  // `input.keywords` is `keyword_view` filtered to `cost_micros > 0` and cut
+  // at the top 300 spenders, so a keyword carrying a quality score of 1 and no
+  // spend in the window was invisible to a row whose whole content is a COUNT.
+  // A reviewer found the consequence on a live account on 2026-09-23: three
+  // keywords under the floor, all of them able to serve, one of them reported.
+  //
+  // The spine is the settings list instead — every keyword the account holds,
+  // no date segment, no spend filter and no row limit — and the performance
+  // pull supplies spend for the keywords it happens to hold, joined on the
+  // criterion's own resource name rather than on its text.
+  //
+  // WHAT IS COUNTED, AND WHY EACH EXCLUSION IS AN EXCLUSION:
+  //   · It must be able to SERVE. A keyword in a paused ad group pays no
+  //     relevance premium, because it takes no clicks. That is the one place
+  //     this reading stays narrow where the dedupe beside it went wide, and
+  //     the difference is the question being asked: the dedupe asks whether a
+  //     keyword exists, this asks what the account is being charged for.
+  //   · It must carry a SCORE. Google reports none until a keyword has served
+  //     enough to earn one, so null is unanswered and is never counted as a
+  //     nought. Counting nulls would report every new keyword as the worst
+  //     possible relevance.
+  // ONE CONSEQUENCE WORTH KNOWING: the metrics below feed `evidenceHash`, and
+  // this count genuinely moves on an account that had keywords the old reading
+  // could not see. So a `low_quality_score` row somebody dismissed will be
+  // re-raised once. That is the right way round — the dismissal was of a count
+  // that was wrong — but it is a one-off churn rather than a surprise.
+  // `ADS_RULESET_VERSION` is NOT bumped: no threshold and no impact formula
+  // moved here, which is what that version records, and bumping it needs the
+  // dashboard's mirror moved in the same change.
+  const kwSpend = new Map<string, KeywordRow>();
+  for (const k of input.keywords) if (k.criterionResourceName) kwSpend.set(k.criterionResourceName, k);
+
+  const inventory = input.existingKeywords ?? null;
+  // Announced, never silent. With no settings list this run, the count falls
+  // back to the keywords that spent — which is what it always read, and is a
+  // floor rather than a total. The title and the basis both say so.
+  const qsFromInventory = inventory != null;
+  const qsRows: { text: string; campaignName: string; score: number; costMicros: number | null }[] =
+    qsFromInventory
+      ? inventory
+          .filter((k) => keywordCanServe(k) === "yes")
+          .filter((k) => k.qualityScore != null && (k.qualityScore as number) > 0
+            && (k.qualityScore as number) < THRESHOLDS.qualityScoreFloor)
+          .map((k) => ({
+            text: k.text,
+            campaignName: k.campaignName ?? "a campaign this run could not name",
+            score: k.qualityScore as number,
+            costMicros: k.criterionResourceName
+              ? (kwSpend.get(k.criterionResourceName)?.costMicros ?? null)
+              : null,
+          }))
+      : input.keywords
+          .filter((k) => k.qualityScore != null && (k.qualityScore as number) > 0
+            && (k.qualityScore as number) < THRESHOLDS.qualityScoreFloor)
+          .map((k) => ({ text: k.text, campaignName: k.campaignName, score: k.qualityScore as number, costMicros: k.costMicros }));
+
+  // Dearest first where spend is known; a keyword with none sorts after one
+  // that has some, because the money is what makes a row worth reading first.
+  qsRows.sort((a, b) => (b.costMicros ?? -1) - (a.costMicros ?? -1) || a.text.localeCompare(b.text));
+
+  if (accountWorthARow && qsRows.length) {
+    const priced = qsRows.filter((k) => k.costMicros != null);
+    const spend = priced.reduce((s, k) => s + (k.costMicros as number), 0);
+    const unpriced = qsRows.length - priced.length;
+    // Every keyword the count was taken over, so the figure carries what it
+    // was measured against rather than standing on its own.
+    const servingCounted = qsFromInventory
+      ? inventory!.filter((k) => keywordCanServe(k) === "yes").length
+      : input.keywords.length;
+    const scoreUnreported = qsFromInventory
+      ? inventory!.filter((k) => keywordCanServe(k) === "yes" && (k.qualityScore == null || k.qualityScore === 0)).length
+      : input.keywords.filter((k) => k.qualityScore == null || k.qualityScore === 0).length;
+
+    const basis = qsFromInventory
+      ? `Counted over all ${servingCounted} keyword(s) the account holds that can serve today — every one of them, with no spend filter and no row limit. `
+        + `${scoreUnreported} of those carr${scoreUnreported === 1 ? "ies" : "y"} no quality score yet, which Google reports for a keyword that has not `
+        + `served enough to earn one; ${scoreUnreported === 1 ? "it is" : "they are"} left out rather than counted as nought. Keywords in a paused ad group or a paused campaign are left out too: they take no clicks, `
+        + `so no relevance premium is being charged on them.`
+      : `A floor rather than a total. The account's full keyword list could not be read this run, so this was counted over the ${servingCounted} keyword(s) `
+        + `that spent inside the window and that this run read${input.keywordsTruncated ? ", which came back full, so there were more behind it" : ""}. `
+        + `A keyword carrying a low score and no spend in these 90 days is not in this count, and there is no way to say from here how many of those there are.`;
+
     out.push({
       entityType: "account", entityId: `${input.accountId}:low_quality_score`, entityName: "Quality score",
       findingType: "low_quality_score", severity: "medium", riskLevel: "low",
       applicability: "vendor",
-      title: `${lowQs.length} keywords carry a quality score below ${THRESHOLDS.qualityScoreFloor}`,
+      title: `${qsFromInventory ? "" : "At least "}${qsRows.length} keyword(s) carry a quality score below ${THRESHOLDS.qualityScoreFloor}`,
       summary: `Google charges a relevance premium on every click for these. It is almost always an ad-copy or landing-page `
         + `mismatch rather than a bidding problem, so the fix is copy and pages — which is people-work, not an API call.`,
       evidence: {
-        metrics: { keywordCount: lowQs.length, costMicros: spend },
+        metrics: {
+          keywordCount: qsRows.length, costMicros: spend,
+          keywordsRead: servingCounted, withoutAScore: scoreUnreported, withoutSpendInWindow: unpriced,
+        },
         ...win,
-        lines: lowQs.slice(0, 10).map((k) => `QS ${k.qualityScore} · ${usd(k.costMicros)} · "${k.text}" (${k.campaignName})`),
+        lines: [
+          ...qsRows.slice(0, 10).map((k) =>
+            `QS ${k.score} · ${k.costMicros != null ? usd(k.costMicros) : "no spend recorded in this window"} · "${k.text}" (${k.campaignName})`),
+          ...(qsRows.length > 10 ? [`…and ${qsRows.length - 10} more`] : []),
+          basis,
+          ...(qsFromInventory && unpriced > 0
+            ? [`${unpriced} of these took no spend in the 90-day window${input.keywordsTruncated
+                ? ", or spent and fell outside the spenders this run read, which came back full"
+                : ""}. They still carry the score, and they still cost the premium as soon as they serve.`]
+            : []),
+        ],
       },
       estImpactCents: 0,
       impactUnit: "usd_month",
-      impactAssumption: "No dollar estimate: the premium Google charges for low quality score isn't exposed by the API, so any figure would be invented.",
+      impactAssumption: "No dollar estimate: the premium Google charges for low quality score isn't exposed by the API, so any figure would be invented."
+        + (qsFromInventory ? "" : " The count itself is a floor rather than a total — see the basis on the row."),
       changePayload: null,
       guardNote: "Ad copy is out of scope by policy — see the LegitScript note in the vendor brief.",
     });

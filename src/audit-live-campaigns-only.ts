@@ -34,7 +34,10 @@ async function main() {
     const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
     console.log(`   [UNAVAILABLE] ${msg.slice(0, 300)}`); return null; } };
 
-  hr("1. OHC - BRANDED SEARCH — every keyword actually being bid on, right now");
+  hr("1. OHC - BRANDED SEARCH — keywords with activity in the window");
+  // `keyword_view` is segmented by date, so a keyword with no impressions in
+  // the window is absent whatever its status. This is what the campaign SERVED
+  // on, which is not the same as every keyword it holds.
   const kws = await q(`SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
       ad_group_criterion.status, ad_group.name, metrics.impressions, metrics.clicks, metrics.cost_micros
       FROM keyword_view

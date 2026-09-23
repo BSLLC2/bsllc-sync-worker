@@ -105,6 +105,21 @@ export const CONVERSION_LAG_BUCKET: Record<string, string> = {
   "16": "FOURTEEN_TO_TWENTY_ONE_DAYS", "17": "TWENTY_ONE_TO_THIRTY_DAYS",
   "18": "THIRTY_TO_FORTY_FIVE_DAYS", "19": "FORTY_FIVE_TO_SIXTY_DAYS", "20": "SIXTY_TO_NINETY_DAYS",
 };
+/**
+ * ENABLED / PAUSED / REMOVED, for a criterion, an ad group and a campaign
+ * alike — the three share one shape in the API and one meaning here.
+ *
+ * It decides whether a keyword the account holds can serve today, which is
+ * what separates "you already bid on this" from "you already decided to bid
+ * on this and then switched it off". Undecoded, every keyword on every account
+ * would read as not enabled, so the dedupe would call every existing keyword
+ * dormant and the quality-score count would be nought forever.
+ */
+export const ENTITY_STATUS: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "ENABLED", "3": "PAUSED", "4": "REMOVED",
+  UNSPECIFIED: "UNSPECIFIED", UNKNOWN: "UNKNOWN", ENABLED: "ENABLED", PAUSED: "PAUSED", REMOVED: "REMOVED",
+};
+
 /** Only the value the tracking reading actually branches on. */
 export const TRACKING_STATUS: Record<string, string> = {
   "2": "NOT_CONVERSION_TRACKED", "3": "CONVERSION_TRACKING_MANAGED_BY_SELF",
@@ -119,6 +134,15 @@ export function enumName(map: Record<string, string>, v: unknown): string | null
   const upper = raw.toUpperCase();
   return Object.values(map).includes(upper) ? upper : raw;
 }
+
+/**
+ * How many rows the keyword PERFORMANCE pull takes, dearest first.
+ *
+ * It caps the response on an account with tens of thousands of keywords. It
+ * does not cap the settings read above it, which has no limit at all, so what
+ * the account HOLDS is always read whole and only what it SPENT is cut.
+ */
+export const KEYWORD_PERFORMANCE_LIMIT = 300;
 
 /** Run a GAQL query, returning [] and logging rather than throwing — one
  *  unsupported field must not sink the whole audit. */
@@ -341,22 +365,57 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     // null is what makes the rule silent rather than confident.
     //
     // No date segment, so no metrics come back and the row count is the
-    // account's live keyword count rather than a window's worth of them.
+    // account's keyword count rather than a window's worth of them.
+    //
+    // ── WHY THIS IS NOT FILTERED TO WHAT SERVES (fixed 2026-09-23) ─────────
+    // It used to carry `AND ad_group.status = 'ENABLED' AND campaign.status =
+    // 'ENABLED'`, and a reviewer found the consequence on a live account: the
+    // rule told somebody to add a keyword the account already held, verbatim
+    // and enabled, inside a PAUSED AD GROUP. The one check whose job is to see
+    // a duplicate was the one thing that could not see it, while its own
+    // evidence line claimed it had checked every keyword in the account.
+    //
+    // Whether a keyword can serve today does not change whether it exists, and
+    // existence is the question the dedupe asks. Widened to paused ad groups
+    // and to PAUSED CAMPAIGNS for the same reason: a second copy created
+    // beside a paused one becomes a live duplicate the day anybody turns the
+    // paused one back on, which is the same fault with a delay on it.
+    //
+    // REMOVED is left out at all three levels, and that is the one narrowing
+    // left. A removed criterion, ad group or campaign cannot be turned back
+    // on, so creating the keyword again is the right thing to do and calling
+    // it a duplicate would suppress real work. The statuses ride along on
+    // every row so the rules can say which of the two any match is.
     const kwListRows = await tryQuery(customer, "keyword list", `
-      SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
-             ad_group.name, campaign.name
+      SELECT ad_group_criterion.resource_name,
+             ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+             ad_group_criterion.status, ad_group_criterion.quality_info.quality_score,
+             ad_group.name, ad_group.status, campaign.name, campaign.status
         FROM ad_group_criterion
        WHERE ad_group_criterion.type = 'KEYWORD'
          AND ad_group_criterion.negative = FALSE
-         AND ad_group_criterion.status = 'ENABLED'
-         AND ad_group.status = 'ENABLED'
-         AND campaign.status = 'ENABLED'`, log);
+         AND ad_group_criterion.status IN ('ENABLED', 'PAUSED')
+         AND ad_group.status IN ('ENABLED', 'PAUSED')
+         AND campaign.status IN ('ENABLED', 'PAUSED')`, log);
     const existingKeywords: ExistingKeyword[] | null = kwListRows
       ? kwListRows.map((r: any) => ({
           text: String(r.ad_group_criterion?.keyword?.text ?? ""),
           matchType: matchType(r.ad_group_criterion?.keyword?.match_type),
           adGroupName: r.ad_group?.name ? String(r.ad_group.name) : null,
           campaignName: r.campaign?.name ? String(r.campaign.name) : null,
+          criterionResourceName: r.ad_group_criterion?.resource_name ? String(r.ad_group_criterion.resource_name) : null,
+          // Over REST these arrive as integers, so an undecoded value would
+          // compare equal to no status name and read as "not enabled" on every
+          // keyword in every account, silently. Same indignity as the match
+          // type above; `enumName` passes an unknown code through as itself.
+          criterionStatus: enumName(ENTITY_STATUS, r.ad_group_criterion?.status),
+          adGroupStatus: enumName(ENTITY_STATUS, r.ad_group?.status),
+          campaignStatus: enumName(ENTITY_STATUS, r.campaign?.status),
+          // Google reports no score until a keyword has served enough to earn
+          // one. That is UNANSWERED, so it stays null; a nought here would be
+          // counted as the worst possible score by anything reading it.
+          qualityScore: r.ad_group_criterion?.quality_info?.quality_score != null
+            ? Number(r.ad_group_criterion.quality_info.quality_score) : null,
         })).filter((k: ExistingKeyword) => k.text.length > 0)
       : null;
 
@@ -412,7 +471,16 @@ export class GoogleAdsAdapter implements PlatformAdapter {
          AND ad_group_criterion.status = 'ENABLED'
          AND campaign.status = 'ENABLED'
        ORDER BY metrics.cost_micros DESC
-       LIMIT 300`, log);
+       LIMIT ${KEYWORD_PERFORMANCE_LIMIT}`, log);
+
+    // Ordered by spend, so what a cut drops is the cheap tail. That is the
+    // right tail to lose and it is still a loss, so it is reported rather than
+    // left to be assumed: a full page back means there was more behind it.
+    // `dead_keyword` is the one rule reading this list, and it raises a row
+    // per keyword rather than a total, so a cut costs rows and never makes a
+    // count wrong. Quality score used to read this list too, which is how it
+    // reported one keyword below the floor on an account holding three.
+    const keywordsTruncated = kwRows.length >= KEYWORD_PERFORMANCE_LIMIT;
 
     const keywords: KeywordRow[] = kwRows.map((r: any) => ({
       criterionResourceName: String(r.ad_group_criterion?.resource_name ?? ""),
@@ -545,6 +613,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       dailyConversions,
       searchTermSpendByCampaign,
       existingKeywords,
+      keywordsTruncated,
       // The client's own economics are not the platform's to know. They are
       // read from Postgres by the caller (src/ads-findings-run.ts) and merged
       // onto the input, which keeps this adapter what it is: one vendor's API.

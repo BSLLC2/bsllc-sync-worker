@@ -67,6 +67,25 @@ export interface PromotionQueryInput {
  * it — and "absent from a performance report" is not "not in the account".
  * Proposing a keyword that is already there is the one mistake this rule must
  * not make, so it checks against the whole list or it checks against nothing.
+ *
+ * ── WHAT THE LIST HOLDS, AND WHY IT IS WIDER THAN THE ONE THAT SERVES ─────
+ *
+ * A keyword sitting in a PAUSED ad group is still a keyword. On 2026-09-23 a
+ * reviewer found this rule telling somebody to add "cooking classes near me"
+ * to an account that already held it — enabled, broad, verbatim — inside an ad
+ * group nobody had turned back on. The list was filtered to enabled ad groups
+ * in enabled campaigns, so the duplicate was invisible to the one check whose
+ * job is to see it.
+ *
+ * So the list now holds every keyword the account has not REMOVED, at every
+ * level, and each row carries the three statuses that decide whether it can
+ * serve. Removed is left out on purpose: a removed criterion cannot be turned
+ * back on, so creating the keyword again is the right thing to do.
+ *
+ * A row reading its statuses gets three answers from `keywordCanServe`, and
+ * the third one matters: an absent status is UNKNOWN, never ENABLED, so a
+ * platform that stops reporting one makes this rule cautious rather than
+ * confident.
  */
 export interface ExistingKeyword {
   text: string;
@@ -75,6 +94,58 @@ export interface ExistingKeyword {
   matchType: string | null;
   adGroupName: string | null;
   campaignName: string | null;
+  /** The criterion's own resource name, so a performance row can be joined to
+   *  the settings row it belongs to. Absent where the platform did not give
+   *  one; nothing here guesses a join key from a keyword's text. */
+  criterionResourceName?: string | null;
+  /** The keyword's own status, verbatim. Absent or null = not reported. */
+  criterionStatus?: string | null;
+  /** Its ad group's status, verbatim. Absent or null = not reported. */
+  adGroupStatus?: string | null;
+  /** Its campaign's status, verbatim. Absent or null = not reported. */
+  campaignStatus?: string | null;
+  /**
+   * Google's quality score for it, 1 to 10.
+   *
+   * NULL IS UNANSWERED AND IS NEVER A NOUGHT. Google reports no score until a
+   * keyword has served enough exact-match traffic to earn one, so a keyword
+   * nobody has run yet has no score rather than the worst score. A count of
+   * keywords "below 5" that swept nulls in would be a count of keywords nobody
+   * has measured.
+   */
+  qualityScore?: number | null;
+}
+
+/** Whether a keyword can be served today, read from the three statuses that
+ *  decide it. `unknown` where any of them was not reported. */
+export type KeywordServing = "yes" | "no" | "unknown";
+
+/** ENABLED at the criterion, the ad group and the campaign, or it cannot
+ *  serve. An unreported status is unknown, never taken as enabled. */
+export function keywordCanServe(k: ExistingKeyword): KeywordServing {
+  const parts = [k.criterionStatus, k.adGroupStatus, k.campaignStatus];
+  if (parts.some((s) => s != null && String(s).toUpperCase() !== "ENABLED")) return "no";
+  if (parts.some((s) => s == null)) return "unknown";
+  return "yes";
+}
+
+/** Which level is switched off, in plain words. Null where it can serve or
+ *  where the statuses were not reported. */
+export function dormantBecause(k: ExistingKeyword): string | null {
+  const off = (s: string | null | undefined) => s != null && String(s).toUpperCase() !== "ENABLED";
+  if (off(k.criterionStatus)) return `the keyword itself is ${String(k.criterionStatus).toLowerCase()}`;
+  if (off(k.adGroupStatus)) return `its ad group is ${String(k.adGroupStatus).toLowerCase()}`;
+  if (off(k.campaignStatus)) return `its campaign is ${String(k.campaignStatus).toLowerCase()}`;
+  return null;
+}
+
+/** Where a keyword sits, for a sentence a person reads. */
+export function keywordWhere(k: ExistingKeyword): string {
+  const bits: string[] = [];
+  if (k.campaignName) bits.push(`"${k.campaignName}"`);
+  if (k.adGroupName) bits.push(`"${k.adGroupName}"`);
+  const place = bits.length ? bits.join(" › ") : "an ad group this run could not name";
+  return k.matchType ? `${k.matchType.toLowerCase()} match in ${place}` : place;
 }
 
 /**
@@ -125,8 +196,9 @@ export function normalizeQueryText(s: string): string {
     .trim();
 }
 
-/** Every enabled keyword in the account, keyed by its normalised text. Null in
- *  means null out: an unread list is not an empty account. */
+/** Every keyword the account holds, keyed by its normalised text, serving or
+ *  not — the dedupe asks whether one EXISTS. Null in means null out: an unread
+ *  list is not an empty account. */
 export function keywordIndex(rows: ExistingKeyword[] | null | undefined): Map<string, ExistingKeyword[]> | null {
   if (rows == null) return null;
   const out = new Map<string, ExistingKeyword[]>();
@@ -145,6 +217,26 @@ export type PromotionSkipReason =
   | "below_floor"
   /** A pattern the client told us to leave alone. */
   | "protected";
+
+/**
+ * A converting query whose keyword exists and cannot serve.
+ *
+ * This is the case the 2026-09-23 review found, and it has to be carried
+ * rather than folded into the already-a-keyword count, because the two ask for
+ * opposite work. A live duplicate means there is nothing to do. This means the
+ * account already decided to bid on the query and then switched the decision
+ * off, and the money is being spent through a looser keyword in the meantime.
+ */
+export interface DormantMatch {
+  term: string;
+  campaignName: string;
+  conversions: number;
+  costMicros: number;
+  /** Where the existing keyword sits, in words. */
+  where: string;
+  /** Which level is switched off, in words. */
+  because: string;
+}
 
 export interface PromotedQuery {
   term: string;
@@ -185,18 +277,59 @@ export type PromotionVerdict =
 export interface PromotionReading {
   verdict: PromotionVerdict;
   byCampaign: CampaignPromotions[];
-  /** Queries that cleared the floors and are already in the account. Counted
-   *  so the row can say the check ran rather than leaving it to be assumed. */
+  /** Queries that cleared the floors and are already in the account, live ones
+   *  and switched-off ones together. Counted so the row can say the check ran
+   *  rather than leaving it to be assumed. */
   alreadyKeywords: number;
+  /** …of which these are keywords that can serve today. Nothing to do. */
+  alreadyServing: number;
+  /**
+   * …and these are keywords that exist and cannot serve. Named one by one,
+   * because each is a decision somebody already made and then turned off, and
+   * the fix is to turn it back on or move it rather than create a second copy.
+   */
+  dormant: DormantMatch[];
+  /**
+   * Queries whose keyword exists and whose serving status this run could not
+   * read. Refused like any other match — a keyword nobody could confirm is
+   * off is not a keyword to duplicate — and counted apart so the row never
+   * claims it knows which of the two it was.
+   */
+  alreadyStateUnread: number;
   /** One clause naming why nothing was produced. Null where something was. */
   silence: string | null;
+}
+
+/**
+ * What to say about the switched-off matches. One clause, naming the work.
+ *
+ * It never proposes creating the keyword. That is the whole point of the
+ * reading: the account holds it already, so a second copy would compete with
+ * the first the day somebody turns the first back on.
+ */
+export function dormantLine(dormant: DormantMatch[]): string | null {
+  if (!dormant.length) return null;
+  const listed = dormant.slice(0, 6).map((d) =>
+    `"${d.term}" — ${d.conversions.toFixed(1)} conversion(s) on ${usd(d.costMicros)}, already a keyword: ${d.where}, but ${d.because}`);
+  const rest = dormant.length > 6 ? ` …and ${dormant.length - 6} more.` : "";
+  return `${dormant.length} converting quer${dormant.length === 1 ? "y is" : "ies are"} already in the account as a keyword that cannot serve. `
+    + `Turning the existing keyword back on, or moving it into a live ad group, is the work here. Adding a second copy of it would `
+    + `compete with the first as soon as anybody turns the first back on. ${listed.join("; ")}.${rest}`;
 }
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 
 export interface PromotionInput {
   terms: PromotionQueryInput[];
-  /** Every enabled keyword in the account. NULL = the read failed. */
+  /**
+   * Every keyword the account holds that has not been removed, whether or not
+   * it can serve. NULL = the read failed, and nothing is proposed.
+   *
+   * Serving status does not decide whether a keyword EXISTS, and existence is
+   * the only question the dedupe asks. What the status decides is what gets
+   * said about a match: a live one means there is nothing to do, a switched-off
+   * one means somebody already made this decision and turned it off.
+   */
   existingKeywords: ExistingKeyword[] | null | undefined;
   /** `trackingReading().countsOutcomes`, composed rather than re-decided. */
   columnCountsOutcomes: "yes" | "no" | "unknown";
@@ -221,7 +354,10 @@ export interface PromotionInput {
  * difference is visible on the row.
  */
 export function queryPromotions(i: PromotionInput): PromotionReading {
-  const empty = { byCampaign: [] as CampaignPromotions[], alreadyKeywords: 0 };
+  const empty = {
+    byCampaign: [] as CampaignPromotions[],
+    alreadyKeywords: 0, alreadyServing: 0, dormant: [] as DormantMatch[], alreadyStateUnread: 0,
+  };
 
   // A conversion on a column that counts page views is a page view. Bidding
   // deliberately on the queries that produce the most of them is the finding
@@ -249,6 +385,9 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
   };
 
   let alreadyKeywords = 0;
+  let alreadyServing = 0;
+  let alreadyStateUnread = 0;
+  const dormant: DormantMatch[] = [];
   const byCampaign = new Map<string, PromotedQuery[]>();
   for (const t of i.terms) {
     if (t.conversions < PROMOTE_MIN_CONVERSIONS) continue;
@@ -258,8 +397,33 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
     // inside that instruction even though it is not the blocking the
     // protection was written against.
     if (isProtected(t.term)) continue;
+    // The account already holds this text as a keyword. Refused, whatever its
+    // statuses say — proposing a second copy is the one mistake this rule must
+    // not make, and a keyword in a paused ad group is still a keyword. Which
+    // KIND of match it is decides what gets said about it afterwards.
     const existing = index.get(normalizeQueryText(t.term));
-    if (existing && existing.length) { alreadyKeywords++; continue; }
+    if (existing && existing.length) {
+      alreadyKeywords++;
+      // Best state wins: one live copy means the account is bidding on this
+      // deliberately today, whatever else sits switched off beside it.
+      const states = existing.map(keywordCanServe);
+      if (states.includes("yes")) {
+        alreadyServing++;
+      } else if (states.includes("unknown")) {
+        alreadyStateUnread++;
+      } else {
+        const first = existing[0]!;
+        dormant.push({
+          term: t.term,
+          campaignName: t.campaignName,
+          conversions: t.conversions,
+          costMicros: t.costMicros,
+          where: keywordWhere(first),
+          because: dormantBecause(first) ?? "it is switched off",
+        });
+      }
+      continue;
+    }
     byCampaign.set(t.campaignId, [...(byCampaign.get(t.campaignId) ?? []), {
       term: t.term,
       campaignId: t.campaignId,
@@ -302,11 +466,22 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
   // two runs over one account produce the same order.
   out.sort((a, b) => b.totalCostMicros - a.totalCostMicros || a.campaignId.localeCompare(b.campaignId));
 
+  // Dearest first, so the sentence leads on the biggest one.
+  dormant.sort((a, b) => b.costMicros - a.costMicros || a.term.localeCompare(b.term));
+
   return {
     verdict: out.length ? "found" : "none",
     byCampaign: out,
-    alreadyKeywords,
-    silence: out.length ? null : "Every query over the floors is already in the account as a keyword, so there is nothing to add.",
+    alreadyKeywords, alreadyServing, dormant, alreadyStateUnread,
+    // "Nothing to add" was true of a live duplicate and false of a switched-off
+    // one, and the old sentence said it of both. Where the only matches are
+    // switched off there IS work, so the silence names it rather than closing
+    // the reading.
+    silence: out.length
+      ? null
+      : dormant.length
+        ? `Nothing here is worth adding as a new keyword. ${dormantLine(dormant)}`
+        : "Every query over the floors is already in the account as a keyword that can serve, so there is nothing to add.",
   };
 }
 
@@ -314,12 +489,21 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
  * What the row may honestly say the change buys. One paragraph, used as the
  * `impactAssumption`, and it claims no dollar.
  */
-export function promotionClaim(c: CampaignPromotions, alreadyKeywords: number): string {
-  return `No dollar figure, and the reason is arithmetic. These ${c.queries.length} quer${c.queries.length === 1 ? "y is" : "ies are"} already converting — `
+export function promotionClaim(c: CampaignPromotions, r: Pick<PromotionReading, "alreadyServing" | "dormant">): string {
+  const alreadyKeywords = r.alreadyServing;
+  return `No dollar figure, and the reason is arithmetic. ${c.queries.length === 1 ? "This query is" : `These ${c.queries.length} queries are`} already converting — `
     + `${c.totalConversions.toFixed(1)} conversion(s) on ${usd(c.totalCostMicros)} over 90 days — and those conversions are already counted in this `
-    + `campaign's own performance. Making the quer${c.queries.length === 1 ? "y" : "ies"} into keywords does not produce them a second time, so claiming their `
+    + `campaign's own performance. Making ${c.queries.length === 1 ? "the query into a keyword" : "the queries into keywords"} does not produce them a second time, so claiming their `
     + `value as the gain from the change would count the same conversion twice. What it buys is a bid, a match type and an ad group chosen for `
     + `${c.queries.length === 1 ? "this query" : "these queries"} rather than inherited from whatever looser keyword currently matches ${c.queries.length === 1 ? "it" : "them"}, and a reporting line of `
     + `${c.queries.length === 1 ? "its" : "their"} own. How much that is worth depends on the bid somebody sets, which is not a number this reads.`
-    + (alreadyKeywords > 0 ? ` ${alreadyKeywords} other converting quer${alreadyKeywords === 1 ? "y was" : "ies were"} checked and ${alreadyKeywords === 1 ? "is" : "are"} already in the account.` : "");
+    + (alreadyKeywords > 0
+        ? ` ${alreadyKeywords} other converting quer${alreadyKeywords === 1 ? "y was" : "ies were"} checked and ${alreadyKeywords === 1 ? "is" : "are"} already in the account as a keyword that can serve, so there is nothing to do about ${alreadyKeywords === 1 ? "it" : "them"}.`
+        : "")
+    // Kept out of the count above rather than folded into it. "Already in the
+    // account" reads as "nothing to do", and on a switched-off keyword there is
+    // something to do.
+    + (r.dormant.length > 0
+        ? ` A further ${r.dormant.length} ${r.dormant.length === 1 ? "is" : "are"} in the account as a keyword that cannot serve, which is work of its own and is listed on this row.`
+        : "");
 }

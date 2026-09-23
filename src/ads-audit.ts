@@ -206,7 +206,7 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
   });
   const broad = kws.filter((r: any) => matchType(r.ad_group_criterion?.keyword?.match_type) === "BROAD");
 
-  console.log(`\n── Keywords: ${kws.length} with spend · ${deadKws.length} zero-conversion ≥$50 · ${lowQs.length} quality score <5 · ${broad.length} broad match ──`);
+  console.log(`\n── Keywords: ${kws.length} with spend · ${deadKws.length} zero-conversion ≥$50 · ${lowQs.length}+ quality score <5 (of the ones that spent) · ${broad.length} broad match ──`);
   for (const r of deadKws.slice(0, 20)) {
     console.log(`  ${usd(Number(r.metrics.cost_micros))} · ${r.metrics.clicks} clicks · "${r.ad_group_criterion?.keyword?.text}" [${matchType(r.ad_group_criterion?.keyword?.match_type)}] (${r.campaign?.name})`);
   }
@@ -220,7 +220,15 @@ async function auditAccount(api: GoogleAdsApi, cfg: Config, name: string, custom
   if (lowQs.length) {
     findings.push({
       severity: "medium", category: "quality-score",
-      detail: `${lowQs.length} keywords carry a quality score below 5 — you are paying a premium per click on every one. Usually an ad-copy or landing-page relevance mismatch: ` +
+      // A FLOOR, NOT A TOTAL, and it says so. This reads `keyword_view`
+      // filtered to keywords that spent and cut at the top 300, so a keyword
+      // scoring 1 with no clicks in the window is not in it. The findings
+      // engine counts this properly off a settings read (see
+      // `low_quality_score` in src/ads/rules.ts); this is the older manual
+      // audit and is left reading what it reads, saying what that is.
+      detail: `At least ${lowQs.length} keyword(s) carry a quality score below 5 — you are paying a premium per click on every one. `
+            + `Counted over the ${kws.length} keyword(s) that spent inside the window, so a low-scoring keyword that took no clicks is not in it. `
+            + `Usually an ad-copy or landing-page relevance mismatch: ` +
               lowQs.slice(0, 5).map((r: any) => `"${r.ad_group_criterion?.keyword?.text}" (QS ${r.ad_group_criterion?.quality_info?.quality_score})`).join(", "),
     });
   }

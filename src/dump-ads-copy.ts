@@ -6,7 +6,9 @@ import { loadConfig, digitsOnly } from "./config.js";
 
 /**
  * Read-only dump of what an account actually claims: live ad headlines and
- * descriptions, the landing pages they point at, and every enabled keyword.
+ * descriptions, the landing pages they point at, and every keyword the account
+ * can serve today. Keywords in a paused ad group or a paused campaign are left
+ * out, so this is what the account is running rather than everything it holds.
  *
  * The point is verification, not optimisation. An advertiser's own ad copy and
  * bid list are public service claims they are paying to make, which makes them

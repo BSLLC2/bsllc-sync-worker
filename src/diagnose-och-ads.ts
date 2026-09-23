@@ -434,7 +434,8 @@ async function main() {
   }
 
   // ── 9. QUALITY SCORE ─────────────────────────────────────────────────────
-  hr("9. QUALITY SCORE COMPONENTS — enabled keywords");
+  hr("9. QUALITY SCORE COMPONENTS — keywords that can serve today");
+  note(`Enabled, in an enabled ad group, in an enabled campaign. An enabled keyword sitting in a paused ad group is not here.`);
   note(`Quality Score is a current snapshot, not period-scoped.`);
   const qs = await q(`SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text,
       ad_group_criterion.keyword.match_type, ad_group_criterion.quality_info.quality_score,
