@@ -75,8 +75,8 @@ export const ADS_JOBS: AdsJobSpec[] = [
     workflow: "ads-change-history.yml",
     label: "Ads change history capture",
     cadence: "every six hours, at :10",
-    quiet: "An account nobody touched genuinely produces no new rows, and a second run inside the same window produces none either — the note carries accounts/read/events counts so both read as what they are. What this job must never do is stop: the platform keeps change_event for 30 DAYS and then deletes it, so a silent stop is account history being lost rather than a stale reading.",
-    fix: "Open bsllc-sync-worker → Actions → \"Ads change history capture (read-only)\" and re-run it. It is a SELECT against change_event and writes nothing to any ad account. Fix it the same day: every day it is down is a day of change history that cannot be recovered afterwards, and while it is down the settle-window guard in the dashboard cannot see a change a subcontractor made by hand.",
+    quiet: "An account nobody touched genuinely produces no new rows, and a second run inside the same window produces none either — the note carries accounts/read/events counts so both read as what they are. What this job must never do is stop: the platform keeps change_event for 30 DAYS and then deletes it, so a silent stop is account history being lost rather than a stale reading. A SECOND READER ARRIVED 2026-09-23. The dashboard's weekly timeline digest (GET /api/cron/ads-change-digest) turns these rows into one line a week on each client's own timeline. It reads ads_change_scans beside the events, so it reports a week nobody watched apart from a quiet one rather than writing a reassuring line — but a client's timeline gains nothing either way, and its own heartbeat stays green through all of it. This heartbeat is where the difference shows.",
+    fix: "Open bsllc-sync-worker → Actions → \"Ads change history capture (read-only)\" and re-run it. It is a SELECT against change_event and writes nothing to any ad account. Fix it the same day: every day it is down is a day of change history that cannot be recovered afterwards. Two readers go quiet meanwhile. The settle-window guard in the dashboard cannot see a change a subcontractor made by hand, and the weekly timeline digest stops writing an account's line — so every affected client's timeline has a gap where a week should be, and that gap cannot be filled in later.",
   },
   {
     job: "ads_structure_snapshot",
@@ -87,6 +87,15 @@ export const ADS_JOBS: AdsJobSpec[] = [
     fix: "Open bsllc-sync-worker \u2192 Actions \u2192 \"Ads structure snapshot (read-only)\" and re-run it. Every query it makes is a SELECT and it writes nothing to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account; a missing GOOGLE_ADS_LOGIN_CUSTOMER_ID fails on startup by name. Today's snapshot is still takeable until midnight UTC; after that the day has no row and the intervals either side carry the gap.",
   },
 ];
+
+// `ads_change_digest` is deliberately NOT in this list (2026-09-23) for the
+// same reason as `ads_vendor_briefs` below. It is a Vercel cron in the
+// dashboard app: it reads `ads_change_events` out of Postgres and writes one
+// `client_activity_log` row, calling no ad platform and holding no credential.
+// This file lists WORKER jobs and derives each one's window from its own cron,
+// so a job with no worker workflow belongs to the app's Data health page and
+// its own JOB_SLA_HOURS entry. What DOES belong here is the line above: when
+// this capture stops, that digest is one of the two things that goes quiet.
 
 // `ads_vendor_briefs` is deliberately NOT in this list any more (2026-09-22).
 // The generator moved into the dashboard app, where it is a Vercel cron
