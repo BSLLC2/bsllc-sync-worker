@@ -157,7 +157,7 @@ export function readinessFindings(i: ReadinessFindingInput): DerivedFinding[] {
       // Keyed on the outage's START, not its end. An outage that is still open
       // grows a day every run, and keying on the end would close one row and
       // open another every week — each closure reading as "the condition
-      // cleared on its own", which would be false.
+      // audit no longer finds this", which would be false.
       entityId: `${i.accountId}:data_exclusion:${outage.startDate ?? "unbounded"}`,
       entityName: "Conversion tracking outage",
       findingType: "bidding_data_exclusion",

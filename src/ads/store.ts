@@ -183,6 +183,27 @@ export async function upsertFinding(
 }
 
 /**
+ * THE CONTRACT WITH THE APP (2026-09-24).
+ *
+ * Two machine paths close a finding and they mean opposite things: a swept row
+ * stopped being true, a superseded row was replaced by a sharper reading while
+ * the condition stood. The app's weekly timeline note has to tell them apart,
+ * and telling them apart by reading `dismissed_reason` would be
+ * pattern-matching prose, which this codebase refuses everywhere else. So each
+ * path stamps the kind into `ads_finding_events.detail_json` — a column whose
+ * whole job is a machine-readable blob — and the app reads that.
+ *
+ * Mirrored as `SETTLED_CLOSURE_KINDS` in the dashboard's
+ * `shared/ads-finding-settled.ts`. Change one, change both; the app treats an
+ * absent or unrecognised marker as UNANSWERED and lists nothing, so a drift
+ * here goes quiet rather than wrong.
+ */
+export const CLOSURE_MARKER = {
+  sweep: JSON.stringify({ closedBy: "sweep" }),
+  superseded: JSON.stringify({ closedBy: "superseded" }),
+} as const;
+
+/**
  * Close out findings of a type that the latest run no longer sees.
  *
  * A search term we negated stops appearing; a budget-capped campaign that is no
@@ -191,6 +212,24 @@ export async function upsertFinding(
  * leaving them in the review queue is how a screen fills up with stale advice.
  * Only untouched statuses are swept; anything a human or the apply path has
  * moved is left exactly where it is.
+ *
+ * ── WHAT THE SENTENCE MAY CLAIM (2026-09-24) ───────────────────────────────
+ *
+ * It used to read "No longer present in the account — the condition cleared on
+ * its own." The second half is a CAUSE, and this function cannot know one: it
+ * knows the latest audit did not see the thing. The company owner spent an
+ * afternoon in an ad account by hand, and every row he settled closed saying
+ * nobody had done anything.
+ *
+ * So the stored sentence now says only what the audit saw, and the cause is
+ * worked out where the evidence is — the app's weekly digest reads
+ * `ads_change_events` for the window the finding was open and says what landed
+ * on it, or says plainly that nothing did. It is derived there rather than
+ * stored here for the reason the sentence was wrong in the first place:
+ * capture is six-hourly and the audit runs between captures, so a change made
+ * an hour before a sweep is not on the record yet. A sentence frozen at sweep
+ * time would be wrong for good; a reading re-taken from the log is right the
+ * next time somebody looks.
  */
 export async function sweepResolved(
   c: pg.Client,
@@ -211,11 +250,11 @@ export async function sweepResolved(
     await c.query(
       `UPDATE ads_findings
           SET status = 'dismissed', dismissed_by = $2, dismissed_at = now(),
-              dismissed_reason = 'No longer present in the account — the condition cleared on its own.'
+              dismissed_reason = 'The latest audit no longer finds this in the account.'
         WHERE id = $1`,
       [r.id, actor],
     );
-    await logEvent(c, r.id, "dismissed", actor, "Condition cleared — not seen in the latest audit.", null);
+    await logEvent(c, r.id, "dismissed", actor, "Not seen in the latest audit.", CLOSURE_MARKER.sweep);
   }
   return rows.length;
 }
@@ -224,10 +263,10 @@ export async function sweepResolved(
  * Close the rows a sharper finding replaced.
  *
  * WHY THIS IS NOT LEFT TO `sweepResolved`. That function closes anything that
- * stopped being produced with "No longer present in the account — the
- * condition cleared on its own." For a superseded row that sentence is false
- * twice over: the condition did not clear, and the row did not go away for
- * want of evidence. Somebody working the queue would read it as fixed.
+ * stopped being produced with "The latest audit no longer finds this in the
+ * account." For a superseded row that is false: the condition is still there,
+ * and the row went for a sharper reading of it rather than for want of
+ * evidence. Somebody working the queue would read it as fixed.
  *
  * So this runs FIRST, names the row that took its place, and writes the same
  * event history every other decision writes. The sweep afterwards finds the
@@ -256,7 +295,7 @@ export async function supersedeFindings(
       [clientId, platform, accountId, it.entityId, actor, it.reason, it.findingType],
     );
     for (const r of rows) {
-      await logEvent(c, r.id, "dismissed", actor, it.reason, null);
+      await logEvent(c, r.id, "dismissed", actor, it.reason, CLOSURE_MARKER.superseded);
       closed += 1;
     }
   }

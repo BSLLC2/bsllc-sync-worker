@@ -212,7 +212,7 @@ async function auditOne(
   // campaign makes "we looked and it's clean" the only case that sweeps.
   if (!dryRun && input.campaigns.length > 0) {
     const swept = await sweepResolved(c, clientId, platform, accountId, ids, ACTOR);
-    if (swept) console.log(`    · ${swept} finding(s) closed — the condition cleared on its own`);
+    if (swept) console.log(`    · ${swept} finding(s) closed — the latest audit no longer finds them`);
   } else if (!dryRun) {
     console.log(`    · read returned no campaigns — not sweeping, since that is indistinguishable from a failed read`);
   }

@@ -1208,7 +1208,7 @@ export interface DerivedFinding {
    * Not producing the weaker row would be enough on its own if nothing had
    * already been written — but a row somebody is working does not vanish
    * quietly. `sweepResolved` closes a row that stops being produced with "the
-   * condition cleared on its own", which is FALSE here: the condition did not
+   * latest audit no longer finds this", which is FALSE here: the condition did not
    * clear, it got a better explanation. So the run closes the named row itself,
    * first, with the sentence below, and the sweep then finds it already closed.
    *

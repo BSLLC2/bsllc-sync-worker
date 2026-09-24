@@ -349,7 +349,7 @@ const input = (c: CampaignRow): AuditInput => ({
   ok("…and the sentence written onto it says the cost figures moved rather than cleared",
     /Replaced by a sharper reading/.test(sharper?.supersedes?.[0]!.reason ?? "")
       && !/cleared/.test(sharper?.supersedes?.[0]!.reason ?? ""),
-    "sweepResolved would have said the condition cleared on its own, which is false");
+    "sweepResolved would have said only that the audit no longer finds it, which says nothing about why");
   ok("SELF-TEST: the supersede sentence names the campaign",
     supersedeReason("Treatment Centre Search").includes("Treatment Centre Search"));
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
+import { readFileSync } from "node:fs";
+import { CLOSURE_MARKER } from "./ads/store.js";
 import {
   evaluate, evidenceHash, materiallyChanged, trackingReading, costTargets, governingTarget,
   outcomeReadiness, MIN_MONTHLY_OUTCOMES_FOR_BIDDING,
@@ -2044,6 +2046,47 @@ async function main() {
     }
 
     ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 7);
+  }
+
+  // ── How a closure is recorded (2026-09-24) ────────────────────────────────
+  //
+  // The dashboard's weekly timeline note reads `ads_finding_events.detail_json`
+  // to tell a swept row from a superseded one, because telling them apart by
+  // reading `dismissed_reason` would be pattern-matching prose. The two
+  // strings are the contract; `SETTLED_CLOSURE_KINDS` in the dashboard's
+  // `shared/ads-finding-settled.ts` is the mirror. A drift here goes quiet
+  // rather than wrong — the app treats an unrecognised marker as unanswered —
+  // which is exactly why it needs a check that says so out loud.
+  {
+    console.log("\n── how a closure is recorded ──");
+    const STORE = readFileSync(new URL("./ads/store.ts", import.meta.url), "utf8");
+
+    ok("the marker carries the two kinds the dashboard knows",
+      CLOSURE_MARKER.sweep === '{"closedBy":"sweep"}'
+        && CLOSURE_MARKER.superseded === '{"closedBy":"superseded"}',
+      `${CLOSURE_MARKER.sweep} / ${CLOSURE_MARKER.superseded}`);
+
+    const sweepBody = /export async function sweepResolved\(([\s\S]*?)\n\}/.exec(STORE)?.[1] ?? "";
+    const supersedeBody = /export async function supersedeFindings\(([\s\S]*?)\n\}/.exec(STORE)?.[1] ?? "";
+    ok("the sweep stamps its own kind on the event row it writes",
+      /logEvent\([^)]*CLOSURE_MARKER\.sweep/.test(sweepBody),
+      "without it the dashboard lists nothing, because an absent marker is unanswered");
+    ok("and supersede stamps its own",
+      /logEvent\([^)]*CLOSURE_MARKER\.superseded/.test(supersedeBody),
+      "a superseded row handed to the change log reads as a fix nobody made");
+
+    // THE SENTENCE MAY NOT CLAIM A CAUSE. This function knows the audit did not
+    // see the thing. It does not know that nobody touched it, and the owner
+    // spent an afternoon in an account proving that.
+    const reason = /dismissed_reason = '([^']*)'/.exec(sweepBody)?.[1] ?? "";
+    ok("the sweep's stored sentence says what the audit saw",
+      reason.length > 0 && /audit/i.test(reason), reason);
+    ok("…and claims no cause for it",
+      !/cleared on its own|on its own|fixed|resolved|nobody/i.test(reason),
+      "the cause is worked out where the evidence is, from the change log, on every read");
+
+    ok("SELF-TEST: the cause scan does fire on the sentence this replaced",
+      /cleared on its own/i.test("No longer present in the account — the condition cleared on its own."));
   }
 
   console.log(`\n${"─".repeat(72)}`);
