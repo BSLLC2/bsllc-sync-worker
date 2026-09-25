@@ -40,6 +40,32 @@ export interface AdmissionRecord {
 }
 
 /**
+ * One month of one marketing channel, for the dashboard's client_channel_metrics
+ * (app schema v201). Optional and additive in exactly the way AdmissionRecord
+ * above is: a payload with no `channels` key behaves precisely as before.
+ *
+ * NEVER SUMMED INTO A SyncEntry, and no SyncEntry is ever split into these. An
+ * analytics platform's totals are not always the sum of a dimensioned breakdown
+ * of themselves, so the two come from two separate calls and stay apart. See
+ * src/ga4/channel-rows.ts for the whole argument.
+ *
+ * A null measure is UNANSWERED, never a nought — the property never reported
+ * that metric at all (metric-evidence.ts).
+ */
+export interface ChannelMetricRow {
+  client_id: string;
+  source: "ga4";
+  external_id?: string;
+  /** YYYY-MM. */
+  period: string;
+  /** The platform's own label, verbatim. */
+  channel: string;
+  sessions: number | null;
+  conversions: number | null;
+  revenue_cents: number | null;
+}
+
+/**
  * Write the payload to a temp file and hand it to the dashboard's `npm run sync`.
  * The worker owns zero database writes — sync.ts validates and inserts. Returns
  * the child exit code (0 ok · 1 bad input · 2 one or more entries failed).
@@ -49,11 +75,15 @@ export function runDashboardSync(
   syncs: SyncEntry[],
   opts: { dryRun: boolean },
   admissions?: AdmissionRecord[],
+  channels?: ChannelMetricRow[],
 ): number {
   const dir = mkdtempSync(join(tmpdir(), "adsync-"));
   const file = join(dir, "sync.json");
-  writeFileSync(file, JSON.stringify(admissions?.length ? { syncs, admissions } : { syncs }, null, 2));
-  console.log(`\n→ Wrote ${syncs.length} sync entr${syncs.length === 1 ? "y" : "ies"}${admissions?.length ? ` + ${admissions.length} admission record(s)` : ""} to ${file}`);
+  const payload: Record<string, unknown> = { syncs };
+  if (admissions?.length) payload.admissions = admissions;
+  if (channels?.length) payload.channels = channels;
+  writeFileSync(file, JSON.stringify(payload, null, 2));
+  console.log(`\n→ Wrote ${syncs.length} sync entr${syncs.length === 1 ? "y" : "ies"}${admissions?.length ? ` + ${admissions.length} admission record(s)` : ""}${channels?.length ? ` + ${channels.length} channel row(s)` : ""} to ${file}`);
 
   const args = ["run", "sync", "--", `--input=${file}`];
   if (opts.dryRun) args.push("--dry-run");

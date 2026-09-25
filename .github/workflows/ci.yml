@@ -40,3 +40,5 @@ jobs:
         run: npm run verify-och-import
       - name: OCH attribution guard
         run: npm run verify-och-attribution
+      - name: GA4 per-channel import guard
+        run: npm run verify-ga4-channels
