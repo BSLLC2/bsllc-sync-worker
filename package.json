@@ -180,6 +180,7 @@
     "verify-connection-probe": "tsx src/verify-connection-probe.ts",
     "verify-zero-vs-nothing": "tsx src/verify-zero-vs-nothing.ts",
     "verify-meta-import": "tsx src/verify-meta-import.ts",
+    "verify-ga4-channels": "tsx src/verify-ga4-channels.ts",
     "verify-attribution-dates": "tsx src/verify-attribution-dates.ts",
     "verify-och-import": "tsx src/verify-och-import.ts",
     "verify-och-attribution": "tsx src/verify-och-attribution.ts",
