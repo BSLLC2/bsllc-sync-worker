@@ -7,7 +7,12 @@ import type { Config } from "./config.js";
 /** One entry in the dashboard's sync contract (see SYNC_INTERFACE.md). */
 export interface SyncEntry {
   client_id: string;
-  source: "google_ads" | "gsc" | "ga4" | "d365" | "hubspot" | "seo" | "aeo" | "authority" | "manual";
+  // "meta" is Meta (Facebook/Instagram) paid social, written by
+  // src/import-meta.ts. The dashboard's own sync validates this against
+  // CONNECTOR_SOURCES in its shared/schema.ts, which has carried "meta" since
+  // the connector row was made mappable; this union is the worker's half of
+  // the same contract and simply had no producer until now.
+  source: "google_ads" | "meta" | "gsc" | "ga4" | "d365" | "hubspot" | "seo" | "aeo" | "authority" | "manual";
   external_id?: string;
   /** Identity of ONE upstream record (e.g. a D365 opportunity id) for a
    *  per-item row, as opposed to an aggregate. Separate from `external_id`

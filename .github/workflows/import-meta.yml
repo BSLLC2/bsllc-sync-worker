@@ -1,0 +1,99 @@
+name: Import Meta ads spend and performance
+
+# Reads each mapped Meta ad account's MONTHLY insights and plants
+# meta.cost_micros / impressions / clicks / conversions / ctr / average_cpc per
+# client via the dashboard's own `npm run sync`. Read-only against Meta;
+# idempotent — a month is upserted, so re-running corrects a month Meta has
+# since restated rather than adding a second reading of it.
+#
+# REQUIRES the META_ACCESS_TOKEN repository secret: a Meta system-user token
+# with `ads_read` on each client's ad account. With ad accounts mapped in
+# Admin → Connectors and no token, this run FAILS on purpose — a green
+# heartbeat over an importer that can never import is the "stopped or retired?"
+# confusion the Data health page exists to end. With nothing mapped it exits 0
+# and says so. See docs/META_CONNECTOR_SETUP.md.
+on:
+  schedule:
+    # 07:55 UTC daily — after the GA4 (07:45) and D365 (07:50) imports and
+    # clear of the 08:00 block, so the daily brief at 11:00 UTC reads a
+    # complete picture of what every paid channel cost.
+    - cron: "55 7 * * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client (UUID or a name prefix). Blank = every mapped account."
+        required: false
+        default: ""
+      months:
+        description: "How many months back to read (default 24, Meta's own limit is 37)."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: meta-import
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run Meta import
+        id: run
+        working-directory: worker
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.client }}" ] && ARGS="--client=${{ inputs.client }}"
+          [ -n "${{ inputs.months }}" ] && ARGS="$ARGS --months=${{ inputs.months }}"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run import-meta -- $ARGS 2>&1 | tee run.log
+
+      # The heartbeat is what makes a SILENT STOP visible: without it a job that
+      # quietly stopped firing produces the same empty Meta panel as a client
+      # who has paused their ads, and those need opposite actions. `if: always()`
+      # so a failure records AS a failure, and the run's own one-line summary
+      # becomes the note, so a green heartbeat says what it looked at.
+      #
+      # A DRY RUN and a SCOPED run are excluded for the reason the ads jobs
+      # exclude them: this heartbeat is one row for the whole book, so a run
+      # that read a single account and stamped it would claim every other
+      # account was read today and hide a cron that has stopped firing.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=import_meta --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log
