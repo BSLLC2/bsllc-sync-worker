@@ -14,6 +14,17 @@ on:
         description: "Parse + print only, write nothing (true/false)."
         required: false
         default: "false"
+      # NOTHING IS BACKFILLED BY THE SCHEDULE. The per-channel breakdown reads
+      # the last three months by default (DEFAULT_CHANNEL_MONTHS in
+      # src/ga4/channel-rows.ts) -- enough for a closed month's restatement to
+      # land, and not the whole of a client's history. Widening it here is how
+      # a backfill is performed: one API call per property either way, N months
+      # of rows, and the write is an upsert so re-running costs nothing on the
+      # months that already landed. 0 turns the breakdown off entirely.
+      channel_months:
+        description: "Months of per-channel history to read (blank = 3; raise to backfill; 0 = off)."
+        required: false
+        default: ""
 
 concurrency:
   group: ga4-import
@@ -56,10 +67,14 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DASHBOARD_DIR: ${{ github.workspace }}/dashboard
         run: |
+          CHAN=""
+          if [ -n "${{ inputs.channel_months }}" ]; then
+            CHAN="--channel-months=${{ inputs.channel_months }}"
+          fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run import-ga4 -- --dry-run
+            npm run import-ga4 -- --dry-run $CHAN
           else
-            npm run import-ga4
+            npm run import-ga4 -- $CHAN
           fi
 
       - name: Heartbeat

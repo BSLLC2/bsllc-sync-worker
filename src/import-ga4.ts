@@ -2,9 +2,10 @@
 import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
-import { runDashboardSync, type SyncEntry } from "./emit.js";
+import { runDashboardSync, type SyncEntry, type ChannelMetricRow } from "./emit.js";
 import { monthSnapshot } from "./dates.js";
 import { evidencedMetric } from "./metric-evidence.js";
+import { channelRows, channelSince, DEFAULT_CHANNEL_MONTHS } from "./ga4/channel-rows.js";
 
 /**
  * GA4 → dashboard conversions importer. For clients where we have no CRM to
@@ -31,6 +32,9 @@ interface Args {
   since: string;
   dryRun: boolean;
   onlyClient: string;
+  /** How many months back the per-channel breakdown reads. See
+   *  DEFAULT_CHANNEL_MONTHS — nothing is backfilled unless somebody widens it. */
+  channelMonths: number;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -38,11 +42,13 @@ function parseArgs(argv: string[]): Args {
   let since = "2023-01-01";
   let dryRun = false;
   let onlyClient = "";
+  let channelMonths = DEFAULT_CHANNEL_MONTHS;
   for (const a of argv) {
     if (a.startsWith("--map=")) mapStr = a.slice("--map=".length);
     else if (a.startsWith("--since=")) since = a.slice("--since=".length);
     else if (a === "--dry-run") dryRun = true;
     else if (a.startsWith("--client=")) onlyClient = a.slice("--client=".length).trim();
+    else if (a.startsWith("--channel-months=")) channelMonths = Math.max(0, Number(a.slice("--channel-months=".length)) || 0);
   }
   const map: Record<string, string> = {};
   if (mapStr) {
@@ -51,7 +57,7 @@ function parseArgs(argv: string[]): Args {
       if (slug && prop) map[slug.trim()] = prop.trim();
     }
   }
-  return { map, since, dryRun, onlyClient };
+  return { map, since, dryRun, onlyClient, channelMonths };
 }
 
 /**
@@ -120,14 +126,20 @@ async function ga4Token(): Promise<string> {
 }
 
 /** Run a monthly conversions report. Falls back to `keyEvents` (GA4's newer
- *  name for conversions) if `conversions` is rejected by the property. */
-async function runReport(token: string, propertyId: string, since: string, metrics: string[]): Promise<any> {
+ *  name for conversions) if `conversions` is rejected by the property.
+ *
+ *  `extraDimension` adds a SECOND dimension to the request and is how the
+ *  per-channel breakdown is asked for. Omitted — which is what every existing
+ *  caller does — the request body is exactly what it has always been, so the
+ *  three blended keys every figure in the dashboard reads cannot move. */
+async function runReport(token: string, propertyId: string, since: string, metrics: string[], extraDimension?: string): Promise<any> {
+  const dimensions = extraDimension ? [{ name: "yearMonth" }, { name: extraDimension }] : [{ name: "yearMonth" }];
   const res = await fetch(`https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       dateRanges: [{ startDate: since, endDate: "today" }],
-      dimensions: [{ name: "yearMonth" }],
+      dimensions,
       metrics: metrics.map((name) => ({ name })),
       orderBys: [{ dimension: { dimensionName: "yearMonth" } }],
     }),
@@ -168,6 +180,13 @@ async function main() {
   const token = await ga4Token();
 
   const syncs: SyncEntry[] = [];
+  const channels: ChannelMetricRow[] = [];
+  /** One line per property about the breakdown, printed with the rest at the
+   *  end. A note here is never fatal: the three blended keys are already in
+   *  `syncs` by the time the second call runs. */
+  const channelNotes: string[] = [];
+  const chanSince = channelSince(args.channelMonths, args.since, new Date());
+  if (!chanSince) console.log("  (per-channel breakdown off: --channel-months=0)");
   const denied: string[] = [];
   for (const [slug, propertyId] of Object.entries(map)) {
     // GA4 renamed "conversions" → "keyEvents". Ask for keyEvents first (current
@@ -255,6 +274,49 @@ async function main() {
           ? ` · ${convMetric} recorded as no data, not as zeros: this property has never reported one, so there is probably no key event configured on it`
           : ""),
     );
+
+    // ── The same months, split by where the traffic came from ──────────────
+    //
+    // A SECOND call, and never a re-derivation of the one above. GA4's totals
+    // are not always the sum of a dimensioned breakdown of themselves —
+    // sampling, thresholding and its own "(other)" bucket all move them — so
+    // adding these rows up to produce the three keys would change every
+    // sessions, conversion and revenue figure the dashboard shows, on every
+    // client, with nothing failing. The request above is untouched, and these
+    // rows land in their own table (client_channel_metrics, app schema v201).
+    //
+    // A failure here must not cost the aggregate import. Those three keys are
+    // what every existing figure reads and they are already in `syncs`.
+    if (chanSince) try {
+      const chanReport = await runReport(
+        token, propertyId, chanSince,
+        ["sessions", convMetric, "totalRevenue"],
+        "sessionDefaultChannelGroup",
+      );
+      // The property's OWN history decides what a nought means, for a channel
+      // exactly as for the site: one channel converting once is what makes
+      // every other channel's nought a real nought.
+      const outcome = channelRows(chanReport, { clientId: slug, propertyId, convWindow, revWindow });
+      if (outcome.refused) {
+        channelNotes.push(`${label(slug)} — no channel breakdown written: ${outcome.refused}`);
+      } else {
+        channels.push(...outcome.rows);
+        console.log(`    ↳ ${outcome.channels} channel(s) × ${outcome.months} month(s) since ${chanSince}`);
+        if (outcome.refusedLabels.length) {
+          channelNotes.push(`${label(slug)} — ${outcome.refusedLabels.length} channel label(s) this table cannot store, named and not trimmed to fit: ${outcome.refusedLabels.join(", ")}`);
+        }
+        if (outcome.droppedRows) {
+          channelNotes.push(`${label(slug)} — ${outcome.droppedRows} row(s) carried no usable month and were dropped`);
+        }
+      }
+    } catch (e) {
+      // Named, never silent, and never fatal. A property that answers the
+      // aggregate report and refuses the dimensioned one is a real state (a
+      // permission, a quota, a custom channel grouping), and losing the three
+      // blended keys over it would blank figures the dashboard already shows.
+      const msg = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+      channelNotes.push(`${label(slug)} — channel breakdown FAILED, the monthly totals above still imported: ${msg}`);
+    }
   }
 
   // The denied list is deliberately printed AFTER the sync summary, below.
@@ -278,7 +340,17 @@ async function main() {
     process.exit(0);
   }
   console.log(`\nPlanting ${syncs.length} monthly snapshots from ${Object.keys(map).length - denied.length} propert(ies).`);
-  const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun: args.dryRun });
+  if (channels.length) {
+    console.log(`Plus ${channels.length} per-channel row(s) for client_channel_metrics.`);
+  }
+  const code = runDashboardSync({ databaseUrl, dashboardDir }, syncs, { dryRun: args.dryRun }, undefined, channels);
+  // Printed AFTER the sync summary for the same reason the denied list is: the
+  // summary is one line per entry and anything above it scrolls away.
+  if (channelNotes.length) {
+    console.error(`\n${channelNotes.length} note(s) about the per-channel breakdown:`);
+    for (const n of channelNotes) console.error(`  ${n}`);
+    console.error(`\nThe monthly totals are unaffected by any of these — they come from a separate call.`);
+  }
   reportDenied();
   process.exit(code || (denied.length ? 1 : 0));
 }
