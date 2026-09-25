@@ -30,6 +30,9 @@ const SLA_FALLBACK: Record<string, number> = {
   google_ads: 36, ga4: 36, gsc: 36, hubspot: 36, d365: 36, seo: 252, aeo: 252, authority: 252,
   email_import: 3, db_backup: 36, mrr_snapshot: 1116, review_email: 2, comment_notify: 2, seo_import: 252, aeo_import: 252, webops_import: 36,
   domain_authority_import: 252, import_d365: 36, import_ga4: 36, import_gsc: 36, import_hubspot: 36, import_hubspot_metrics: 36, import_och: 36,
+  // Meta paid social. Daily, like the other metric importers; the real value
+  // comes from import-meta.yml's own cron via job-cadence.ts.
+  import_meta: 36,
   incremental_sync: 36, snapshot_plans: 2, offline_conversions: 36, publish_och_web_leads: 36, slack_users_sync: 36, morning_audit: 108,
   // The ads pipeline. Real values come from each workflow's own cron via
   // job-cadence.ts; these are only the off-checkout fallback.
@@ -38,11 +41,11 @@ const SLA_FALLBACK: Record<string, number> = {
 // Metric sources are refreshed by one importer each; a source's freshness
 // SLA is that importer's cadence.
 const SOURCE_JOB: Record<string, string> = {
-  google_ads: "incremental_sync", ga4: "import_ga4", gsc: "import_gsc", hubspot: "import_hubspot_metrics", d365: "import_d365",
+  google_ads: "incremental_sync", meta: "import_meta", ga4: "import_ga4", gsc: "import_gsc", hubspot: "import_hubspot_metrics", d365: "import_d365",
   seo: "seo_import", aeo: "aeo_import", authority: "domain_authority_import",
 };
 const LABEL: Record<string, string> = {
-  google_ads: "Google Ads", ga4: "GA4", gsc: "Search Console", hubspot: "HubSpot", d365: "Dynamics 365", seo: "SEO ranks", aeo: "AI visibility", authority: "Domain authority",
+  google_ads: "Google Ads", meta: "Meta ads", import_meta: "Meta ads import", ga4: "GA4", gsc: "Search Console", hubspot: "HubSpot", d365: "Dynamics 365", seo: "SEO ranks", aeo: "AI visibility", authority: "Domain authority",
   domain_authority_import: "Domain authority import", import_hubspot_metrics: "HubSpot metrics import", hubspot_deals: "HubSpot deals import", slack_users_sync: "Slack user names",
   qbo_financials: "QBO financials", qbo_invoice: "QBO invoice on signature", qbo_invoices_sync: "QBO invoices sync", qbo_items_sync: "QBO catalog sync", qbo_send_invoice: "QBO send invoice",
   research: "Research queue", send_sms: "Client SMS", slack_post: "Slack CRM posts", task_digest: "Task digest", team_notify: "Team notifications", push_notify: "Push notifications", outbound_email: "Outbound email", morning_audit: "Morning audit",

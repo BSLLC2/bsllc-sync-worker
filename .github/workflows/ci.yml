@@ -30,6 +30,8 @@ jobs:
         run: npm run verify-ads-findings
       - name: Zero-vs-nothing guard
         run: npm run verify-zero-vs-nothing
+      - name: Meta importer guard
+        run: npm run verify-meta-import
       - name: Attribution-date guard
         run: npm run verify-attribution-dates
       - name: Connection probe guard

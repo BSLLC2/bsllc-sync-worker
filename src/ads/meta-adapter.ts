@@ -38,76 +38,24 @@ import type {
   PlatformAdapter, PlatformCapabilities, AdapterContext, ValidationResult, ApplyResult, VerifyMetrics,
 } from "./platform.js";
 import type { AuditInput, AdSetRow, CampaignRow } from "./rules.js";
+// The counting rule, the click rule and the money rule live in ONE place, and
+// this adapter is one of its two readers -- the other is the metric importer
+// (src/import-meta.ts). Two copies of "what is a conversion on Meta" is how a
+// finding and a dashboard figure start disagreeing about the same account.
+// countMetaConversions is re-exported below because src/verify-ads-findings.ts
+// has always imported it from here.
+import {
+  META_GRAPH, countMetaConversions, metaLinkClicks, metaSpendToMicros,
+} from "../meta/insights.js";
 
-const GRAPH = "https://graph.facebook.com/v21.0";
+export { countMetaConversions };
 
-/** Meta reports money in the account's currency as a decimal string, not micros. */
-const toMicros = (v: unknown) => Math.round(Number(v ?? 0) * 1_000_000);
+const GRAPH = META_GRAPH;
 
-/**
- * WHICH ACTION TYPES COUNT AS ONE CONVERSION, AND WHY THIS IS A LIST AND NOT A
- * PATTERN.
- *
- * Meta's `actions` array is not a list of distinct events. The same lead is
- * reported several times under different names: `lead` is the canonical roll-up
- * and `offsite_conversion.fb_pixel_lead` is the pixel's own copy of the same
- * event, and `onsite_conversion.lead_grouped` is the instant-form copy. A
- * regular expression over the prefixes therefore SUMS one conversion two or
- * three times, and every cost-per-conversion figure downstream comes out a
- * third or a half of what it really is — which is the direction that makes an
- * account look like it is working.
- *
- * So the families are declared, in preference order, and exactly ONE member of
- * each family is taken: the first one present. A family is a business outcome;
- * the names inside it are the several ways Meta reports it.
- *
- * Verify the exact strings on a real account before treating the ordering as
- * load-bearing — this was assembled from Meta's own SDK field lists and from
- * community reports, not from a live read.
- */
-const ACTION_FAMILIES: readonly (readonly string[])[] = [
-  // A form filled in, on the site or in an instant form.
-  ["lead", "offsite_conversion.fb_pixel_lead", "onsite_conversion.lead_grouped", "leadgen_grouped"],
-  // A sale.
-  ["omni_purchase", "purchase", "offsite_conversion.fb_pixel_purchase"],
-  // An account or registration completed.
-  ["complete_registration", "offsite_conversion.fb_pixel_complete_registration"],
-  // An application submitted.
-  ["submit_application", "offsite_conversion.fb_pixel_submit_application"],
-];
-
-/**
- * Count conversions from one insights row without counting anything twice.
- *
- * `objective_results` is preferred wherever Meta reports it: it is the
- * platform's own count of the thing the ad set is optimising for, which is the
- * number the delivery model is actually working from and the only one that
- * lines up with what the learning threshold is measured against.
- */
-export function countMetaConversions(row: {
-  actions?: unknown;
-  objective_results?: unknown;
-}): { conversions: number; basis: "objective_results" | "actions" | "none" } {
-  const objective = Number(row.objective_results ?? NaN);
-  if (Number.isFinite(objective) && objective >= 0) return { conversions: objective, basis: "objective_results" };
-
-  const actions: { action_type?: string; value?: string }[] = Array.isArray(row.actions) ? row.actions : [];
-  if (!actions.length) return { conversions: 0, basis: "none" };
-  const byType = new Map<string, number>();
-  for (const a of actions) {
-    const t = String(a.action_type ?? "");
-    if (!t) continue;
-    byType.set(t, Number(a.value ?? 0));
-  }
-  let total = 0;
-  let sawAny = false;
-  for (const family of ACTION_FAMILIES) {
-    for (const name of family) {
-      if (byType.has(name)) { total += byType.get(name) ?? 0; sawAny = true; break; }
-    }
-  }
-  return { conversions: total, basis: sawAny ? "actions" : "none" };
-}
+/** Meta reports money in the account's currency as a decimal string, not
+ *  micros. Absent reads as nought HERE only because the rules engine's row
+ *  types carry a plain number; the importer keeps the null. */
+const toMicros = (v: unknown) => metaSpendToMicros(v) ?? 0;
 
 export interface MetaConfig {
   /** System-user access token with ads_read (+ ads_management to mutate). */
@@ -323,11 +271,10 @@ export class MetaAdapter implements PlatformAdapter {
       const { conversions } = countMetaConversions(r);
       // Link clicks, falling back to Clicks (All) only where the link metric is
       // missing — and counted, so the log can say the fallback was taken rather
-      // than quietly handing the rules engine a different metric.
-      const linkClicks = Number(r.inline_link_clicks ?? NaN);
-      const allClicks = Number(r.clicks ?? 0);
-      const usedLink = Number.isFinite(linkClicks);
-      if (!usedLink && allClicks > 0) inflatedClickRows++;
+      // than quietly handing the rules engine a different metric. The rule
+      // itself is shared with the importer; see meta/insights.ts trap 3.
+      const link = metaLinkClicks(r);
+      if (link.usedAllClicks && (link.clicks ?? 0) > 0) inflatedClickRows++;
       return {
         id,
         name: String(r.campaign_name ?? ""),
@@ -335,7 +282,7 @@ export class MetaAdapter implements PlatformAdapter {
         dailyBudgetMicros: budgets.get(id) ?? 0,
         budgetResourceName: null,     // Meta budgets are edited by campaign id
         costMicros: toMicros(r.spend),
-        clicks: usedLink ? linkClicks : allClicks,
+        clicks: link.clicks ?? 0,
         impressions: Number(r.impressions ?? 0),
         conversions,
         // Meta has no impression-share metrics. Null, not zero — a zero would
@@ -498,11 +445,10 @@ export class MetaAdapter implements PlatformAdapter {
       // conversions differently from the read that raised the finding compares
       // two different numbers and calls the difference an effect.
       const { conversions } = countMetaConversions(r);
-      const linkClicks = Number(r.inline_link_clicks ?? NaN);
       return {
         metrics: {
           costMicros: toMicros(r.spend),
-          clicks: Number.isFinite(linkClicks) ? linkClicks : Number(r.clicks ?? 0),
+          clicks: metaLinkClicks(r).clicks ?? 0,
           impressions: Number(r.impressions ?? 0),
           conversions,
         },
