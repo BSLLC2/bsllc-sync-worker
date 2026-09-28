@@ -1,8 +1,10 @@
 name: Import HubSpot CRM
 
 # Pulls companies / contacts / deals from HubSpot and upserts them into the
-# dashboard via `npm run crm-import` (idempotent by hubspot_id). Manual for now;
-# add a schedule once you're happy with the results.
+# dashboard via `npm run crm-import` (idempotent by hubspot_id). It IS on a
+# schedule — 07:00 UTC daily, below — and has been for months; the line that
+# used to sit here said "manual for now", which is how a nightly job that
+# overwrote decisions made in the app read as something somebody had to press.
 on:
   schedule:
     - cron: "0 7 * * *" # 07:00 UTC daily — keeps the CRM in sync (idempotent)

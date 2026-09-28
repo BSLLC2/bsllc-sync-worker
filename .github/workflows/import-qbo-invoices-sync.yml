@@ -5,6 +5,13 @@ name: QBO — customer/invoice/recurring-invoice sync
 # worklist can check real QBO billing evidence instead of only the Quote
 # Designer push-side marker. Same QBO connection already used elsewhere; no
 # new secrets, no new OAuth consent.
+#
+# It also RECONCILES: after a read it can prove was complete, any open invoice
+# row QuickBooks no longer returns is zeroed, with the reason and the balance
+# it last carried kept on the row. Nothing is ever deleted, and a read that
+# cannot prove its own completeness changes nothing and says so on the
+# heartbeat note. See src/qbo/invoice-reconcile.ts. Still read-only against
+# QuickBooks -- the reconciliation writes to Postgres only.
 on:
   schedule:
     - cron: "0 9 * * *"
@@ -29,6 +36,7 @@ jobs:
           node-version: 20
       - run: npm ci
       - name: Sync QBO customers/invoices/recurring invoices
+        id: sync
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
@@ -37,13 +45,22 @@ jobs:
           QBO_REFRESH_TOKEN: ${{ secrets.QBO_REFRESH_TOKEN }}
           QBO_ENV: ${{ secrets.QBO_ENV }}
         run: |
+          set -o pipefail
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run import-qbo-invoices-sync -- --dry-run
+            npm run import-qbo-invoices-sync -- --dry-run 2>&1 | tee run.log
           else
-            npm run import-qbo-invoices-sync
+            npm run import-qbo-invoices-sync 2>&1 | tee run.log
           fi
       - name: Heartbeat
         if: always()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npm run heartbeat -- --job=qbo_invoices_sync --status=${{ job.status }}
+        # --note carries the reconciliation's own one-line outcome (the script
+        # writes summary= to $GITHUB_OUTPUT). Without it, a run that quietly
+        # stopped closing rows -- because the read came back short, or the
+        # count could not be asked for -- reads on Admin -> Data health exactly
+        # like a clean week. --log is what makes a FAILED run say why; on
+        # failure the log's last line beats the note (see src/heartbeat.ts).
+        run: |
+          npm run heartbeat -- --job=qbo_invoices_sync --status=${{ job.status }} \
+            --note="${{ steps.sync.outputs.summary }}" --log=run.log

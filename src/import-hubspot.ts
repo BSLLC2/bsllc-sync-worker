@@ -3,6 +3,7 @@ import { writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { dealStatus, dealStageLabel, CLOSED_WON_STAGE, CLOSED_LOST_STAGE } from "./hubspot-deal-status";
 
 /**
  * HubSpot → dashboard CRM import. The worker is the only place the HubSpot
@@ -103,7 +104,15 @@ async function main() {
   const hsContacts = await fetchAll(
     token,
     "contacts",
-    ["firstname", "lastname", "email", "phone", "jobtitle", "lifecyclestage", "hs_lead_status", "hs_analytics_source", "notes_last_contacted"],
+    // hubspot_owner_id and createdate were NOT here until 2026-09-28, and the
+    // app has been accepting both on the contact payload the whole time (see
+    // contactIn in server/crm-import.ts). So: every imported contact arrived
+    // with no owner — measured on production that day, owner_name was null on
+    // 828 of 828 contacts the Leads board can show — and created_at fell back
+    // to the import time, which is up to a day late and made a form submission
+    // that came in overnight look like every other row imported that morning.
+    // Two property names; nothing else in either repo had to change.
+    ["firstname", "lastname", "email", "phone", "jobtitle", "lifecyclestage", "hs_lead_status", "hs_analytics_source", "notes_last_contacted", "hubspot_owner_id", "createdate"],
     ["companies"],
     limit,
   );
@@ -139,15 +148,40 @@ async function main() {
     leadStatus: c.properties.hs_lead_status || null,
     originalSource: c.properties.hs_analytics_source || null,
     lastContactedAt: c.properties.notes_last_contacted || null,
+    // The app fills a BLANK owner with this and never overwrites one somebody
+    // set there — see the contact upsert in server/crm-import.ts.
+    ownerName: c.properties.hubspot_owner_id ? owners.get(String(c.properties.hubspot_owner_id)) ?? null : null,
+    // HubSpot's own createdate. The app only stamps it on INSERT, so a
+    // re-import never re-dates a contact already here.
+    createdAt: c.properties.createdate || null,
   }));
 
-  const deals = hsDeals.map((d) => {
-    const won = d.properties.hs_is_closed_won === "true";
-    const closed = d.properties.hs_is_closed === "true";
-    const status = won ? "won" : closed ? "lost" : "open";
-    const stage = STAGE[d.properties.dealstage ?? ""] ?? (won ? "Closed won" : closed ? "Closed lost" : "Qualified to buy");
+  // Won / lost / open is decided in ONE place for both importers in this repo
+  // — src/hubspot-deal-status.ts. It used to be a ternary here and a different
+  // ternary (plus a filter that dropped closed deals entirely) in
+  // src/import-hubspot-deals.ts, which is how the scheduled path could never
+  // close a deal. A deal the rule REFUSES to read (closed, with nothing saying
+  // which way) is left out of the payload and named below, so the app keeps
+  // whatever it already holds rather than being handed a guess.
+  const unreadableClose: string[] = [];
+  const deals = hsDeals.flatMap((d) => {
+    const reading = dealStatus({
+      isClosedWon: d.properties.hs_is_closed_won,
+      isClosed: d.properties.hs_is_closed,
+    });
+    if (reading.status === null) {
+      unreadableClose.push(`  · ${d.properties.dealname || "(unnamed deal)"} [${d.id}] — ${reading.why}`);
+      return [];
+    }
+    const status = reading.status;
+    // A stage id we recognise, but only as an OPEN stage: the closed label is
+    // the status's own, so a deal whose stage id says closed and whose flags
+    // say open can no longer arrive as "Closed won, open".
+    const mapped = STAGE[d.properties.dealstage ?? ""];
+    const openStage = mapped && mapped !== CLOSED_WON_STAGE && mapped !== CLOSED_LOST_STAGE ? mapped : "Qualified to buy";
+    const stage = dealStageLabel(status, openStage);
     const amount = Number(d.properties.amount ?? 0);
-    return {
+    return [{
       hubspotId: d.id,
       companyHubspotId: assocFirst(d, "companies"),
       // Which HubSpot pipeline this came from. We have always ASKED for this
@@ -171,8 +205,17 @@ async function main() {
       closedLostReason: d.properties.closed_lost_reason || null,
       dealScore: d.properties.hs_deal_score != null && d.properties.hs_deal_score !== "" ? Math.round(Number(d.properties.hs_deal_score)) : null,
       lastContactedAt: d.properties.notes_last_contacted || null,
-    };
+    }];
   });
+
+  if (unreadableClose.length) {
+    console.log(`\n${unreadableClose.length} deal(s) left out: HubSpot says closed and nothing says won or lost.`);
+    console.log(`Nothing was written for these — the app keeps whatever it already holds. Set the outcome in HubSpot, or move the deal on the pipeline board here.`);
+    for (const line of unreadableClose) console.log(line);
+  }
+  const byStatus = { open: 0, won: 0, lost: 0 };
+  for (const d of deals) byStatus[d.status as keyof typeof byStatus]++;
+  console.log(`Deal outcomes read from HubSpot: ${byStatus.open} open · ${byStatus.won} won · ${byStatus.lost} lost${unreadableClose.length ? ` · ${unreadableClose.length} unreadable` : ""}`);
 
   const dir = mkdtempSync(join(tmpdir(), "hsimport-"));
   const file = join(dir, "crm.json");

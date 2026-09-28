@@ -288,6 +288,30 @@ export class QboClient {
     return out;
   }
 
+  /**
+   * How many invoices QuickBooks itself says the company file holds.
+   *
+   * The one thing that can catch an invoice read that SUCCEEDED and was still
+   * short: `getInvoices()` stops paging the moment a page comes back under
+   * 1000 rows, so a page that returns fewer rows than it should ends the loop
+   * with no error anywhere and the caller cannot tell. Comparing what came
+   * back against QuickBooks' own count is what turns "the read did not throw"
+   * into "the read was complete", which is the whole precondition
+   * `src/qbo/invoice-reconcile.ts` acts on.
+   *
+   * `SELECT COUNT(*) FROM <entity>` answers on `QueryResponse.totalCount` and
+   * ignores STARTPOSITION. Returns null rather than a number whenever the
+   * response does not carry one — a null is unanswered, and the reconcile
+   * refuses on a null rather than assuming agreement.
+   */
+  async countInvoices(): Promise<number | null> {
+    await this.throttle();
+    const q = encodeURIComponent("SELECT COUNT(*) FROM Invoice");
+    const res = await this.call<{ QueryResponse?: { totalCount?: number } }>("GET", `query?query=${q}`);
+    const n = res.QueryResponse?.totalCount;
+    return typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
+  }
+
   /** Every payment, exploded to one row per invoice it was applied to (a
    *  single payment can cover several invoices at once) — lets us measure
    *  each customer's REAL historical days-to-pay (payment date minus the

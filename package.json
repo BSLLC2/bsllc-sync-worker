@@ -180,6 +180,7 @@
     "verify-connection-probe": "tsx src/verify-connection-probe.ts",
     "verify-zero-vs-nothing": "tsx src/verify-zero-vs-nothing.ts",
     "verify-meta-import": "tsx src/verify-meta-import.ts",
+    "verify-hubspot-deal-status": "tsx src/verify-hubspot-deal-status.ts",
     "verify-ga4-channels": "tsx src/verify-ga4-channels.ts",
     "verify-email-body": "tsx src/verify-email-body.ts",
     "verify-attribution-dates": "tsx src/verify-attribution-dates.ts",
@@ -187,7 +188,8 @@
     "verify-och-attribution": "tsx src/verify-och-attribution.ts",
     "debug-och-duplicate-admissions": "tsx src/debug-och-duplicate-admissions.ts",
     "integrus-strategy-check": "tsx src/integrus-strategy-check.ts",
-    "integrus-strategy-check-2": "tsx src/integrus-strategy-check-2.ts"
+    "integrus-strategy-check-2": "tsx src/integrus-strategy-check-2.ts",
+    "verify-qbo-reconcile": "tsx src/verify-qbo-reconcile.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
