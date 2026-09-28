@@ -182,6 +182,7 @@
     "verify-meta-import": "tsx src/verify-meta-import.ts",
     "verify-hubspot-deal-status": "tsx src/verify-hubspot-deal-status.ts",
     "verify-ga4-channels": "tsx src/verify-ga4-channels.ts",
+    "verify-email-body": "tsx src/verify-email-body.ts",
     "verify-attribution-dates": "tsx src/verify-attribution-dates.ts",
     "verify-och-import": "tsx src/verify-och-import.ts",
     "verify-och-attribution": "tsx src/verify-och-attribution.ts",
