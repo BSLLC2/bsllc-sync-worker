@@ -3,6 +3,8 @@ import "dotenv/config";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { QboClient } from "./qbo.js";
+import { planInvoiceReconcile, closeLines, type OpenInvoiceRow } from "./qbo/invoice-reconcile.js";
+import { appendFileSync } from "node:fs";
 
 /**
  * Pull-side QBO billing sync — distinct from import-qbo-invoices.ts, which
@@ -45,6 +47,12 @@ function toCents(n: number): number { return Math.round(n * 100); }
 
 async function main() {
   const dryRun = process.argv.slice(2).includes("--dry-run");
+  // What the reconciliation did, in one line, handed to the job heartbeat by
+  // the workflow. A heartbeat that only says the job ran cannot tell "it
+  // reconciled and every open row is still in QuickBooks" from "it refused
+  // because the read was short" -- and a run that silently stops reconciling
+  // looks exactly like a quiet week from Admin -> Data health.
+  let reconcileSummary = "Reconcile did not run.";
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
@@ -78,6 +86,16 @@ async function main() {
       )`);
     await c.query(`ALTER TABLE qbo_invoices ADD COLUMN IF NOT EXISTS due_date TEXT`);
     await c.query(`ALTER TABLE qbo_invoices ADD COLUMN IF NOT EXISTS balance_cents INTEGER NOT NULL DEFAULT 0`);
+    // The reconciliation's own record — see src/qbo/invoice-reconcile.ts. A
+    // row this sync zeroes because QuickBooks stopped returning it has to be
+    // distinguishable from one QuickBooks itself reported at zero, or the fix
+    // reproduces the defect it was written for: a balance nobody can account
+    // for. sync_closed_balance_cents keeps the money traceable after it stops
+    // being counted. Mirrored in the dashboard's own ensureSchema (v202); both
+    // sides declare this table and both create it idempotently.
+    await c.query(`ALTER TABLE qbo_invoices ADD COLUMN IF NOT EXISTS sync_closed_at TIMESTAMPTZ`);
+    await c.query(`ALTER TABLE qbo_invoices ADD COLUMN IF NOT EXISTS sync_closed_reason TEXT`);
+    await c.query(`ALTER TABLE qbo_invoices ADD COLUMN IF NOT EXISTS sync_closed_balance_cents INTEGER`);
     await c.query(`CREATE INDEX IF NOT EXISTS idx_qbo_invoices_customer ON qbo_invoices (customer_id)`);
     await c.query(`
       CREATE TABLE IF NOT EXISTS qbo_recurring_invoices (
@@ -133,6 +151,13 @@ async function main() {
 
     if (dryRun) {
       console.log("  would sync QBO customers, invoices, recurring invoice templates, and payments");
+      // A dry run holds no QuickBooks connection, so it cannot read the
+      // invoices or their count and therefore cannot say which rows the
+      // reconciliation would close. Saying so beats printing a plan built on
+      // nothing -- a dry-run preview that guesses is worse than one that
+      // declines.
+      console.log("  would then reconcile: any open invoice a complete read no longer returns is zeroed, with the reason and the balance kept on the row. A dry run reads nothing from QuickBooks, so it cannot say which rows those are.");
+      reconcileSummary = "Dry run \u2014 nothing read, nothing reconciled.";
       return;
     }
 
@@ -148,17 +173,87 @@ async function main() {
     console.log(`  ✓ ${customers.length} customer(s)`);
 
     const invoices = await qbo.getInvoices();
+    // True exactly when the call returned. getInvoices() pages through the
+    // whole company file and QboClient.call throws on any non-2xx, so a page
+    // that fails never gets here -- but the reconciliation below must not rest
+    // on a property of code in another file, so the fact is stated where it is
+    // known. The read that succeeds and is still SHORT is a different failure
+    // and is caught by QuickBooks' own count, not by this flag.
+    const invoiceFetchCompleted = true;
     for (const inv of invoices) {
       await c.query(
         `INSERT INTO qbo_invoices (id, customer_id, customer_name, doc_number, txn_date, due_date, total_cents, balance_cents, synced_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
          ON CONFLICT (id) DO UPDATE SET customer_id = EXCLUDED.customer_id, customer_name = EXCLUDED.customer_name,
            doc_number = EXCLUDED.doc_number, txn_date = EXCLUDED.txn_date, due_date = EXCLUDED.due_date,
-           total_cents = EXCLUDED.total_cents, balance_cents = EXCLUDED.balance_cents, synced_at = now()`,
+           total_cents = EXCLUDED.total_cents, balance_cents = EXCLUDED.balance_cents, synced_at = now(),
+           -- An invoice QuickBooks is returning again is not a closed one. The
+           -- mark ends itself here rather than needing anybody to clear it,
+           -- the same way the app's own staging flags do.
+           sync_closed_at = NULL, sync_closed_reason = NULL, sync_closed_balance_cents = NULL`,
         [inv.id, inv.customerId, inv.customerName, inv.docNumber, inv.txnDate, inv.dueDate, toCents(inv.totalAmt), toCents(inv.balance)],
       );
     }
     console.log(`  ✓ ${invoices.length} invoice(s)`);
+
+    // ── Reconciliation: the closing half the upsert above has never had ──
+    //
+    // Reading every invoice and upserting it takes a PAID invoice to zero by
+    // itself (QuickBooks returns it with Balance 0). What it cannot see is an
+    // invoice QuickBooks has stopped returning entirely -- a deleted one is
+    // simply absent from the query -- and a row nothing writes keeps the
+    // balance the last sync that saw it wrote, for ever. That is the whole
+    // reason the dashboard's overdue card disagreed with the owner's own
+    // QuickBooks export by three rows and $11,737.06 on 2026-09-21.
+    //
+    // Every rule is in src/qbo/invoice-reconcile.ts, pure, including the three
+    // proofs a run has to pass before it may zero anything. Nothing here
+    // decides; it gathers, prints the plan, and writes exactly what the plan
+    // says. Never a DELETE, and never a touch of synced_at: QuickBooks did not
+    // confirm a zero balance, this run inferred one from absence, and
+    // shared/invoice-confirmation.ts reads that column to tell those apart.
+    //
+    // The count is asked for AFTER the fetch on purpose (see the module), and
+    // its own failure must not take the sync down with it -- it is an extra
+    // guard, so a count that cannot be read refuses the reconciliation and
+    // leaves everything else exactly as it was.
+    let quickBooksCount: number | null = null;
+    try {
+      quickBooksCount = await qbo.countInvoices();
+    } catch (e) {
+      console.log(`  … couldn't ask QuickBooks how many invoices it holds: ${e instanceof Error ? e.message : e}`);
+    }
+    const { rows: openRows } = await c.query<{ id: string; doc_number: string | null; customer_name: string | null; balance_cents: number }>(
+      `SELECT id, doc_number, customer_name, balance_cents FROM qbo_invoices WHERE balance_cents > 0`,
+    );
+    const plan = planInvoiceReconcile({
+      fetchedIds: invoices.map((i) => i.id),
+      fetchCompleted: invoiceFetchCompleted,
+      quickBooksCount,
+      openRows: openRows.map((r): OpenInvoiceRow => ({
+        id: r.id, docNumber: r.doc_number, customerName: r.customer_name, balanceCents: Number(r.balance_cents),
+      })),
+      today: new Date().toISOString().slice(0, 10),
+    });
+    console.log(`  reconcile — read ${plan.window}`);
+    if (!plan.act) {
+      console.log(`  ⚠ ${plan.refusal}`);
+    } else {
+      for (const line of closeLines(plan)) console.log(line);
+      for (const row of plan.close) {
+        await c.query(
+          `UPDATE qbo_invoices
+              SET balance_cents = 0,
+                  sync_closed_at = now(),
+                  sync_closed_reason = $2,
+                  sync_closed_balance_cents = $3
+            WHERE id = $1 AND balance_cents = $3`,
+          [row.id, row.reason, row.balanceCents],
+        );
+      }
+      console.log(`  ✓ ${plan.summary}`);
+    }
+    reconcileSummary = plan.summary;
 
     const payments = await qbo.getPayments();
     for (const p of payments) {
@@ -219,6 +314,12 @@ async function main() {
     console.log("Done.");
   } finally {
     await c.end();
+    // The workflow reads this back as --note= on the heartbeat step, which
+    // runs with if: always(), so a refusal is recorded just as loudly as a
+    // clean pass.
+    if (process.env.GITHUB_OUTPUT) {
+      appendFileSync(process.env.GITHUB_OUTPUT, `summary=${reconcileSummary.replace(/[\r\n]+/g, " ")}\n`);
+    }
   }
 }
 main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
