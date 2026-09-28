@@ -64,13 +64,13 @@ function fakeGmail(holdings: Record<string, Record<string, unknown>>) {
     const box = holdings[mailbox] ?? {};
     const getMatch = /\/messages\/([^?]+)\?format=full/.exec(u);
     if (getMatch) {
-      const msg = box[decodeURIComponent(getMatch[1])];
+      const msg = box[decodeURIComponent(getMatch[1] ?? "")];
       if (!msg) return new Response("not found", { status: 404 });
       return new Response(JSON.stringify(msg), { status: 200 });
     }
     const listMatch = /\/messages\?q=([^&]+)/.exec(u);
     if (listMatch) {
-      const q = decodeURIComponent(listMatch[1]);
+      const q = decodeURIComponent(listMatch[1] ?? "");
       const rfc = q.replace(/^rfc822msgid:/, "");
       const hit = Object.entries(box).find(([, m]) => (m as { _rfc?: string })._rfc === rfc);
       return new Response(JSON.stringify(hit ? { messages: [{ id: hit[0] }] } : {}), { status: 200 });
@@ -111,8 +111,8 @@ hr("1. A manifest is read strictly, and an empty one is an answer");
     messages: [{ gmailId: " gm-1 ", messageId: "<A@invented.example>", mailboxHint: "Dana.Reyes@BSLLC.biz", on: "2026-09-15" }],
   });
   const read = readManifest(good);
-  ok("a gmail id is trimmed", read.messages[0].gmailId === "gm-1");
-  ok("a mailbox hint is lower-cased", read.messages[0].mailboxHint === OURS);
+  ok("a gmail id is trimmed", read.messages[0]?.gmailId === "gm-1");
+  ok("a mailbox hint is lower-cased", read.messages[0]?.mailboxHint === OURS);
   ok("the note says how much is still outstanding", /39 more are outstanding/.test(read.note), read.note);
 
   const empty = readManifest(JSON.stringify({ scope: {}, messages: [] }));
