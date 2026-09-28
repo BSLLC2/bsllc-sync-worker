@@ -32,6 +32,8 @@ jobs:
         run: npm run verify-zero-vs-nothing
       - name: Meta importer guard
         run: npm run verify-meta-import
+      - name: HubSpot deal-outcome guard
+        run: npm run verify-hubspot-deal-status
       - name: Attribution-date guard
         run: npm run verify-attribution-dates
       - name: Connection probe guard
