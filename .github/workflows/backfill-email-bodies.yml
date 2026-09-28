@@ -1,0 +1,115 @@
+name: Backfill email bodies (leads and SQLs)
+
+# Goes back and fetches the BODY of emails already logged against the people
+# who matter — contacts on an open or won deal, and the leads the dashboard's
+# own board lists as work. Rows logged before 2026-09-28 carry only Gmail's
+# ~200-character preview, so there is nothing to expand on the CRM timeline.
+#
+# TWO REPOSITORIES, TWO JOBS, ONE RUN. The dashboard decides WHICH messages
+# (it has the CRM, the deals and the scope rule, and no Gmail credential); this
+# worker fetches exactly those (it has the credential and no idea who matters);
+# the dashboard's ordinary `npm run email-import` writes them, unchanged.
+#
+# DRY RUN BY DEFAULT. Leave dry_run as true and the run prints how many
+# contacts, how many messages and what it would cost, makes NO Gmail call and
+# writes nothing. Set it to false when the numbers look right.
+#
+# SAFE TO STOP AND RE-RUN. A message whose body is already stored is never
+# planned again, so a run that times out or is cancelled loses nothing: run it
+# again and it picks up what is left. There is no cursor and nothing to reset.
+#
+# NOT SCHEDULED, ON PURPOSE. This is a deliberate act with a cost, not a job
+# that should be firing on its own — and a heartbeat here would make Admin →
+# Data health report a stopped job every day it is not run. The 30-minute
+# `import-email.yml` is what keeps new mail flowing; this only ever looks
+# backwards.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the plan and stop. Leave as true the first time."
+        required: false
+        default: "true"
+      limit:
+        description: "How many messages this run fetches (default 2000). Run it again for the rest."
+        required: false
+        default: "2000"
+      per_contact:
+        description: "Newest N emails per contact (default 40)."
+        required: false
+        default: "40"
+      max_age_days:
+        description: "Only emails newer than this many days. Blank means all history."
+        required: false
+        default: ""
+      include_lost:
+        description: "Include contacts whose only deal was lost (true/false). Default false."
+        required: false
+        default: "false"
+
+concurrency:
+  group: email-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # A large first run is thousands of sequential Gmail round trips.
+    timeout-minutes: 330
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (it owns the scope rule and the import)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      # Reads the CRM and writes a manifest of message ids. Touches no row and
+      # calls nothing outside this database.
+      - name: Plan — who is in scope, and which emails still have no body
+        working-directory: dashboard
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS="--out=${{ runner.temp }}/backfill-plan.json"
+          ARGS="$ARGS --limit=${{ inputs.limit }}"
+          ARGS="$ARGS --per-contact=${{ inputs.per_contact }}"
+          if [ -n "${{ inputs.max_age_days }}" ]; then ARGS="$ARGS --max-age-days=${{ inputs.max_age_days }}"; fi
+          if [ "${{ inputs.include_lost }}" = "true" ]; then ARGS="$ARGS --include-lost"; fi
+          npm run email:backfill-plan -- $ARGS
+
+      # Fetches exactly what the manifest names, then hands them to the
+      # dashboard's own importer. With dry_run left true this prints what it
+      # would fetch and makes no Gmail call.
+      - name: Fetch the bodies and import them
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          EMAIL_LOG_MAILBOXES: ${{ secrets.EMAIL_LOG_MAILBOXES }}
+          EMAIL_ALIASES: ${{ secrets.EMAIL_ALIASES }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+        run: |
+          if [ "${{ inputs.dry_run }}" = "false" ]; then
+            npm run backfill-email-bodies -- --manifest=${{ runner.temp }}/backfill-plan.json
+          else
+            npm run backfill-email-bodies -- --manifest=${{ runner.temp }}/backfill-plan.json --dry-run
+          fi

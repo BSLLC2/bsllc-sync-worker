@@ -22,6 +22,8 @@
     "import-d365": "tsx src/import-d365.ts",
     "verify-d365": "tsx src/verify-d365.ts",
     "import-email": "tsx src/import-email.ts",
+    "backfill-email-bodies": "tsx src/backfill-email-bodies.ts",
+    "verify-email-backfill": "tsx src/verify-email-backfill.ts",
     "debug-email-logging": "tsx src/debug-email-logging.ts",
     "import-seo": "tsx src/import-seo.ts",
     "import-domain-authority": "tsx src/import-domain-authority.ts",
