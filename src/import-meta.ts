@@ -7,7 +7,7 @@ import { loadMetaConfig } from "./ads/meta-adapter.js";
 import { emitJobSummary } from "./ads-operability.js";
 import {
   META_GRAPH, META_MAX_LOOKBACK_MONTHS, META_MONTHLY_FIELDS, META_METRIC_KEYS,
-  metaAccountId, metaConversionWindow, metaMonthlyMetrics, monthsBackStart,
+  metaAccountId, metaEvidenceWindow, metaMonthlyMetrics, monthsBackStart,
 } from "./meta/insights.js";
 
 /**
@@ -244,16 +244,17 @@ async function main() {
     // The evidence window is this account's WHOLE pull, read before any month
     // is planted: whether the pixel reports conversions at all is a fact about
     // the account, not about one month of it. See meta/insights.ts.
-    const convWindow = metaConversionWindow(rows);
+    const window = metaEvidenceWindow(rows);
     const attribution = rows.find((r) => r.attribution_setting)?.attribution_setting;
 
     let months = 0;
     let liveMonths = 0;
     let allClicksRows = 0;
     let heldBack = 0;
+    let valueHeldBack = 0;
     let unplaceable = 0;
     for (const row of rows) {
-      const reading = metaMonthlyMetrics(row, convWindow);
+      const reading = metaMonthlyMetrics(row, window);
       if (!reading.ym) { unplaceable++; continue; }
       // monthSnapshot caps the in-progress month at today, so period_end and
       // synced_at can never land in the future — which the Data health page
@@ -273,6 +274,7 @@ async function main() {
       if (reading.state === "live") liveMonths++;
       if (reading.usedAllClicks) allClicksRows++;
       if (reading.conversionsHeldBack) heldBack++;
+      if (reading.conversionValueHeldBack) valueHeldBack++;
     }
     planted += months;
 
@@ -292,6 +294,11 @@ async function main() {
     );
     if (allClicksRows) notes.push(`${t.clientName} — ${allClicksRows} month(s) reported no inline_link_clicks, so Clicks (All) stood in; that figure counts reactions and comments as clicks`);
     if (heldBack) notes.push(`${t.clientName} — ${heldBack} month(s) recorded conversions as no data rather than as nought: this account has never reported one in the window, so there is probably no pixel event configured on it`);
+    // A lead-gen account NEVER puts a price on a conversion, so this is the
+    // ordinary state rather than a fault — and it is worth saying out loud,
+    // because the dashboard's Return by channel card then shows no Meta claim
+    // beside the analytics figure and somebody will otherwise wonder why.
+    if (valueHeldBack) notes.push(`${t.clientName} — ${valueHeldBack} month(s) recorded Meta's own revenue as no data rather than as nought: this account has never put a value on a conversion in the window, which is normal for lead generation and means Meta claims no revenue to compare against the analytics figure`);
     if (unplaceable) notes.push(`${t.clientName} — ${unplaceable} insights row(s) carried no usable date_start and were not planted`);
   }
 

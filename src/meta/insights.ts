@@ -76,6 +76,14 @@ export const META_METRIC_KEYS = [
   "meta.impressions",
   "meta.clicks",
   "meta.conversions",
+  // WHAT META ITSELF SAYS IT DROVE, IN THE AD ACCOUNT'S OWN CURRENCY -- not
+  // micros and not cents, which is how `ads.conversion_value` is already
+  // declared on the other side and why this one is declared identically. It is
+  // the SECOND reading of a channel's revenue: the dashboard already holds
+  // GA4's last-click figure, and the two are never summed, because a platform
+  // counts view-through and its own click window over the same dollar the
+  // analytics property credits somewhere else.
+  "meta.conversion_value",
   "meta.ctr",
   "meta.average_cpc",
 ] as const;
@@ -93,7 +101,7 @@ export const META_METRIC_KEYS = [
  * these conversions under. It is never stored.
  */
 export const META_MONTHLY_FIELDS =
-  "spend,impressions,clicks,inline_link_clicks,actions,attribution_setting";
+  "spend,impressions,clicks,inline_link_clicks,actions,action_values,attribution_setting";
 
 /**
  * WHICH ACTION TYPES COUNT AS ONE CONVERSION, AND WHY THIS IS A LIST AND NOT A
@@ -146,13 +154,35 @@ export function countMetaConversions(row: {
   const objective = Number(row.objective_results ?? NaN);
   if (Number.isFinite(objective) && objective >= 0) return { conversions: objective, basis: "objective_results" };
 
-  const actions: { action_type?: string; value?: string }[] = Array.isArray(row.actions) ? row.actions : [];
-  if (!actions.length) return { conversions: 0, basis: "none" };
+  const { total, sawAny } = oneFromEachFamily(row.actions);
+  return { conversions: total, basis: sawAny ? "actions" : "none" };
+}
+
+/**
+ * THE FAMILY WALK, WRITTEN ONCE FOR BOTH THINGS META DOUBLE-REPORTS.
+ *
+ * `actions` and `action_values` are the SAME array shape carrying the same
+ * duplication: a purchase arrives as `omni_purchase`, `purchase` AND
+ * `offsite_conversion.fb_pixel_purchase`, so a sum over the array counts one
+ * sale three times -- and in `action_values` that is three times the money,
+ * which is the direction that makes an account look like it is working. Two
+ * copies of this walk is how one of them comes to include a family the other
+ * does not, so there is one, and the families are ACTION_FAMILIES for both.
+ *
+ * Exactly one member of each family is taken: the first one present.
+ */
+function oneFromEachFamily(raw: unknown): { total: number; sawAny: boolean } {
+  const rows: { action_type?: string; value?: string }[] = Array.isArray(raw) ? raw : [];
+  if (!rows.length) return { total: 0, sawAny: false };
   const byType = new Map<string, number>();
-  for (const a of actions) {
+  for (const a of rows) {
     const t = String(a.action_type ?? "");
     if (!t) continue;
-    byType.set(t, Number(a.value ?? 0));
+    const n = Number(a.value ?? 0);
+    // A member whose value Meta did not make a number of is not evidence that
+    // the family was reported -- taking it would fix the family on an unusable
+    // figure and shut out the readable member behind it.
+    if (Number.isFinite(n)) byType.set(t, n);
   }
   let total = 0;
   let sawAny = false;
@@ -161,7 +191,37 @@ export function countMetaConversions(row: {
       if (byType.has(name)) { total += byType.get(name) ?? 0; sawAny = true; break; }
     }
   }
-  return { conversions: total, basis: sawAny ? "actions" : "none" };
+  return { total, sawAny };
+}
+
+/**
+ * The money Meta says those conversions were worth, off ONE insights row, in
+ * the ad account's own currency.
+ *
+ * `action_values` is the value half of `actions` and carries the identical
+ * duplication, so it goes through the same family walk -- see above. There is
+ * deliberately no `objective_results` preference here as there is for the
+ * count: that field is a COUNT of the thing an ad set optimises for and says
+ * nothing about what any of it was worth, so `action_values` is the only
+ * source and the basis says so.
+ *
+ * `basis: "none"` means Meta reported no value of any recognised kind on this
+ * row. That is NOT the same statement as "this month was worth nothing", and
+ * the caller must not read it as one -- a lead-gen account reports conversions
+ * with no value against them for ever, which is a real and permanent absence
+ * rather than a nought.
+ *
+ * NOT A CURRENCY CONVERSION and not micros. Meta answers in the ad account's
+ * own money, `METRIC_CURRENCY_UNITS` declares `meta.conversion_value` as
+ * DOLLARS exactly as it declares `ads.conversion_value`, and every reader on
+ * the other side reads the two the same way.
+ */
+export function sumMetaActionValues(row: { action_values?: unknown }): {
+  value: number;
+  basis: "action_values" | "none";
+} {
+  const { total, sawAny } = oneFromEachFamily(row.action_values);
+  return { value: total, basis: sawAny ? "action_values" : "none" };
 }
 
 /** A finite number, or null. A string Meta could not make a number of is an
@@ -228,6 +288,36 @@ export function metaConversionWindow(rows: readonly Record<string, unknown>[]): 
   });
 }
 
+/**
+ * The same window for the MONEY, and it is deliberately its own.
+ *
+ * `evidencedMetric` asks one question -- has this account ever reported THIS
+ * metric at all -- and the answer differs between the count and the value. A
+ * lead-gen account reports conversions every month and a value against none of
+ * them, for ever, because nobody assigns a lead a price in Meta. Reading the
+ * value's evidence off the CONVERSION window would plant a live nought on
+ * every one of those months, and "$0 of revenue" is a measured claim about an
+ * account that is measuring something else entirely -- the null-as-nought
+ * failure this whole rule exists to refuse. So the value earns its own noughts
+ * from its own history, which is what metric-evidence.ts's header describes.
+ */
+export function metaConversionValueWindow(rows: readonly Record<string, unknown>[]): number[] {
+  return rows.map((r) => {
+    const { value, basis } = sumMetaActionValues(r);
+    return basis === "none" ? 0 : value;
+  });
+}
+
+/** Both windows, from one pass over the account's whole pull. Taking them
+ *  together is what stops a caller passing the conversion window twice. */
+export interface MetaEvidenceWindow {
+  conversions: readonly number[];
+  values: readonly number[];
+}
+export function metaEvidenceWindow(rows: readonly Record<string, unknown>[]): MetaEvidenceWindow {
+  return { conversions: metaConversionWindow(rows), values: metaConversionValueWindow(rows) };
+}
+
 export interface MetaMonthReading {
   /** "YYYY-MM", or null for a row this importer cannot place. */
   ym: string | null;
@@ -241,6 +331,11 @@ export interface MetaMonthReading {
   conversionBasis: "objective_results" | "actions" | "none";
   /** True where the conversion figure was held back for want of evidence. */
   conversionsHeldBack: boolean;
+  /** How the revenue figure was arrived at, for the log. */
+  conversionValueBasis: "action_values" | "none";
+  /** True where the revenue figure was held back for want of evidence — which
+   *  on a lead-gen account is the ordinary, permanent state. */
+  conversionValueHeldBack: boolean;
 }
 
 /**
@@ -253,12 +348,13 @@ export interface MetaMonthReading {
  */
 export function metaMonthlyMetrics(
   row: Record<string, unknown>,
-  convWindow: readonly number[],
+  window: MetaEvidenceWindow,
 ): MetaMonthReading {
   const spendMicros = metaSpendToMicros(row.spend);
   const impressions = finiteOrNull(row.impressions);
   const { clicks, usedAllClicks } = metaLinkClicks(row);
   const { conversions: counted, basis } = countMetaConversions(row);
+  const { value: countedValue, basis: valueBasis } = sumMetaActionValues(row);
 
   // A month in which nothing was served is `no_data`, not a row of noughts --
   // the same call src/google-ads.ts makes on an account with no delivery in
@@ -267,20 +363,38 @@ export function metaMonthlyMetrics(
   // record.
   const nothingServed = (spendMicros ?? 0) === 0 && (impressions ?? 0) === 0 && (clicks ?? 0) === 0;
   if (nothingServed) {
-    return { ym: metaMonthKey(row), state: "no_data", metrics: {}, usedAllClicks, conversionBasis: basis, conversionsHeldBack: false };
+    return {
+      ym: metaMonthKey(row), state: "no_data", metrics: {}, usedAllClicks,
+      conversionBasis: basis, conversionsHeldBack: false,
+      conversionValueBasis: valueBasis, conversionValueHeldBack: false,
+    };
   }
 
   // Meta answers 0 both for "nobody converted" and for "no pixel event is
   // configured", and never says which, so a nought is only planted where this
   // account has demonstrably reported a conversion somewhere in the window.
   // See metric-evidence.ts; this is the same rule the GA4 importer runs.
-  const conversions = evidencedMetric(basis === "none" ? 0 : counted, convWindow as (number | null)[]);
+  const conversions = evidencedMetric(basis === "none" ? 0 : counted, window.conversions as (number | null)[]);
+  // Read against the VALUE's own history, never the count's — see
+  // metaConversionValueWindow. An account that has never put a price on a
+  // conversion records no data here for ever, which is the truth about it;
+  // a nought would be a revenue figure nobody measured.
+  const conversionValue = evidencedMetric(
+    valueBasis === "none" ? 0 : countedValue,
+    window.values as (number | null)[],
+  );
 
   const metrics: Record<string, number | null> = {
     "meta.cost_micros": spendMicros,
     "meta.impressions": impressions,
     "meta.clicks": clicks,
     "meta.conversions": conversions,
+    // DOLLARS, in the ad account's own currency — the same declaration
+    // `ads.conversion_value` carries, so the dashboard reads the two
+    // platforms' claims through one rule. It is what META says it drove, which
+    // is a different reading from the analytics property's last-click revenue
+    // and is never added to it.
+    "meta.conversion_value": conversionValue,
     // DERIVED, never taken from Meta's own `ctr`. See trap 2: theirs is a
     // percentage over Clicks (All); this is a fraction over the link clicks
     // stored on the line above, so the three figures agree with each other.
@@ -298,6 +412,8 @@ export function metaMonthlyMetrics(
     usedAllClicks,
     conversionBasis: basis,
     conversionsHeldBack: conversions == null,
+    conversionValueBasis: valueBasis,
+    conversionValueHeldBack: conversionValue == null,
   };
 }
 
