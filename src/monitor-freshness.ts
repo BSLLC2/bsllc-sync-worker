@@ -300,7 +300,10 @@ async function main() {
       ...noUploads.map((u) => `U:${u.slug}`),
       ...trafficNoLeads.map((s) => `W:${s}`),
     ].sort().join(",");
-    const prevRow = (await c.query<{ note: string | null; ran_at: Date }>(`SELECT note, ran_at FROM job_heartbeats WHERE job = 'freshness_monitor'`)).rows[0];
+    // WHEN SOMEBODY WAS LAST TOLD, which is not the same as when this last ran.
+    // See the reminder block below for why that distinction cost 20 days.
+    await c.query(`ALTER TABLE job_heartbeats ADD COLUMN IF NOT EXISTS alerted_at TIMESTAMPTZ`);
+    const prevRow = (await c.query<{ note: string | null; ran_at: Date; alerted_at: Date | null }>(`SELECT note, ran_at, alerted_at FROM job_heartbeats WHERE job = 'freshness_monitor'`)).rows[0];
     const prev = prevRow?.note ?? "";
     console.log(`Freshness: ${down.length} down, ${erroring.length} with errors. signature="${signature}" prev="${prev}"`);
 
@@ -309,8 +312,23 @@ async function main() {
     // stayed broken) needs a periodic nudge, not permanent silence just
     // because nothing about the failure changed. Re-alert on an unchanged bad
     // signature once it's been sitting for a day.
+    //
+    // THIS REMINDER NEVER FIRED ONCE, AND IT COST TWENTY DAYS OF A CLIENT'S
+    // LEADS. It measured `now - ran_at`, and `ran_at` is stamped by EVERY run
+    // of this monitor — which is hourly. So the age was always about one hour,
+    // never the 24 it was compared against, and `dueForReminder` was false on
+    // every run since the day it was written. OCH's feed stopped on 2026-09-10
+    // and this job detected it correctly, printed the diagnosis and the exact
+    // command to run, and then logged "No change — no alert" every hour for
+    // twenty days while the client kept taking calls we never saw.
+    //
+    // The lesson is the bug: it timed the wrong event. What matters is how long
+    // since a HUMAN was last told, so that is what is stored and compared now.
+    // `alerted_at` moves only when a post actually succeeds — not when the job
+    // runs, and not when Slack refuses it, so a failing webhook retries next
+    // hour instead of going quiet for a day.
     const REMIND_AFTER_H = 24;
-    const prevAgeH = prevRow?.ran_at ? (now - new Date(prevRow.ran_at).getTime()) / 3_600_000 : Infinity;
+    const prevAgeH = prevRow?.alerted_at ? (now - new Date(prevRow.alerted_at).getTime()) / 3_600_000 : Infinity;
     const unchanged = signature === prev;
     const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0 || noLeads.length > 0 || noUploads.length > 0 || trafficNoLeads.length > 0 || stoppages.length > 0;
     const dueForReminder = unchanged && stillDown && prevAgeH >= REMIND_AFTER_H;
@@ -337,8 +355,10 @@ async function main() {
       text = `:white_check_mark: *Data pipelines recovered* — everything is flowing again.`;
     }
 
+    let posted = false;
     if (text && !dryRun && webhook) {
       const res = await fetch(webhook, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      posted = res.ok;
       console.log(res.ok ? "Alert posted to Slack." : `Slack post failed (${res.status}).`);
     } else if (text) {
       console.log(dryRun ? `[dry-run] would post:\n${text}` : "SLACK_WEBHOOK_URL not set — skipping post.");
@@ -352,10 +372,15 @@ async function main() {
     // dashboard's Data health page list the monitor itself as "1/1 erroring"
     // with the signature string as the error.
     if (dryRun) { console.log("[dry-run] signature not recorded."); return; }
+    // `alerted_at` moves ONLY on a post that Slack accepted. A run that found
+    // nothing to say leaves it alone, and so does a post Slack refused -- which
+    // is what makes a failing webhook retry in an hour rather than resetting
+    // the reminder clock and going quiet for a day.
     await c.query(
-      `INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ('freshness_monitor', now(), true, $1)
-       ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = true, note = EXCLUDED.note`,
-      [signature],
+      `INSERT INTO job_heartbeats (job, ran_at, ok, note, alerted_at) VALUES ('freshness_monitor', now(), true, $1, CASE WHEN $2::boolean THEN now() ELSE NULL END)
+       ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = true, note = EXCLUDED.note,
+         alerted_at = CASE WHEN $2::boolean THEN now() ELSE job_heartbeats.alerted_at END`,
+      [signature, posted],
     );
   } finally {
     await c.end();

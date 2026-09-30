@@ -44,3 +44,7 @@ jobs:
         run: npm run verify-och-attribution
       - name: GA4 per-channel import guard
         run: npm run verify-ga4-channels
+      # The reminder that never fired. It compared the wrong timestamp and went
+      # silent for twenty days on a client whose leads had stopped.
+      - name: Alert reminder times the alert, not the run
+        run: npm run verify-alert-reminder
