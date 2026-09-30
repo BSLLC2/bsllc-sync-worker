@@ -169,7 +169,7 @@ export function bandOf(keyword: string, intent: string | null | undefined): Band
 
   if (label === "informational") return { band: "tofu", basis: "The research reports it as an informational search." };
   if (label === "navigational") {
-    return { band: "tofu", basis: "The research reports it as a navigational search — somebody typing a name to get somewhere, not to buy." };
+    return { band: "tofu", basis: "The research reports it as a navigational search — somebody typing a name to reach a page they already have in mind." };
   }
 
   const learning = firstMarker(kw, LEARNING);
@@ -378,8 +378,8 @@ export function tofuSetAsideLine(count: number, volume: number | null): string |
   const size = volume != null && volume > 0
     ? ` They come to ${volume.toLocaleString()} searches a month between them`
     : " None of them carries a reported search volume";
-  return `${count} term${count === 1 ? " is" : "s are"} people reading up rather than buying, so ${count === 1 ? "it is" : "they are"} left out of this.`
-    + `${size} — still researched, still on the record, and worth a page rather than a bid.`;
+  return `${count} term${count === 1 ? " is" : "s are"} somebody reading up, so ${count === 1 ? "it is" : "they are"} left out of this.`
+    + `${size} — still researched, still on the record, and worth a page of their own.`;
 }
 
 /**
@@ -391,7 +391,7 @@ export function tofuSetAsideLine(count: number, volume: number | null): string |
  */
 export function keptOwnTargetsLine(count: number): string | null {
   if (count <= 0) return null;
-  return `${count} of these read as people reading up rather than buying, and ${count === 1 ? "it is" : "they are"} kept because somebody here put ${count === 1 ? "it" : "them"} on this client's list on purpose.`;
+  return `${count} of these read as somebody reading up, and ${count === 1 ? "it is" : "they are"} kept because somebody here put ${count === 1 ? "it" : "them"} on this client's list on purpose.`;
 }
 
 /** Worker-side wrapper — everything above is the copied rule ────────────────
