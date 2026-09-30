@@ -42,6 +42,8 @@ export interface LeadEvent {
 }
 
 export interface FeedCadence {
+  /** Set only on a per-FORM reading (detectFormStoppages); absent at feed level. */
+  formName?: string;
   feed: LeadFeed;
   /** Leads per business day over the baseline window. */
   perBusinessDay: number;
@@ -189,6 +191,48 @@ function cadenceFor(feed: LeadFeed, events: LeadEvent[], now: Date): FeedCadence
  * stopped — including for a client who has never sent a lead, which stays the
  * fixed-window check's case and is deliberately not folded in here.
  */
+/**
+ * ONE FORM STOPPING, WHICH THE FEED-LEVEL CHECK CANNOT SEE.
+ *
+ * `detectFeedStoppage` splits a client's leads into exactly two feeds, forms
+ * and calls. Every form on a site collapses into one of them — and every form
+ * is wired to the webhook SEPARATELY, so they fail separately. OCH proved the
+ * cost: eleven form feeds, dying one at a time between early July and 10
+ * September, and the account-level check never fired once, because while any
+ * one form was still posting the "forms" feed looked alive.
+ *
+ * It is worse than a missed alarm. `cadenceFor` builds its baseline from the 28
+ * days before the LAST lead, so a feed losing a form at a time RE-BASELINES
+ * ITSELF LOWER each time and keeps reading healthy at the reduced rate. The
+ * decline is invisible by construction.
+ *
+ * So this reads each form NAME on its own, and it reuses the feed rule rather
+ * than inventing a second one: a form must clear the same baseline (enough
+ * leads, enough active days, a real span) before it can be called stopped. A
+ * page that takes two enquiries a quarter therefore never trips this, which is
+ * the point — the alarm is for a form that was WORKING and is not any more.
+ *
+ * Calls are deliberately left to the feed check. A tracking number is one
+ * source with one webhook, so per-name would be the same reading twice.
+ */
+export function detectFormStoppages(history: LeadEvent[], now: Date): FeedCadence[] {
+  const byForm = new Map<string, LeadEvent[]>();
+  for (const e of history) {
+    if (feedOf(e.formName) !== "forms") continue;
+    const name = (e.formName ?? "").trim();
+    if (!name) continue; // an unnamed form cannot be told from another unnamed one.
+    const list = byForm.get(name) ?? [];
+    list.push(e);
+    byForm.set(name, list);
+  }
+  const out: FeedCadence[] = [];
+  for (const [name, events] of Array.from(byForm.entries())) {
+    const c = cadenceFor("forms", events, now);
+    if (c?.stopped) out.push({ ...c, formName: name });
+  }
+  return out.sort((a, b) => b.expectedMissed - a.expectedMissed);
+}
+
 export function detectFeedStoppage(history: LeadEvent[], now: Date): FeedStoppage | null {
   const cadences: FeedCadence[] = [];
   for (const feed of ["forms", "calls"] as LeadFeed[]) {

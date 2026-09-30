@@ -4,7 +4,7 @@ import pg from "pg";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { deriveJobCadences, type JobCadence } from "./job-cadence.js";
-import { detectFeedStoppage, stoppageLine, stoppageSignature, type FeedStoppage, type LeadEvent } from "./lead-cadence.js";
+import { detectFeedStoppage, detectFormStoppages, stoppageLine, stoppageSignature, type FeedCadence, type FeedStoppage, type LeadEvent } from "./lead-cadence.js";
 
 /**
  * Watches data freshness and Slack-alerts when a pipeline stops flowing. Reads
@@ -246,6 +246,7 @@ async function main() {
     // healthy the whole time. lead-cadence.ts sizes the expectation to each
     // client's own rate instead, per feed, on a business-day clock.
     const stoppages: { slug: string; report: FeedStoppage }[] = [];
+    const formStoppages: { slug: string; cadence: FeedCadence }[] = [];
     try {
       const events = new Map<string, LeadEvent[]>();
       for (const r of (await c.query<{ client_slug: string; form_name: string | null; submitted_at: Date }>(
@@ -263,8 +264,14 @@ async function main() {
         if (liveSlugs.size && !liveSlugs.has(slug)) continue;
         const report = detectFeedStoppage(history, new Date(now));
         if (report) stoppages.push({ slug, report });
+        // Each form is wired to the webhook separately, so they fail
+        // separately — and the feed-level check above cannot see one go while
+        // another still posts. OCH lost nine forms one at a time over ten weeks
+        // underneath a "forms" feed that read healthy the whole way down.
+        for (const f of detectFormStoppages(history, new Date(now))) formStoppages.push({ slug, cadence: f });
       }
       stoppages.sort((a, b) => a.slug.localeCompare(b.slug));
+      formStoppages.sort((a, b) => a.slug.localeCompare(b.slug) || b.cadence.expectedMissed - a.cadence.expectedMissed);
     } catch { /* table not present yet */ }
 
     // One client, one line. Where the cadence alarm has every feed, it says
@@ -275,6 +282,10 @@ async function main() {
     if (stoppages.length) {
       console.log("Lead feed stopped (rate derived from the client's own history):");
       for (const x of stoppages) console.log(`  ${stoppageLine(clientLabel(x.slug), x.report)}`);
+    }
+    if (formStoppages.length) {
+      console.log("Individual forms stopped (each is wired to the webhook separately):");
+      for (const x of formStoppages) console.log(`  ${clientLabel(x.slug)} — "${x.cadence.formName}" last posted ${x.cadence.lastAt.toISOString().slice(0, 10)}, ${Math.round(x.cadence.businessDaysSilent)} business days ago; it was running about ${x.cadence.perBusinessDay.toFixed(1)} a business day.`);
     }
     if (noLeads.length) console.log(`No new website leads: ${noLeads.map((l) => `${clientLabel(l.slug)} (${Math.round(l.ageH / 24)}d)`).join(", ")}`);
     if (trafficNoLeads.length) console.log(`Site traffic but no website leads captured (30d): ${trafficNoLeads.map(clientLabel).join(", ")}`);
@@ -297,6 +308,7 @@ async function main() {
       ...coiAlerts.map((r) => `C:${r.name}:${r.days < 0 ? "exp" : r.days <= 7 ? "7" : "30"}`),
       ...noLeads.map((l) => `L:${l.slug}`),
       ...stoppages.map((x) => stoppageSignature(x.slug, x.report)),
+      ...formStoppages.map((x) => `F:${x.slug}:${x.cadence.formName}`),
       ...noUploads.map((u) => `U:${u.slug}`),
       ...trafficNoLeads.map((s) => `W:${s}`),
     ].sort().join(",");
@@ -330,7 +342,7 @@ async function main() {
     const REMIND_AFTER_H = 24;
     const prevAgeH = prevRow?.alerted_at ? (now - new Date(prevRow.alerted_at).getTime()) / 3_600_000 : Infinity;
     const unchanged = signature === prev;
-    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0 || noLeads.length > 0 || noUploads.length > 0 || trafficNoLeads.length > 0 || stoppages.length > 0;
+    const stillDown = down.length > 0 || erroring.length > 0 || coiAlerts.length > 0 || noLeads.length > 0 || noUploads.length > 0 || trafficNoLeads.length > 0 || stoppages.length > 0 || formStoppages.length > 0;
     const dueForReminder = unchanged && stillDown && prevAgeH >= REMIND_AFTER_H;
     if (unchanged && !dueForReminder) { console.log("No change — no alert."); return; }
 
@@ -339,10 +351,11 @@ async function main() {
       : "";
 
     let text: string | null = null;
-    if (down.length || erroring.length || coiAlerts.length || noLeads.length || noUploads.length || trafficNoLeads.length || stoppages.length) {
+    if (down.length || erroring.length || coiAlerts.length || noLeads.length || noUploads.length || trafficNoLeads.length || stoppages.length || formStoppages.length) {
       const parts: string[] = [];
       // First, because a feed that was producing and stopped is losing leads now.
       for (const x of stoppages) parts.push(`:rotating_light: *Lead feed stopped:* ${stoppageLine(clientLabel(x.slug), x.report)}`);
+      if (formStoppages.length) parts.push(`:memo: *Form stopped posting:* ${formStoppages.map((x) => `${clientLabel(x.slug)} — "${x.cadence.formName}" (${Math.round(x.cadence.businessDaysSilent)}d, was ~${x.cadence.perBusinessDay.toFixed(1)}/day)`).join(", ")} — every form is wired to the webhook separately, so re-add the action on that form and test it`);
       if (down.length) parts.push(`:red_circle: *Not flowing:* ${down.map(label).join(", ")}`);
       if (erroring.length) parts.push(`:large_orange_circle: *Account errors:* ${erroring.map((e) => `${label(e.src)} (${e.n}/${e.m})`).join(", ")}`);
       if (noLeads.length) parts.push(`:mailbox_with_no_mail: *No new website leads:* ${noLeads.map((l) => `${clientLabel(l.slug)} (last ${Math.round(l.ageH / 24)}d ago — check every form on the site still posts to the webhook)`).join(", ")}`);
