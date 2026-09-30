@@ -507,6 +507,93 @@ hr("11c. A services list is not a keyword strategy — the skip reaches the queu
     /must not be read as one/.test(broadSilence[0]!.impactAssumption));
 }
 
+hr("11d. Their own keyword list comes first, and top of funnel is set aside");
+{
+  // The company owner: "many of these clients already had keywords lists in
+  // their seo targets associated with them so why wouldn't you pull that first
+  // then go to the research… we want these campaigns to be as tight as
+  // possible… put a lot of tofu keywords into the funnel."
+  //
+  // Every keyword, service and figure below is invented. Nothing was read from
+  // production and no ad account was touched.
+  const SERVICES = {
+    services: [{ name: "vacuum brazing", note: null }],
+    confirmedBy: "Katy Adams", confirmedAt: "2026-09-20", candidatesWaiting: 0,
+  };
+  // One clear buying search, one clear explainer, both under the same service
+  // and both well over the term floor — so the ONLY thing that can separate
+  // them is intent.
+  const RESEARCH = {
+    ranAt: "2026-09-20", location: "United States", seeds: ["vacuum brazing"],
+    keywords: [
+      { keyword: "vacuum brazing cost", volume: 2_400, cpcDollars: 14, difficulty: 30,
+        intent: "commercial", clientRank: null, competitorRank: null },
+      { keyword: "how vacuum brazing works", volume: 9_900, cpcDollars: 2, difficulty: 20,
+        intent: "informational", clientRank: null, competitorRank: null },
+    ],
+  };
+  const base = (over: Partial<AuditInput> = {}) => ACCOUNT({
+    research: RESEARCH, services: SERVICES,
+    existingKeywords: [], ...over,
+  });
+
+  // ── WITH NO LIST READ AT ALL, the reading behaves as it did before any of
+  //    this existed — which is what keeps every fixture above honest.
+  const noList = evaluate(base());
+  const noListGap = noList.filter((f) => f.findingType === "keyword_gap");
+  ok("an account whose own list was never read still produces its gap row",
+    noListGap.length === 1, `${noListGap.length} row(s)`);
+
+  // ── TOFU IS SET ASIDE AND NAMED, never dropped in silence.
+  const lines = (noListGap[0]?.evidence.lines ?? []).join(" ");
+  ok("the explainer term is off the row", !/how vacuum brazing works/.test(lines));
+  ok("the buying term is on it, even at a quarter of the volume",
+    /vacuum brazing cost/.test(lines));
+  ok("…and what was set aside is named with its count and its size",
+    /1 term is people reading up/.test(lines) && /9,900 searches a month/.test(lines),
+    lines.match(/[^.]*reading up[^.]*\./)?.[0] ?? "no set-aside line at all");
+
+  // ── THEIR OWN LIST, READ. A keyword somebody chose that the research never
+  //    returned reaches the row, and the row says where it came from.
+  const withList = evaluate(base({
+    seoTargets: [
+      { keyword: "vacuum brazing service ohio", tag: "service", reportStatus: "core" },
+      { keyword: "what is vacuum brazing", tag: null, reportStatus: "baseline" },
+    ],
+  }));
+  const listGap = withList.filter((f) => f.findingType === "keyword_gap");
+  const listLines = (listGap[0]?.evidence.lines ?? []).join(" ");
+  // IT HAS TO BE A TERM ON THE ROW, not merely a phrase somewhere in the
+  // evidence. The account-level "their own list is unbid" clause names the
+  // same keyword, so a bare substring test passes with the term rows gone —
+  // which is how this check was near-vacuous on its first planting. The term
+  // row is the phrase followed by its own source label.
+  ok("a keyword off their own list reaches the row as a TERM, even though the research never returned it",
+    /"vacuum brazing service ohio" — on their keyword list/.test(listLines),
+    listLines.slice(0, 200));
+  ok("…and the row says which source every term came from",
+    /on their keyword list/.test(listLines) && /from the research/.test(listLines));
+  ok("…and it is counted and never valued, because nothing reports its volume",
+    /no search volume on record/.test(listLines));
+  ok("the seeding sentence says their own list came first",
+    /own list came first/.test(listLines), listLines.match(/[^.]*came first[^.]*\./)?.[0] ?? "no seed line");
+
+  // ── A PERSON'S OWN RECORDED KEYWORD IS NEVER OVERRULED BY A BAND.
+  ok("a target that reads as somebody reading up is KEPT, and said to be kept on purpose",
+    /what is vacuum brazing/.test(listLines) && /on purpose/.test(listLines),
+    listLines.match(/[^.]*on purpose[^.]*\./)?.[0] ?? "not kept");
+
+  // ── AND A TERM ALREADY IN THE ACCOUNT IS STILL NOT A GAP, however it got
+  //    here. The claim is unchanged; only the source of the term is new.
+  const covered = evaluate(base({
+    seoTargets: [{ keyword: "vacuum brazing service ohio" }],
+    existingKeywords: [{ text: "vacuum brazing service ohio", matchType: "PHRASE", adGroupName: "Brazing", campaignName: "Brazing" }],
+  }));
+  const coveredLines = (covered.filter((f) => f.findingType === "keyword_gap")[0]?.evidence.lines ?? []).join(" ");
+  ok("a keyword off their own list the account already holds is not a gap",
+    !/vacuum brazing service ohio/.test(coveredLines));
+}
+
 console.log(`\n${"═".repeat(72)}`);
 console.log(failures === 0 ? "✅ growth guard: all checks passed" : `❌ growth guard: ${failures} check(s) failed`);
 console.log("Every figure above is an invented fixture. No production database and no ad account was read.");

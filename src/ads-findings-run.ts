@@ -10,11 +10,11 @@ import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import {
   upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, protectedPatternsFor, clientEconomicsFor,
-  outcomeFeedFactsFor, clientServicesFor, researchFactsFor, phoneDemandFor,
+  outcomeFeedFactsFor, clientServicesFor, researchFactsFor, phoneDemandFor, seoTargetsFor,
 } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
-import { splitSeeds } from "./ads/service-seed.js";
+import { planSeeds, seedSourceLine } from "./ads/keyword-sourcing.js";
 
 /**
  * The cadenced deep audit — the job that gives the ads analysis a memory.
@@ -104,8 +104,12 @@ async function auditOne(
   // produces no gap rows and the reading says which answer is missing.
   const services = await clientServicesFor(c, clientId);
   const research = await researchFactsFor(c, clientId);
+  // THE KEYWORDS SOMEBODY ALREADY CHOSE FOR THIS CLIENT, and they go in first.
+  // Null here is a read that failed, [] is a client who has chosen none, and
+  // the gap reading says which — they lead to different acts.
+  const seoTargets = await seoTargetsFor(c, clientId);
   const phone = await phoneDemandFor(c, slugify(clientName), start, end);
-  const input = { ...platformInput, economics, outcomes, services, research, phone };
+  const input = { ...platformInput, economics, outcomes, services, research, seoTargets, phone };
   console.log(
     `  goal: ${economics.cplCeilingCents != null ? `$${(economics.cplCeilingCents / 100).toFixed(2)} cost-per-lead ceiling (${economics.cplCeilingMonth})` : "no cost-per-lead ceiling recorded"}`
     + ` · ${economics.customerValueCents != null ? `$${(economics.customerValueCents / 100).toFixed(2)} a customer` : "no customer value recorded"}`
@@ -152,13 +156,32 @@ async function auditOne(
   // rules out. A seed dropped with nobody told is the failure this prints
   // against.
   if (services.services != null && research?.keywords != null) {
-    const split = splitSeeds(services.services, {
-      accountTerms: platformInput.searchTerms.filter((t) => t.conversions > 0).map((t) => t.term),
+    const plan = planSeeds({
+      targets: seoTargets,
+      services: services.services,
+      accountTerms: [
+        ...platformInput.searchTerms.filter((t) => t.conversions > 0).map((t) => t.term),
+        ...(seoTargets ?? []).map((t) => t.keyword),
+      ],
       research: research.keywords.map((k) => ({ keyword: k.keyword, intent: k.intent, volume: k.volume })),
     });
-    console.log(`  seeds: ${split.seeds.length} of ${services.services.length} recorded service(s) are worth researching from`);
-    for (const sk of split.skipped) console.log(`    · skipped "${sk.service}" — ${sk.mark}: ${sk.basis}`);
+    console.log(`  seeds: ${seedSourceLine(plan) ?? "nothing on this client's record can seed research"}`);
+    for (const sd of plan.seeds.slice(0, 12)) {
+      console.log(`    · ${sd.source === "target" ? "their list" : "a service"} "${sd.phrase}" — ${sd.band}`);
+    }
+    if (plan.seeds.length > 12) console.log(`    · …and ${plan.seeds.length - 12} more`);
+    for (const sk of plan.heldBack) console.log(`    · skipped "${sk.service}" — ${sk.mark}: ${sk.basis}`);
+    if (plan.duplicateServices > 0) {
+      console.log(`    · ${plan.duplicateServices} recorded service(s) say the same phrase as a keyword already on their list, so were not seeded twice`);
+    }
   }
+  console.log(
+    `  their own list: ${seoTargets == null
+      ? "could not be read this run"
+      : seoTargets.length === 0
+        ? "nobody has put a keyword on this client's tracking list"
+        : `${seoTargets.length} recorded keyword(s)`}`,
+  );
   console.log(
     `  research: ${research?.keywords == null
       ? "none stored for this client"

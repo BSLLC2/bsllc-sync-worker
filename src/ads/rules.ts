@@ -38,6 +38,7 @@ import { demandCaptureReading, demandCaptureClaim, type DemandCaptureReading } f
 import { growthSilenceReading, growthSilenceClaim, type GrowthSilenceFact } from "./growth-silence.js";
 import { sequenceFindings } from "./sequence.js";
 import { keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, type ResearchFacts } from "./keyword-gap.js";
+import type { RecordedTarget } from "./keyword-sourcing.js";
 import { skippedSeedsLine } from "./service-seed.js";
 import type { ClientServiceFacts } from "./service-relevance.js";
 import { trafficReadiness, CALL_TRACKING_PHONE_SHARE, type AdDestination, type PhoneDemandFacts } from "./traffic-readiness.js";
@@ -1076,6 +1077,16 @@ export interface AuditInput {
    * nobody has answered; it is never filled in with an assumption.
    */
   economics?: ClientEconomics | null;
+  /**
+   * THE KEYWORDS SOMEBODY CHOSE FOR THIS CLIENT (`seo_targets`). Read from
+   * Postgres by the caller, never from the ad platform.
+   *
+   * ABSENT OR NULL MEANS NOT READ, which is a different answer from a client
+   * who has chosen none — that one is [] and the gap reading says so in its
+   * own sentence. A caller that leaves this out gets exactly the reading it
+   * got before the client's own list became a source.
+   */
+  seoTargets?: readonly RecordedTarget[] | null;
   /**
    * The platform's own segmentation of how long after a click its conversions
    * arrive, per campaign. ABSENT MEANS NOT READ — an adapter with no analogue
@@ -2540,6 +2551,10 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   // demand for services a client does not offer discredits every other row.
   const gaps = keywordGaps({
     research: input.research,
+    // THEIR OWN LIST, AND IT GOES IN FIRST. `undefined` here — an older caller
+    // that does not gather it — behaves precisely as this reading did before
+    // any of it existed, which is what keeps every existing fixture honest.
+    targets: input.seoTargets,
     services: input.services ?? { services: null, confirmedBy: null, confirmedAt: null, candidatesWaiting: 0 },
     existingKeywords: input.existingKeywords,
     seenTerms: input.searchTerms.map((t) => t.term),

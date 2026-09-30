@@ -1750,8 +1750,13 @@ async function main() {
       gaps.services[0]!.terms.every((t) => t.keyword !== "commercial roofing"));
     ok("a term the account has been SEEN on is not a gap",
       gaps.services[0]!.terms.every((t) => t.keyword !== "commercial roofing contractors"));
+    // `volume` is nullable since the client's own tracking list became a
+    // source (2026-09-30): a keyword somebody chose that the stored research
+    // never returned reports none. This fixture passes no targets, so every
+    // term here is research-sourced and every volume is a real number — the
+    // `?? 0` is what makes that assertion, not a softening of it.
     ok("a term under the per-term volume floor is not a gap",
-      gaps.services[0]!.terms.every((t) => t.volume >= GAP_MIN_TERM_VOLUME));
+      gaps.services[0]!.terms.every((t) => (t.volume ?? 0) >= GAP_MIN_TERM_VOLUME));
     ok("a service whose uncovered demand is under the per-service floor raises nothing",
       gaps.services.every((g) => g.service !== "Gutter Installation" && g.totalVolume >= GAP_MIN_SERVICE_VOLUME));
     ok("the figure is searches x click rate x cost per click, and nothing else",

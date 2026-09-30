@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics, type OutcomeFeedFacts } from "./rules.js";
 import type { ClientServiceFacts } from "./service-relevance.js";
 import type { ResearchFacts, ResearchKeyword } from "./keyword-gap.js";
+import type { RecordedTarget } from "./keyword-sourcing.js";
 import type { PhoneDemandFacts } from "./traffic-readiness.js";
 
 export type Actor = string;
@@ -606,6 +607,47 @@ export async function clientServicesFor(
     // A table or column this deploy does not have yet reads as "nobody has
     // confirmed a list", which produces no gap rows and says so.
     return none;
+  }
+}
+
+// ── The client's OWN keyword list ────────────────────────────────────────────
+/**
+ * The keywords somebody put on this client's rank-tracking list.
+ *
+ * `seo_targets` is written by the dashboard — an AM types them on the client's
+ * SEO tab, or ticks them out of a research pull — and the worker's `import-seo`
+ * job has pulled a rank for each of them every week since. It is the only list
+ * in this system that is a PERSON'S ANSWER about which searches matter for this
+ * client, and until 2026-09-30 nothing in the ads path read it: the keyword-gap
+ * rule seeded from service NAMES, and the research panel loaded this very list
+ * only to strike out rows it already held.
+ *
+ * NULL MEANS THE READ FAILED, never that the list is empty. A client who has
+ * chosen no keywords is [] and has its own sentence; the two lead to different
+ * acts, so they are never collapsed. A table this deploy does not have reads as
+ * null for the same reason `clientServicesFor` swallows its own error.
+ *
+ * `active = true` only: a target somebody removed is not a chosen keyword any
+ * more. BOTH report statuses are returned — 'baseline' governs what may be
+ * CLAIMED in the aggregate rank metrics, not whether a person chose the term.
+ */
+export async function seoTargetsFor(
+  c: pg.Client,
+  clientId: string,
+): Promise<RecordedTarget[] | null> {
+  try {
+    const { rows } = await c.query<{ keyword: string; tag: string | null; report_status: string | null }>(
+      `SELECT keyword, tag, report_status
+         FROM seo_targets
+        WHERE client_id = $1 AND active = true
+        ORDER BY keyword ASC`,
+      [clientId],
+    );
+    return rows
+      .map((r) => ({ keyword: String(r.keyword ?? "").trim(), tag: r.tag, reportStatus: r.report_status }))
+      .filter((t) => t.keyword.length > 0);
+  } catch {
+    return null;
   }
 }
 
