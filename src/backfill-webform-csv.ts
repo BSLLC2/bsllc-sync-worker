@@ -39,7 +39,9 @@ import { join } from "node:path";
  *   npm run backfill-webform -- --file=export.csv --client=och --from=2026-09-11
  *   ...add --apply to actually send. Dry run is the default.
  *
- * Env: WEBFORM_KEY (required to apply), WEBFORM_URL (default work.bsllc.biz).
+ * Env: WEBFORM_KEY (required to apply; sent as the x-webform-key header, never in
+ *      the URL), or WEBFORM_KEY_INJECTED=1 when a proxy adds that header for us.
+ *      WEBFORM_URL (default work.bsllc.biz).
  */
 
 /**
@@ -304,10 +306,20 @@ async function main(): Promise<void> {
 
   if (!apply) { console.log("\nDry run — nothing was sent. Add --apply to send."); return; }
 
+  // The key goes in the HEADER, never the query string: a URL is written to every
+  // access log and echoed in most error output, and this one is a bearer credential
+  // for every client's intake endpoint. The route reads either (server/routes.ts).
+  // WEBFORM_KEY_INJECTED=1 says an outbound proxy adds the header for us, so the
+  // key is never in this process's environment at all — then we send none ourselves.
+  const injected = process.env.WEBFORM_KEY_INJECTED === "1";
   const key = process.env.WEBFORM_KEY?.trim();
-  if (!key) { console.error("WEBFORM_KEY is not set — refusing to send."); process.exit(1); }
+  if (!key && !injected) {
+    console.error("WEBFORM_KEY is not set — refusing to send. (Set WEBFORM_KEY_INJECTED=1 if a proxy adds the header.)");
+    process.exit(1);
+  }
   const base = (process.env.WEBFORM_URL ?? "https://work.bsllc.biz").replace(/\/$/, "");
-  const url = `${base}/api/webform/${encodeURIComponent(client)}?key=${encodeURIComponent(key)}`;
+  const url = `${base}/api/webform/${encodeURIComponent(client)}`;
+  const authHeader: Record<string, string> = key ? { "x-webform-key": key } : {};
 
   let sent = 0; const failures: { index: number; status: number | string }[] = [];
   const gap = Math.max(0, Math.round(1000 / Math.max(1, perSecond)));
@@ -315,7 +327,7 @@ async function main(): Promise<void> {
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeader },
         body: JSON.stringify(body),
       });
       if (res.ok) sent++; else failures.push({ index, status: res.status });
