@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * Replay a call-tracking or form export into the dashboard's webform endpoint.
@@ -97,54 +98,148 @@ async function main(): Promise<void> {
 
   if (!file) { console.error("Missing --file=<export.csv>"); process.exit(1); }
 
-  const rows = parseCsv(readFileSync(file, "utf8"));
-  const head = (rows[0] ?? []).map((h) => h.trim());
-  const ix = (n: string) => head.indexOf(n);
-  const C = {
-    name: ix("Name"), caller: ix("Customer #"), src: ix("Tracking Source"),
-    date: ix("Date"), time: ix("Time"), gclid: ix("Google Click ID"),
-    email: ix("Email"), dir: ix("Direction"), callId: ix("CallId"), page: ix("Last URL"),
-  };
-  for (const [k, v] of Object.entries(C)) {
-    if (v < 0) { console.error(`This export has no "${k}" column — refusing rather than importing a column short.`); process.exit(1); }
-  }
+  // A directory is read as every .csv in it: Elementor exports ONE FILE PER
+  // FORM, and a run per file would report six separate answers to one question.
+  const files = statSync(file).isDirectory()
+    ? readdirSync(file).filter((f) => f.toLowerCase().endsWith(".csv")).sort().map((f) => join(file, f))
+    : [file];
 
-  const data = rows.slice(1).filter((r) => r.length > 5);
-  let outbound = 0, outOfWindow = 0, noId = 0, noPhone = 0, noDate = 0;
+  let outbound = 0, outOfWindow = 0, noId = 0, noPhone = 0, noDate = 0, parsed = 0;
   const bodies: { body: Record<string, unknown>; index: number }[] = [];
 
+  for (const path of files) {
+  const rows = parseCsv(readFileSync(path, "utf8"));
+  const head = (rows[0] ?? []).map((h) => h.trim());
+  // Elementor's column names vary BY FORM on the same site — "DOB" on one and
+  // "DATE OF BIRTH" on the next, "gclid" and "GCLID" — so a column is found by
+  // any of its spellings, case-insensitively, rather than by one literal.
+  const ix = (...names: string[]) => {
+    for (const n of names) {
+      const hit = head.findIndex((h) => h.toLowerCase() === n.toLowerCase());
+      if (hit >= 0) return hit;
+    }
+    return -1;
+  };
+
+  /** Which export this is, read from its OWN columns rather than a flag: a
+   *  person passing --kind wrongly is a silent mis-import, and the two shapes
+   *  share no identifying column. */
+  const kind: "ctm" | "elementor" = ix("CallId") >= 0 ? "ctm"
+    : ix("Submission ID") >= 0 ? "elementor"
+    : (() => { console.error(`${path}: neither a CallTrackingMetrics export (no CallId) nor an Elementor one (no Submission ID) — refusing.`); process.exit(1); })() as never;
+
+  const C = kind === "ctm" ? {
+    name: ix("Name"), caller: ix("Customer #"), src: ix("Tracking Source"),
+    date: ix("Date"), time: ix("Time"), gclid: ix("Google Click ID"),
+    email: ix("Email"), dir: ix("Direction"), id: ix("CallId"), page: ix("Last URL"),
+    // CallTrackingMetrics records the visit's own campaign attribution beside
+    // the call. These are OBSERVED values, not ones we are inventing, so they
+    // travel — `ATTRIBUTABLE_UTM_WORDS` in import-och.ts decides which of them
+    // amount to a channel, and a blank stays blank. Without them a paid call
+    // from 2025 lands as a lead with no channel and can never be attributed,
+    // which is the whole reason for importing the history.
+    utmCampaign: ix("campaign"), utmSource: ix("source"),
+    utmMedium: ix("medium"), utmTerm: ix("keyword"),
+  } : {
+    first: ix("FIRST NAME"), last: ix("LAST NAME"), phone: ix("PHONE"), email: ix("EMAIL"),
+    dob: ix("DATE OF BIRTH", "DOB"), gclid: ix("GCLID", "gclid"), created: ix("Created At"),
+    id: ix("Submission ID"), form: ix("Form Name (ID)"), page: ix("Referrer"),
+    utmCampaign: ix("utm_campaign"), utmSource: ix("utm_source"), utmMedium: ix("utm_medium"),
+    utmContent: ix("utm_content"), utmTerm: ix("utm_term"),
+  };
+  for (const [k, v] of Object.entries(C)) {
+    // An Elementor form with no DOB field is ordinary; a missing key column is not.
+    if (v < 0 && !(kind === "elementor" && (k === "dob" || k === "gclid" || k.startsWith("utm")))) {
+      console.error(`${path}: no "${k}" column — refusing rather than importing a column short.`);
+      process.exit(1);
+    }
+  }
+
+  const data = rows.slice(1).filter((r) => r.length > 3 && r.some((c) => c.trim()));
+  parsed += data.length;
+
+  if (kind === "elementor") {
+    data.forEach((r, i) => {
+      const at = (c: number) => (c >= 0 ? (r[c] ?? "").trim() : "");
+      const created = at(C.created as number);
+      const day = created.slice(0, 10);
+      if (day < from || day > to) { outOfWindow++; return; }
+      const id = at(C.id as number);
+      if (!id) { noId++; return; }
+      const phone = at(C.phone as number).replace(/\D/g, "");
+      const email = at(C.email as number);
+      if (phone.length < 10 && !email) { noPhone++; return; }
+      const submittedAt = instantFrom(day, created.slice(11) || "00:00:00", offset);
+      if (!submittedAt) { noDate++; return; }
+      // The form's own name, without Elementor's parenthesised id — a live
+      // submission carries the plain name, and two spellings of one form would
+      // read as two forms on the client's own per-form breakdown.
+      const formName = at(C.form as number).replace(/\s*\([0-9a-f]+\)\s*$/i, "").trim();
+      // DELIBERATELY NOT SENT: MESSAGE, Insurance Provider, Insurance ID
+      // Number, User Agent, User IP, User ID and every field_<hash> column.
+      // The insurance pair is health data about a named person and nothing
+      // downstream reads it; the rest identifies a device, not a lead.
+      bodies.push({
+        index: i + 2,
+        body: {
+          external_id: `elementor-${id}`,
+          submitted_at: submittedAt,
+          form_name: formName || undefined,
+          first_name: at(C.first as number),
+          last_name: at(C.last as number),
+          phone: at(C.phone as number),
+          email,
+          dob: at(C.dob as number) || undefined,
+          gclid: at(C.gclid as number) || undefined,
+          utm_campaign: at(C.utmCampaign as number) || undefined,
+          utm_source: at(C.utmSource as number) || undefined,
+          utm_medium: at(C.utmMedium as number) || undefined,
+          utm_content: at(C.utmContent as number) || undefined,
+          utm_term: at(C.utmTerm as number) || undefined,
+          page_url: at(C.page as number) || undefined,
+        },
+      });
+    });
+    continue;
+  }
+
   data.forEach((r, i) => {
-    const at = (c: number) => (r[c] ?? "").trim();
-    if (at(C.dir) !== "inbound") { outbound++; return; }
-    const d = at(C.date);
+    const at = (c: number) => (c >= 0 ? (r[c] ?? "").trim() : "");
+    if (at(C.dir as number) !== "inbound") { outbound++; return; }
+    const d = at(C.date as number);
     if (d < from || d > to) { outOfWindow++; return; }
-    const callId = at(C.callId);
+    const callId = at(C.id as number);
     if (!callId) { noId++; return; }               // no stable key = no idempotence = never send
-    const phone = at(C.caller).replace(/\D/g, "");
+    const phone = at(C.caller as number).replace(/\D/g, "");
     if (phone.length < 10) { noPhone++; return; }
-    const submittedAt = instantFrom(d, at(C.time), offset);
+    const submittedAt = instantFrom(d, at(C.time as number), offset);
     if (!submittedAt) { noDate++; return; }
 
     bodies.push({
       index: i + 2,                                 // the line a person would look at
       body: {
         source: "ctm",                              // recognised outright by extractWebformFields
-        tracking_source: at(C.src) || undefined,
+        tracking_source: at(C.src as number) || undefined,
         call_id: callId,
         submitted_at: submittedAt,
-        first_name: at(C.name) || "UNKNOWN CALLER",
+        first_name: at(C.name as number) || "UNKNOWN CALLER",
         last_name: "",
-        phone: at(C.caller),
-        email: at(C.email),
-        gclid: at(C.gclid),
-        page_url: at(C.page),
+        phone: at(C.caller as number),
+        email: at(C.email as number),
+        gclid: at(C.gclid as number),
+        page_url: at(C.page as number),
+        utm_campaign: at(C.utmCampaign as number) || undefined,
+        utm_source: at(C.utmSource as number) || undefined,
+        utm_medium: at(C.utmMedium as number) || undefined,
+        utm_term: at(C.utmTerm as number) || undefined,
       },
     });
   });
+  }
 
   const days = new Set(bodies.map((b) => String(b.body.submitted_at).slice(0, 10)));
-  console.log(`${file}`);
-  console.log(`  parsed ${data.length} record(s); ${bodies.length} to send across ${days.size} day(s)`);
+  console.log(`${file}${files.length > 1 ? ` (${files.length} files)` : ""}`);
+  console.log(`  parsed ${parsed} record(s); ${bodies.length} to send across ${days.size} day(s)`);
   console.log(`  left out — outbound ${outbound} · outside ${from}..${to} ${outOfWindow} · no call id ${noId} · no caller number ${noPhone} · undateable ${noDate}`);
   console.log(`  dates are read as ${offset}; pass --offset= to change that.`);
 
