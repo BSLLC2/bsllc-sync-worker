@@ -191,7 +191,8 @@
     "debug-och-duplicate-admissions": "tsx src/debug-och-duplicate-admissions.ts",
     "integrus-strategy-check": "tsx src/integrus-strategy-check.ts",
     "integrus-strategy-check-2": "tsx src/integrus-strategy-check-2.ts",
-    "verify-qbo-reconcile": "tsx src/verify-qbo-reconcile.ts"
+    "verify-qbo-reconcile": "tsx src/verify-qbo-reconcile.ts",
+    "verify-alert-reminder": "tsx src/verify-alert-reminder.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

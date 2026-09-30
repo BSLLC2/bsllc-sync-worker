@@ -149,9 +149,17 @@ async function main() {
   }
   console.log(`${onBoard} of ${inquiries.length} are on the board; ${inquiries.length - onBoard} are not.`);
   if (dryRun) {
-    for (const v of values.slice(0, 12)) console.log("  " + v.map((x) => String(x).slice(0, 22)).join(" | "));
-    if (values.length > 12) console.log(`  … ${values.length - 12} more rows`);
-    console.log(`Dry run — "${OUR_TAB}" not written.`);
+    // NO LEAD ROWS, EVER. This used to print twelve of them verbatim -- names,
+    // phone numbers, email addresses, referral source and admit dates -- into a
+    // GitHub Actions log that is retained for 90 days and readable by anyone
+    // with access to this repository. For a treatment centre that is health
+    // information, and a dry run is exactly when somebody is most likely to be
+    // reading the output over a shoulder.
+    //
+    // A dry run exists to answer "is the shape right and how much would move",
+    // and a count plus a column list answers that without carrying a single
+    // person's details out of the database.
+    console.log(`Dry run — "${OUR_TAB}" not written. ${Math.max(0, values.length - 2)} lead row(s) would go in, under ${values[1]?.length ?? 0} column(s): ${(values[1] ?? []).join(" | ")}`);
     return;
   }
 

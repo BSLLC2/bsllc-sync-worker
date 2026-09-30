@@ -52,3 +52,7 @@ jobs:
         run: npm run verify-email-body
       - name: Scoped email-body backfill guard
         run: npm run verify-email-backfill
+      # The reminder that never fired. It compared the wrong timestamp and went
+      # silent for twenty days on a client whose leads had stopped.
+      - name: Alert reminder times the alert, not the run
+        run: npm run verify-alert-reminder
