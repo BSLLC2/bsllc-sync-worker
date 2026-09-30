@@ -24,6 +24,7 @@
     "import-email": "tsx src/import-email.ts",
     "backfill-email-bodies": "tsx src/backfill-email-bodies.ts",
     "verify-email-backfill": "tsx src/verify-email-backfill.ts",
+    "backfill-webform": "tsx src/backfill-webform-csv.ts",
     "debug-email-logging": "tsx src/debug-email-logging.ts",
     "import-seo": "tsx src/import-seo.ts",
     "import-domain-authority": "tsx src/import-domain-authority.ts",
