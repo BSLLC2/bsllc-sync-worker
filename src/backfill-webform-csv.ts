@@ -42,6 +42,42 @@ import { join } from "node:path";
  * Env: WEBFORM_KEY (required to apply), WEBFORM_URL (default work.bsllc.biz).
  */
 
+/**
+ * Exact misspellings seen in a source system's own tracking setup, and what
+ * they were meant to be.
+ *
+ * AN ALLOWLIST OF EXACT STRINGS, NEVER A FUZZY MATCH. "googke" is a typo in
+ * OCH's CallTrackingMetrics configuration on 74 calls; "google" is what it was
+ * meant to say, and nothing else in that account's 25 distinct sources is
+ * wrong. A distance-based guess would also "correct" `recoverycom`,
+ * `rehabpath` and `an`, which are real values somebody chose.
+ *
+ * EVERY CORRECTION IS COUNTED AND PRINTED. A silent repair is indistinguishable
+ * from data that was always right, and the next person to read the account's
+ * own reports will still see the typo there. This fixes what WE store; the
+ * client's own system is not written to by this tool or by anything it calls.
+ *
+ * NOT corrected, deliberately: `facebook` / `fb` / `www.facebook.com` are three
+ * spellings of one source rather than a misspelling of any of them, and
+ * choosing which is canonical is a decision about that account's taxonomy. They
+ * are reported instead.
+ */
+const SOURCE_CORRECTIONS: Record<string, string> = {
+  googke: "google",
+};
+
+/** Sources that differ only by punctuation, a www. prefix or a domain suffix —
+ *  fragmentation a person should settle in the source system, not here. */
+function fragmentedSources(counts: Map<string, number>): string[] {
+  const stem = (v: string) => v.toLowerCase().replace(/^www\./, "").replace(/\.(com|org|net|de)$/, "");
+  const groups = new Map<string, string[]>();
+  for (const v of counts.keys()) {
+    const k = stem(v);
+    groups.set(k, [...(groups.get(k) ?? []), v]);
+  }
+  return [...groups.values()].filter((g) => g.length > 1).map((g) => g.join(" / "));
+}
+
 type Row = string[];
 
 /** RFC4180. The export has embedded newlines in its notes and transcript
@@ -105,6 +141,18 @@ async function main(): Promise<void> {
     : [file];
 
   let outbound = 0, outOfWindow = 0, noId = 0, noPhone = 0, noDate = 0, parsed = 0;
+  const corrected = new Map<string, number>();
+  const sourceCounts = new Map<string, number>();
+  /** Correct an exact known typo, count it, and leave everything else alone. */
+  const fixSource = (v: string): string => {
+    const raw = v.trim();
+    if (!raw) return raw;
+    sourceCounts.set(raw, (sourceCounts.get(raw) ?? 0) + 1);
+    const fix = SOURCE_CORRECTIONS[raw.toLowerCase()];
+    if (!fix) return raw;
+    corrected.set(`${raw} -> ${fix}`, (corrected.get(`${raw} -> ${fix}`) ?? 0) + 1);
+    return fix;
+  };
   const bodies: { body: Record<string, unknown>; index: number }[] = [];
 
   for (const path of files) {
@@ -192,7 +240,7 @@ async function main(): Promise<void> {
           dob: at(C.dob as number) || undefined,
           gclid: at(C.gclid as number) || undefined,
           utm_campaign: at(C.utmCampaign as number) || undefined,
-          utm_source: at(C.utmSource as number) || undefined,
+          utm_source: fixSource(at(C.utmSource as number)) || undefined,
           utm_medium: at(C.utmMedium as number) || undefined,
           utm_content: at(C.utmContent as number) || undefined,
           utm_term: at(C.utmTerm as number) || undefined,
@@ -229,7 +277,7 @@ async function main(): Promise<void> {
         gclid: at(C.gclid as number),
         page_url: at(C.page as number),
         utm_campaign: at(C.utmCampaign as number) || undefined,
-        utm_source: at(C.utmSource as number) || undefined,
+        utm_source: fixSource(at(C.utmSource as number)) || undefined,
         utm_medium: at(C.utmMedium as number) || undefined,
         utm_term: at(C.utmTerm as number) || undefined,
       },
@@ -242,6 +290,11 @@ async function main(): Promise<void> {
   console.log(`  parsed ${parsed} record(s); ${bodies.length} to send across ${days.size} day(s)`);
   console.log(`  left out — outbound ${outbound} · outside ${from}..${to} ${outOfWindow} · no call id ${noId} · no caller number ${noPhone} · undateable ${noDate}`);
   console.log(`  dates are read as ${offset}; pass --offset= to change that.`);
+  if (corrected.size) {
+    for (const [what, n] of corrected) console.log(`  corrected ${n} row(s): source ${what} — a typo in the source system, fixed here and NOT in their account.`);
+  }
+  const frags = fragmentedSources(sourceCounts);
+  if (frags.length) console.log(`  not corrected — ${frags.length} source(s) spelled several ways, which is a taxonomy decision rather than a typo: ${frags.join(" · ")}`);
 
   if (sample && bodies[0]) {
     const shape = Object.fromEntries(Object.entries(bodies[0].body).map(([k, v]) =>
