@@ -321,6 +321,7 @@ const ACCOUNT = (over: Partial<AuditInput> = {}): AuditInput => ({
   keywords: [],
   ads: [],
   existingNegatives: new Set<string>(),
+  negativesByCampaign: new Map(),
   protectedPatterns: [],
   existingKeywords: [{ text: "brazing", matchType: "PHRASE", adGroupName: "Brazing", campaignName: "Brazing" }],
   tracking: TRACKING_PAGE_VIEWS,
@@ -550,7 +551,7 @@ hr("11d. Their own keyword list comes first, and top of funnel is set aside");
   ok("the buying term is on it, even at a quarter of the volume",
     /vacuum brazing cost/.test(lines));
   ok("…and what was set aside is named with its count and its size",
-    /1 term is people reading up/.test(lines) && /9,900 searches a month/.test(lines),
+    /1 term is somebody reading up/.test(lines) && /9,900 searches a month/.test(lines),
     lines.match(/[^.]*reading up[^.]*\./)?.[0] ?? "no set-aside line at all");
 
   // ── THEIR OWN LIST, READ. A keyword somebody chose that the research never

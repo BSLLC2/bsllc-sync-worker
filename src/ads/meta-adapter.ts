@@ -136,7 +136,12 @@ export class MetaAdapter implements PlatformAdapter {
       platform: "meta", accountId: ctx.accountId,
       windowStart: ctx.windowStart, windowEnd: ctx.windowEnd,
       campaigns: [], adSets: [], searchTerms: [], keywords: [], ads: [],
-      existingNegatives: new Set(), protectedPatterns: ctx.protectedPatterns,
+      // READ, AND THERE ARE NONE — never null, which would mean "we could not
+      // look". Meta has no campaign negative keywords to read, so an empty set
+      // and an empty map are the true answers and every reading keyed on them
+      // behaves exactly as it did before either field was nullable.
+      existingNegatives: new Set(), negativesByCampaign: new Map(),
+      protectedPatterns: ctx.protectedPatterns,
     };
     if (!this.cfg.accessToken) {
       this.onLog(`    · Meta dormant (no META_ACCESS_TOKEN) — skipping ${ctx.accountId}`);

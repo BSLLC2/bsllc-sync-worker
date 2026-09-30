@@ -7,6 +7,7 @@ import {
   type ExistingKeyword,
 } from "./ads/query-promotion.js";
 import { keywordGaps } from "./ads/keyword-gap.js";
+import { shapeNegatives, negativesLine } from "./ads/google-ads-adapter.js";
 
 /**
  * THE PROPERTY: a claim about keyword coverage is true of the list behind it.
@@ -210,7 +211,7 @@ function main() {
       impressionShare: 0.5, budgetLostShare: 0.02, rankLostShare: 0.10,
     }],
     searchTerms: TERMS, keywords: SPENT, ads: [],
-    existingNegatives: new Set<string>(), protectedPatterns: [],
+    existingNegatives: new Set<string>(), negativesByCampaign: new Map(), protectedPatterns: [],
     existingKeywords: HELD, economics: null,
     // The promotion rule refuses outright where the conversion column is not
     // counting business outcomes, so without this every check in section 7
@@ -345,6 +346,135 @@ function main() {
   ok("every query in the adapter's keyword reads is a SELECT",
     !/\b(INSERT|UPDATE|DELETE|MUTATE)\b/i.test(listBlock),
     "read-only, and nothing here is dispatched");
+
+  // ── 9. Negatives: the list, and the campaign each one is on ───────────────
+  // THE TWO FAULTS THIS SECTION EXISTS FOR, both in the same read:
+  //
+  //   A. it went through `safeQuery`, which returns [] on a failure, so a
+  //      failed read arrived as an EMPTY SET and every rule above it read that
+  //      as "nothing is blocked in this account" — then proposed phrase
+  //      negatives that were already there.
+  //   B. the set was account-wide and had no campaign on it, while a
+  //      `campaign_criterion` negative applies to its own campaign and no
+  //      other. A term negated in campaign A silenced the finding for the same
+  //      term in campaign B, where it was still spending. A false clear, which
+  //      makes money disappear off a report rather than appear on one.
+  //
+  // Neither is visible from a type or a compile, and both come back the moment
+  // somebody reaches for the wrong helper or flattens the map for tidiness.
+  console.log("\n9. Negatives: a failed read, and the campaign a negative is on");
+
+  ok("a failed read is NULL on both shapes, never an empty one",
+    shapeNegatives(null).all === null && shapeNegatives(null).byCampaign === null,
+    "an empty set here reads as an account that blocks nothing, and every rule on top of it goes confidently blind");
+  planted("the old `safeQuery` shape, where a failure arrives as []",
+    shapeNegatives([]).all?.size === 0 && shapeNegatives([]).byCampaign?.size === 0,
+    "this is exactly what the failed read used to look like, and it is indistinguishable from a clean account");
+
+  ok("an account that really blocks nothing is an ANSWER, not a failure",
+    shapeNegatives([]).all !== null && shapeNegatives([]).byCampaign !== null,
+    "read-and-empty and could-not-read must never be the same value");
+
+  const NEG_ROWS = [
+    { campaign: { id: "100" }, campaign_criterion: { resource_name: "customers/1/campaignCriteria/100~1", keyword: { text: "Storm Damage" } } },
+    // No campaign.id on this one: the criterion resource name carries the
+    // campaign id exactly, so it is a fallback rather than a guess.
+    { campaign_criterion: { resource_name: "customers/1/campaignCriteria/200~7", keyword: { text: "free advice" } } },
+  ];
+  const shaped = shapeNegatives(NEG_ROWS);
+  ok("a negative is placed on ITS OWN campaign and lowercased",
+    shaped.byCampaign?.get("100")?.has("storm damage") === true
+    && shaped.byCampaign?.get("200")?.has("free advice") === true,
+    "the campaign id is the key, because a name is not one");
+  ok("…and no campaign carries another campaign's negative",
+    shaped.byCampaign?.get("100")?.has("free advice") === false
+    && shaped.byCampaign?.get("200")?.has("storm damage") === false);
+  ok("…while the account-wide union still holds both, for the growth reading",
+    shaped.all?.size === 2,
+    "a negative is a decision there and a scope here, which is why they are two fields");
+  planted("the flat account-wide set handed to the waste rule",
+    new Set([...NEG_ROWS].map((r) => r.campaign_criterion.keyword.text.toLowerCase())).has("storm damage"),
+    "one set for both questions is the shape that let a negative on one campaign clear a finding on another");
+
+  const unplaceable = shapeNegatives([{ campaign_criterion: { keyword: { text: "storm damage" } } }]);
+  ok("rows that came back with no campaign on ANY of them read as unplaceable",
+    unplaceable.byCampaign === null && unplaceable.all?.size === 1,
+    "if the id field stops arriving, an empty map is the original defect wearing a new field name");
+  planted("the same rows read as a campaign that blocks nothing",
+    new Map().size === 0,
+    "an empty map and an unreadable one lead to opposite decisions");
+
+  ok("the run says UNREAD and 0-in-place differently",
+    /UNREAD/.test(negativesLine(shapeNegatives(null)))
+    && !/UNREAD/.test(negativesLine(shapeNegatives([])))
+    && /0 negatives in place/.test(negativesLine(shapeNegatives([]))),
+    "a run reporting no negative findings has two causes and this line is the only thing that tells them apart");
+
+  // ── 9b. What the rules DO with each of those ──────────────────────────────
+  // Two campaigns, the same wasteful term in both, and a negative on one.
+  const TWO_CAMPAIGNS: AuditInput = {
+    ...base,
+    campaigns: [
+      base.campaigns[0]!,
+      { ...base.campaigns[0]!, id: "200", name: "Search — Second" },
+    ],
+    searchTerms: [
+      { term: "storm damage claim", campaignId: "100", campaignName: "Search — Core", adGroupName: "Core",
+        costMicros: 96_000_000, clicks: 40, conversions: 0, allConversions: 0 },
+      { term: "storm damage claim", campaignId: "200", campaignName: "Search — Second", adGroupName: "Core",
+        costMicros: 96_000_000, clicks: 40, conversions: 0, allConversions: 0 },
+    ],
+    existingNegatives: new Set<string>(["storm damage"]),
+    negativesByCampaign: new Map([["100", new Set(["storm damage"])]]),
+  };
+  const wasteOn = (i: AuditInput) => evaluate(i)
+    .filter((f) => f.findingType === "wasted_search_term")
+    .map((f) => f.campaignId);
+
+  ok("the campaign that HOLDS the negative raises nothing",
+    !wasteOn(TWO_CAMPAIGNS).includes("100"),
+    "phrase-match containment, unchanged — 'storm damage' covers 'storm damage claim'");
+  ok("…and the campaign that does NOT hold it still raises the finding",
+    wasteOn(TWO_CAMPAIGNS).includes("200"),
+    "this is the money the account-wide set used to make disappear");
+  planted("the negatives read account-wide again",
+    wasteOn({ ...TWO_CAMPAIGNS, negativesByCampaign: new Map([["100", new Set(["storm damage"])], ["200", new Set(["storm damage"])]]) }).length === 0,
+    "one negative, two campaigns silenced, and the spend on the second one is never reported");
+
+  ok("an unread negatives list proposes NOTHING rather than duplicates",
+    wasteOn({ ...TWO_CAMPAIGNS, negativesByCampaign: null }).length === 0,
+    "the same call bidTargetRead and the tracking reading already make");
+  planted("an unread list read as an account that blocks nothing",
+    wasteOn({ ...TWO_CAMPAIGNS, negativesByCampaign: new Map() }).length === 2,
+    "both campaigns proposed, including the one whose negative is already in place");
+
+  // The growth reading wants the OTHER scope, and refuses on the same null.
+  const gapNegInput = { ...gapInput, existingNegatives: null } as any;
+  ok("the gap reading refuses on an unread list, with its OWN reason",
+    keywordGaps(gapNegInput).verdict === "negatives_unread"
+    && keywordGaps(gapNegInput).services.length === 0,
+    "never folded into keywords_unread: the two name different reads and send somebody to check different things");
+  planted("an unread list read as an empty one there too",
+    keywordGaps({ ...gapInput, existingNegatives: new Set<string>() } as any).verdict === "found",
+    "a growth list built on a decision filter nobody could see proposes demand the client already ruled out");
+
+  // ── 9c. The pull behind it ────────────────────────────────────────────────
+  const negQuery = adapter.slice(adapter.indexOf('"negative keywords"'));
+  const negBlock = negQuery.slice(0, negQuery.indexOf("`, log)"));
+  const negCall = adapter.slice(adapter.indexOf("Existing negatives"), adapter.indexOf('"negative keywords"') + 40);
+  ok("the negatives pull goes through tryQuery, never safeQuery",
+    /tryQuery\(customer, "negative keywords"/.test(adapter) && !/safeQuery\(customer, "negative keywords"/.test(adapter),
+    "safeQuery returns [] on a failure, which is the whole of defect A");
+  planted("safeQuery put back", /safeQuery\(customer, "negative keywords"/.test(
+    negCall.replace("tryQuery(customer,", "safeQuery(customer,")));
+  ok("…and it selects a campaign KEY, not only a campaign name",
+    /campaign\.id/.test(negBlock) && /campaign_criterion\.resource_name/.test(negBlock),
+    "a negative's scope is its campaign, and a name is not a key");
+  planted("the campaign key dropped from the SELECT",
+    !/campaign\.id/.test(negBlock.replace(/campaign\.id,?\s*/g, "").replace(/campaign_criterion\.resource_name,?\s*/g, "")));
+  ok("…and it is still a SELECT and still reads every campaign",
+    !/\b(INSERT|UPDATE|DELETE|MUTATE)\b/i.test(negBlock) && !/campaign\.status/.test(negBlock),
+    "a negative on a paused campaign still blocks that campaign's traffic the day it is switched back on");
 
   console.log(`\n${"─".repeat(72)}`);
   console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

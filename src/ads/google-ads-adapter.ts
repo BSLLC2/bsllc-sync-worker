@@ -144,6 +144,78 @@ export function enumName(map: Record<string, string>, v: unknown): string | null
  */
 export const KEYWORD_PERFORMANCE_LIMIT = 300;
 
+/**
+ * The negative keywords an account already holds, in the two shapes the rules
+ * read them in — and each carrying its own answer to "was this read at all".
+ *
+ * NEITHER FIELD IS EVER AN EMPTY VALUE STANDING IN FOR A FAILED READ. An empty
+ * set is an account that blocks nothing, which is a real state and reads
+ * normally everywhere; a null is a run that could not look, which makes the
+ * readings on top of it silent. The two used to be the same value and that is
+ * the defect this shape exists to make impossible.
+ */
+export interface AccountNegatives {
+  /**
+   * Every negative text in the account, as one union, for the growth reading.
+   * Null only where the query itself failed, because a text with no campaign
+   * on it is still a negative somebody added.
+   */
+  all: Set<string> | null;
+  /**
+   * The same texts keyed by CAMPAIGN ID, which is the only scope a
+   * `campaign_criterion` negative has, for the waste rule.
+   *
+   * Null where the query failed, AND where rows came back and not one of them
+   * could be placed in a campaign. That second case is the systemic one: if
+   * the id field stops arriving, every row drops, the map is empty, and an
+   * empty map is indistinguishable from an account that blocks nothing — which
+   * is the original defect wearing a different field name. One unplaceable row
+   * among many is not that: it is dropped, and the worst it can cost is a
+   * duplicate proposal, which is the cheap direction.
+   */
+  byCampaign: Map<string, Set<string>> | null;
+}
+
+/** `customers/{cid}/campaignCriteria/{campaignId}~{criterionId}` */
+const CRITERION_RN = /\/campaignCriteria\/(\d+)~/;
+
+/** Pure. Rows in, the two shapes out. Exported so a guard can drive it. */
+export function shapeNegatives(rows: any[] | null): AccountNegatives {
+  if (rows == null) return { all: null, byCampaign: null };
+  const all = new Set<string>();
+  const byCampaign = new Map<string, Set<string>>();
+  let placed = 0;
+  for (const r of rows) {
+    const text = String(r?.campaign_criterion?.keyword?.text ?? "").trim().toLowerCase();
+    if (!text) continue;
+    all.add(text);
+    const id = String(r?.campaign?.id ?? "")
+      || CRITERION_RN.exec(String(r?.campaign_criterion?.resource_name ?? ""))?.[1]
+      || "";
+    if (!id) continue;
+    placed += 1;
+    const seen = byCampaign.get(id);
+    if (seen) seen.add(text); else byCampaign.set(id, new Set([text]));
+  }
+  // Rows arrived and none of them could be placed: the campaign key did not
+  // come back at all, so nothing here knows WHERE anything is blocked.
+  if (all.size > 0 && placed === 0) return { all, byCampaign: null };
+  return { all, byCampaign };
+}
+
+/**
+ * What the run says about it. "UNREAD" and "0 in place" are different facts and
+ * the line that reports them has to say which — the same distinction the
+ * keyword-list line already makes a few fields along.
+ */
+export function negativesLine(n: AccountNegatives): string {
+  if (n.all == null) return "    ⚠ negatives UNREAD — nothing will be proposed as a negative this run";
+  if (n.byCampaign == null) {
+    return `    ⚠ ${n.all.size} negatives read, none placeable in a campaign — nothing will be proposed as a negative this run`;
+  }
+  return `    · ${n.all.size} negatives in place across ${n.byCampaign.size} campaign(s)`;
+}
+
 /** Run a GAQL query, returning [] and logging rather than throwing — one
  *  unsupported field must not sink the whole audit. */
 async function safeQuery(customer: any, label: string, gaql: string, onLog?: (s: string) => void): Promise<any[]> {
@@ -346,14 +418,35 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       bidTargetRead: portfolioCarriesTarget(r) !== null,
     }));
 
-    // Existing negatives, so we never propose a duplicate.
-    const negRows = await safeQuery(customer, "negative keywords", `
-      SELECT campaign.name, campaign_criterion.keyword.text, campaign_criterion.keyword.match_type
+    // ── Existing negatives, so we never propose a duplicate ───────────────
+    // `tryQuery`, not `safeQuery`, and the distinction is the whole point: a
+    // failed read used to arrive as an EMPTY SET, which every rule on top of
+    // it read as "nothing is blocked in this account" — so the one check whose
+    // job is to see a duplicate went confidently blind and proposed phrase
+    // negatives that were already there. Null in, null out, and the readings
+    // that depend on it go silent instead. Same call the keyword list two
+    // blocks down already makes, and the same one `bidTargetRead` makes above.
+    //
+    // `campaign.id` rides along because a negative's scope is its own campaign
+    // and a campaign is identified by its id. `campaign_criterion.resource_name`
+    // is the fallback: it is `.../campaignCriteria/{campaignId}~{criterionId}`,
+    // so the id is in it exactly rather than by inference.
+    //
+    // WHAT THIS PULL STILL DOES NOT SEE, said rather than left to be found:
+    // shared negative keyword LISTS (`shared_set`, joined through
+    // `campaign_shared_set`) and AD-GROUP level negatives are both absent, and
+    // always have been. Both make this rule propose a negative that is already
+    // in place, which is clutter — the cheap direction. Neither can cause a
+    // false clear, which is the expensive one.
+    const negRows = await tryQuery(customer, "negative keywords", `
+      SELECT campaign.id, campaign_criterion.resource_name,
+             campaign_criterion.keyword.text, campaign_criterion.keyword.match_type
         FROM campaign_criterion
        WHERE campaign_criterion.negative = TRUE AND campaign_criterion.type = 'KEYWORD'`, log);
-    const existingNegatives = new Set<string>(
-      negRows.map((r: any) => String(r.campaign_criterion?.keyword?.text ?? "").toLowerCase()).filter(Boolean),
-    );
+    const negatives = shapeNegatives(negRows);
+    const existingNegatives = negatives.all;
+    const negativesByCampaign = negatives.byCampaign;
+    log(negativesLine(negatives));
 
     // ── Every keyword the account holds, as a SETTINGS read ────────────────
     // Not the `keyword_view` pull below: that one is filtered to
@@ -607,6 +700,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       keywords,
       ads,
       existingNegatives,
+      negativesByCampaign,
       protectedPatterns: ctx.protectedPatterns,
       tracking,
       conversionLag,

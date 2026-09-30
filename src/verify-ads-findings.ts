@@ -189,7 +189,12 @@ const FIXTURE: AuditInput = {
     { adGroupId: "301", adGroupName: "Core", campaignName: "Search — Core Services", adId: "401", adType: "RESPONSIVE_SEARCH_AD", adStrength: "GOOD" },
     { adGroupId: "301", adGroupName: "Core", campaignName: "Search — Core Services", adId: "402", adType: "RESPONSIVE_SEARCH_AD", adStrength: "EXCELLENT" },
   ],
+  // "service jobs" is on campaign 200, which is where "service jobs hiring"
+  // spends — so the dedupe holds. Campaign 100 blocks nothing, which is what
+  // makes the per-campaign scoping testable rather than asserted: the SAME
+  // negative must not reach a term in a campaign that does not carry it.
   existingNegatives: new Set(["service jobs"]),
+  negativesByCampaign: new Map([["200", new Set(["service jobs"])]]),
   protectedPatterns: ["northgate clinic"],
   // A healthy conversion column: tracking configured, one action switched on,
   // counting toward the goal, categorised by the platform as a lead form, and
@@ -898,7 +903,8 @@ async function main() {
     }],
     adSets: META_ADSETS,
     searchTerms: [], keywords: [], ads: [],
-    existingNegatives: new Set(), protectedPatterns: [],
+    // Read, and there are none — Meta has no campaign negatives to read.
+    existingNegatives: new Set(), negativesByCampaign: new Map(), protectedPatterns: [],
     economics: FIXTURE.economics,
   };
 

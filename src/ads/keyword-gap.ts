@@ -202,6 +202,15 @@ export type GapVerdict =
   /** The account's keyword list could not be read, so absence cannot be shown. */
   | "keywords_unread"
   /**
+   * The account's negative keywords could not be read.
+   *
+   * ITS OWN ANSWER, never folded into `keywords_unread`: the two name
+   * different reads, are fixed the same way and would otherwise send somebody
+   * to check the wrong thing. An empty set is not this — that is an account
+   * that blocks nothing, which is a real answer and reads normally.
+   */
+  | "negatives_unread"
+  /**
    * Every confirmed service is too broad to research from.
    *
    * A SEPARATE ANSWER FROM `no_services_recorded`, and the difference is the
@@ -327,8 +336,25 @@ export interface GapInput {
   existingKeywords: ExistingKeyword[] | null | undefined;
   /** Every search term seen over the long window, whatever it cost. */
   seenTerms: string[];
-  /** Negative keyword texts already in the account, lowercased. */
-  existingNegatives: Set<string>;
+  /**
+   * Negative keyword texts already in the account, lowercased, as ONE
+   * ACCOUNT-WIDE UNION — which is deliberately not what the waste rule reads.
+   *
+   * This reading asks whether anything already reaches a piece of demand, and
+   * a negative is read here the way a protected pattern is a few lines below
+   * it: as a DECISION somebody made, not as a hole. A client who blocked a
+   * phrase in one campaign has said what they think of that demand, and
+   * proposing it back as a growth idea because a different campaign does not
+   * block it would argue with them on a technicality. So the union is the
+   * right scope here, and per-campaign is the right scope there.
+   *
+   * NULL MEANS NOBODY COULD READ THEM. This reading then produces nothing,
+   * the same refusal it already makes for an unread keyword list: a growth
+   * list built on a decision filter nobody could see is a list of demand the
+   * account may have ruled out, and one of those rows discredits every other
+   * row on the page.
+   */
+  existingNegatives: Set<string> | null;
   /** Queries that already convert here, for the proof half of relevance. */
   provenQueries: ProvenQuery[];
   /** Campaign names the client told us never to touch. */
@@ -390,6 +416,11 @@ export function keywordGaps(i: GapInput): GapReading {
     return empty("no_research",
       "No keyword research is stored for this client, so there is nothing to compare their account against. "
       + "Run the keyword research on their SEO tab and this reads on the next audit.");
+  }
+  if (i.existingNegatives == null) {
+    return empty("negatives_unread",
+      "The account's negative keywords could not be read this run, so nothing here can tell demand nobody bids on "
+      + "from demand somebody deliberately blocked. Proposing the second back as growth argues with a decision the client already made.");
   }
   if (i.existingKeywords == null) {
     return empty("keywords_unread",
@@ -460,7 +491,7 @@ export function keywordGaps(i: GapInput): GapReading {
       .filter(Boolean),
   );
   const seenSet = new Set(i.seenTerms.map((t) => normalizeQueryText(t)).filter(Boolean));
-  const negatives = Array.from(i.existingNegatives).map((n) => String(n)).filter(Boolean);
+  const negatives = Array.from(i.existingNegatives).map((n) => String(n)).filter(Boolean);  // non-null: refused above
   const protectedLower = i.protectedPatterns.map((p) => p.toLowerCase()).filter(Boolean);
 
   let alreadyCovered = 0;

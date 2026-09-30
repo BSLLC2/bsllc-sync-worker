@@ -1011,6 +1011,11 @@ export function governingTarget(targets: CostTarget[]): CostTarget | null {
   return targets.find((t) => t.basis === "stated") ?? targets.find((t) => t.basis === "modelled") ?? null;
 }
 
+/** A campaign that carries no negatives at all, so the lookup below never
+ *  has to distinguish "this campaign has none" from "nothing was read" — that
+ *  second question is answered once, before any term is weighed. */
+export const EMPTY_NEGATIVES: ReadonlySet<string> = new Set<string>();
+
 /**
  * Is this search term already blocked by a negative we hold?
  *
@@ -1021,14 +1026,19 @@ export function governingTarget(targets: CostTarget[]): CostTarget | null {
  * `ads-audit.ts` had this problem from the start; the verification harness is
  * what surfaced it.
  *
- * We do not know each negative's match type here (the account-wide negatives
- * pull is a flat list of texts), so this deliberately uses the CONSERVATIVE
- * reading: a term is treated as covered when a negative appears in it as a
- * contiguous run of whole words. Being conservative only ever means proposing
+ * The matching itself is unchanged and must stay unchanged; what changed
+ * around it is WHICH set is handed in. The caller passes the campaign's own
+ * negatives, because that is the only scope a `campaign_criterion` negative
+ * has — see `AuditInput.negativesByCampaign`.
+ *
+ * We do not know each negative's match type here (the negatives pull is a flat
+ * list of texts), so this deliberately uses the CONSERVATIVE reading: a term is
+ * treated as covered when a negative appears in it as a contiguous run of
+ * whole words. Being conservative only ever means proposing
  * FEWER negatives — it can never cause us to block traffic we wanted, which is
  * the expensive direction to be wrong in.
  */
-export function alreadyNegated(term: string, negatives: Set<string>): boolean {
+export function alreadyNegated(term: string, negatives: ReadonlySet<string>): boolean {
   const t = ` ${term.toLowerCase().replace(/\s+/g, " ").trim()} `;
   for (const n of negatives) {
     const neg = n.toLowerCase().replace(/\s+/g, " ").trim();
@@ -1054,8 +1064,41 @@ export interface AuditInput {
   searchTerms: SearchTermRow[];
   keywords: KeywordRow[];
   ads: AdGroupAdRow[];
-  /** Lowercased negative keyword texts already in the account. */
-  existingNegatives: Set<string>;
+  /**
+   * Every lowercased negative keyword text in the account, as one union.
+   *
+   * WHAT IT MEANS IS UNCHANGED — the account-wide set — and the only reading
+   * that wants it is the growth one, which asks whether ANY campaign already
+   * blocks a term. Whether it is blocked in the campaign spending the money is
+   * a different question, and `negativesByCampaign` below is the field that
+   * answers it. Two callers wanting two things is why there are two fields
+   * rather than one field meaning two things.
+   *
+   * NULL MEANS THE READ FAILED. An empty set says somebody looked and this
+   * account blocks nothing, which is a real and different state — a failed
+   * read that arrives as an empty set reads as "nothing is blocked here" and
+   * every rule on top of it is confident about an account it never saw.
+   */
+  existingNegatives: Set<string> | null;
+  /**
+   * The same negatives, keyed by CAMPAIGN ID, which is the scope a negative
+   * actually has.
+   *
+   * A `campaign_criterion` negative applies to its own campaign and to no
+   * other. Reading them as one account-wide list meant a term blocked in
+   * campaign A silenced the waste finding for the same term in campaign B,
+   * where it was still spending — money disappearing off a report, which is
+   * the expensive direction to be wrong in. The apply path has always scoped
+   * its own duplicate check to `campaign.id`; this is the audit half catching
+   * up with it.
+   *
+   * Keyed by ID rather than name because a name is not a key: two campaigns
+   * can carry one name and a rename moves it.
+   *
+   * NULL MEANS THE READ FAILED, and the waste rule is silent for the run
+   * rather than proposing negatives that may already be there.
+   */
+  negativesByCampaign: ReadonlyMap<string, Set<string>> | null;
   /** Campaign names we must never touch (client-protected brand/partner terms). */
   protectedPatterns: string[];
   /**
@@ -1880,10 +1923,31 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   // Grouped per campaign so one negative-keyword change carries many terms,
   // which is both how a human would do it and far fewer approvals to press.
   const wasteByCampaign = new Map<string, SearchTermRow[]>();
-  for (const t of input.searchTerms) {
+  /**
+   * WHAT IS ALREADY BLOCKED, IN THE CAMPAIGN SPENDING THE MONEY.
+   *
+   * A negative keyword is a campaign's own, so this asks each campaign's own
+   * list. Reading the account-wide union here let a term negated in one
+   * campaign silence the finding for the same term in another, where it was
+   * still spending — a false clear, and the direction that makes money vanish
+   * off a report rather than appear on one.
+   *
+   * NULL IS NOT AN EMPTY LIST. Where the negatives could not be read this rule
+   * produces nothing at all, the same call `bidTargetRead` and the tracking
+   * reading already make: proposing phrase negatives against a list nobody
+   * could see puts items in front of a person that do nothing when approved.
+   * A campaign with no entry in a map that WAS read is a campaign that blocks
+   * nothing, which is an answer and behaves exactly as it always has.
+   */
+  const negativesRead = input.negativesByCampaign;
+  const negativesFor = (campaignId: string): ReadonlySet<string> =>
+    negativesRead?.get(campaignId) ?? EMPTY_NEGATIVES;
+  // Nothing is weighed at all where the negatives are unread, so no term
+  // reaches the grouping below and no row is built from one.
+  for (const t of negativesRead == null ? [] : input.searchTerms) {
     if (t.conversions > 0 || t.allConversions > 0) continue;
     if (t.costMicros < THRESHOLDS.searchTermWasteMicros) continue;
-    if (alreadyNegated(t.term, input.existingNegatives)) continue;
+    if (alreadyNegated(t.term, negativesFor(t.campaignId))) continue;
     // A protected term is one the client has told us never to block. Blocking a
     // partner or brand term by accident costs far more than the spend it saves,
     // so it is filtered here AND refused again by the apply path's guard.
@@ -2558,6 +2622,12 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     services: input.services ?? { services: null, confirmedBy: null, confirmedAt: null, candidatesWaiting: 0 },
     existingKeywords: input.existingKeywords,
     seenTerms: input.searchTerms.map((t) => t.term),
+    // THE ACCOUNT-WIDE UNION, and the one reading that wants it. A negative is
+    // read there as a decision the client made rather than as a hole, so the
+    // scope that matters is whether they blocked the phrase at all — not which
+    // campaign they blocked it in. `keyword-gap.ts` argues it in full, and
+    // passes nothing here through to the waste rule, which reads its own
+    // per-campaign field.
     existingNegatives: input.existingNegatives,
     // The proof half of relevance: a query that already became an enquiry here
     // is proof this client provides the thing, not an inference from a name.
@@ -2674,7 +2744,8 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     // order it is built and never re-sorted by anything computed.
     if (gaps.verdict !== "found") {
       const fixable = gaps.verdict === "no_services_recorded" || gaps.verdict === "no_research"
-        || gaps.verdict === "keywords_unread" || gaps.verdict === "no_usable_seeds";
+        || gaps.verdict === "keywords_unread" || gaps.verdict === "negatives_unread"
+        || gaps.verdict === "no_usable_seeds";
       facts.push({
         findingType: "keyword_gap",
         label: "Demand this client sells into that no campaign bids on",
@@ -2689,7 +2760,9 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
               ? "Run the keyword research on this client's SEO tab. This reading compares that research against what the account holds, and with no research there is nothing to compare."
               : gaps.verdict === "keywords_unread"
                 ? "The account's keyword list could not be read this run. Check the connector on Admin -> Connectors; a term cannot be called missing from a list nobody could see."
-                : null,
+                : gaps.verdict === "negatives_unread"
+                  ? "The account's negative keywords could not be read this run. Check the connector on Admin -> Connectors; until they are read, demand nobody bids on and demand somebody blocked on purpose look the same from here."
+                  : null,
         owner: fixable ? "us" : null,
       });
     } else if (gaps.skippedSeeds.length > 0) {

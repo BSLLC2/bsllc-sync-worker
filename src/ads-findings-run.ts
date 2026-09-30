@@ -73,7 +73,14 @@ async function auditOne(
   console.log(`  read: ${platformInput.campaigns.length} campaigns · ${platformInput.searchTerms.length} search terms`
     + ` · ${platformInput.keywords.length} keywords with spend${platformInput.keywordsTruncated ? " (cut — the pull came back full)" : ""}`
     + ` · ${held == null ? "keyword list UNREAD" : `${held.length} keywords held`}`
-    + ` · ${platformInput.ads.length} ads · ${platformInput.existingNegatives.size} negatives in place`);
+    // "UNREAD" and "0 in place" are different facts and the line says which.
+    // A failed negatives read makes the waste rule silent for this account, so
+    // a run that reports no negative-keyword findings has two possible causes
+    // and this is the only thing that tells them apart.
+    + ` · ${platformInput.existingNegatives == null ? "negatives UNREAD"
+      : platformInput.negativesByCampaign == null ? `${platformInput.existingNegatives.size} negatives, NONE PLACEABLE`
+      : `${platformInput.existingNegatives.size} negatives in place`}`
+    + ` · ${platformInput.ads.length} ads`);
 
   // What the CLIENT has recorded about what a customer is worth. The adapter
   // does not read it and should not: it is not the ad platform's to know, and

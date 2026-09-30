@@ -306,7 +306,7 @@ const campaign = (over: Partial<CampaignRow>): CampaignRow => ({
 const input = (c: CampaignRow): AuditInput => ({
   platform: "google_ads", accountId: "invented", windowStart: "2026-06-13", windowEnd: "2026-09-10",
   campaigns: [c], searchTerms: [], keywords: [], ads: [],
-  existingNegatives: new Set<string>(), protectedPatterns: [],
+  existingNegatives: new Set<string>(), negativesByCampaign: new Map(), protectedPatterns: [],
   tracking: {
     status: "CONVERSION_TRACKING_MANAGED_BY_SELF",
     actions: [{ id: "500", name: "Enquiry", status: "ENABLED", category: "SUBMIT_LEAD_FORM", actionType: "WEBPAGE", primaryForGoal: true, countsIntoConversionsColumn: true, conversionsInWindow: 40, defaultValue: null, alwaysUseDefaultValue: null }],
