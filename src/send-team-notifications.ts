@@ -6,8 +6,11 @@ import webpush from "web-push";
 /**
  * Delivers internal team notifications (task @mentions, AM review pings) the app
  * enqueues in team_notifications. Routes each to the recipient's chosen channels
- * from their user prefs: web push (VAPID), Slack DM (bot token), SMS (Twilio —
- * dark until configured). Marks each row sent; safe to re-run.
+ * from their user prefs: web push (VAPID), Slack DM (bot token), SMS (Twilio), and
+ * EMAIL, which is queued into outbound_emails rather than sent from here —
+ * the one channel that needs no token in this job. Marks each row sent; safe
+ * to re-run, and the email insert is guarded on related_id so it cannot
+ * double-send a notification the app already queued.
  *
  * Env: VAPID_PUBLIC_KEY/PRIVATE_KEY/SUBJECT (push, shared with send-push),
  *      SLACK_BOT_TOKEN (optional, per-person Slack DMs),
@@ -48,8 +51,8 @@ async function main() {
 
     let delivered = 0;
     for (const n of rows) {
-      const { rows: urows } = await c.query<{ notify_push: boolean; notify_slack: boolean; notify_text: boolean; phone: string | null; slack_user_id: string | null }>(
-        `SELECT notify_push, notify_slack, notify_text, phone, slack_user_id FROM users WHERE email = $1`,
+      const { rows: urows } = await c.query<{ notify_push: boolean; notify_slack: boolean; notify_text: boolean; notify_email: boolean; phone: string | null; slack_user_id: string | null; name: string | null }>(
+        `SELECT notify_push, notify_slack, notify_text, notify_email, phone, slack_user_id, name FROM users WHERE email = $1`,
         [n.user_email],
       );
       const u = urows[0];
@@ -62,6 +65,7 @@ async function main() {
       const channels: string[] = [];
 
       if (dryRun) {
+        if (u.notify_email) channels.push("email");
         if (u.notify_push) channels.push("push");
         if (u.notify_slack && u.slack_user_id) channels.push("slack");
         if (u.notify_text && u.phone) channels.push(twilioReady ? "sms" : "sms(dark)");
@@ -69,6 +73,25 @@ async function main() {
         continue;
       }
 
+      // Email. Not a send from here — a row in outbound_emails, which
+      // send-outbound-emails delivers from digital@ over the same Gmail
+      // delegation. It needs no token in THIS job, which is why it is the one
+      // channel that works on a box where SLACK_BOT_TOKEN and VAPID are unset.
+      // The app normally enqueues this itself the instant the notification is
+      // raised; this is the fallback for a row that reached us still pending.
+      if (u.notify_email) {
+        try {
+          await c.query(
+            `INSERT INTO outbound_emails (id, kind, to_email, to_name, subject, body, related_id)
+             SELECT $1, 'team_notification', $2, $3, $4, $5, $6
+              WHERE NOT EXISTS (SELECT 1 FROM outbound_emails WHERE related_id = $6)`,
+            [`oe_${n.id}`, n.user_email, u.name, n.title, `${n.body ? `${n.body}\n\n` : ""}${link}`, n.id],
+          );
+          channels.push("email");
+        } catch (e) {
+          console.log(`  email queue failed for ${n.user_email}: ${e instanceof Error ? e.message : e}`);
+        }
+      }
       // Push
       if (u.notify_push && vapidPub && vapidPriv) {
         const { rows: subs } = await c.query<{ id: string; endpoint: string; p256dh: string; auth: string }>(
