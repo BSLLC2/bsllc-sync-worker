@@ -317,6 +317,21 @@ async function main(): Promise<void> {
     console.error("WEBFORM_KEY is not set — refusing to send. (Set WEBFORM_KEY_INJECTED=1 if a proxy adds the header.)");
     process.exit(1);
   }
+  // HONOUR AN OUTBOUND PROXY. Node's own fetch (undici) ignores HTTPS_PROXY,
+  // so on a machine that proxies outbound — which is where any credential
+  // injection happens — every request here goes direct and arrives with no
+  // auth header at all. curl honours it and node does not, which is a
+  // difference nobody would guess from a 401.
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (proxy) {
+    try {
+      const { ProxyAgent, setGlobalDispatcher } = await import("undici");
+      setGlobalDispatcher(new ProxyAgent(proxy));
+      console.log(`  routing through the proxy in HTTPS_PROXY.`);
+    } catch {
+      console.log(`  HTTPS_PROXY is set but undici is not installed, so requests go direct.`);
+    }
+  }
   const base = (process.env.WEBFORM_URL ?? "https://work.bsllc.biz").replace(/\/$/, "");
   const url = `${base}/api/webform/${encodeURIComponent(client)}`;
   const authHeader: Record<string, string> = key ? { "x-webform-key": key } : {};
