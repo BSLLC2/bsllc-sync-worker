@@ -12,6 +12,7 @@ import { buildLeadIndex, matchAdmission, leadLine, MATCH_WINDOW_DAYS, type LeadI
 import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote, type AdmissionColumns } from "./och-sheet-columns.js";
 import { backfillExclusionLine } from "./lead-provenance.js";
 import { isAttributable, referentVerdict } from "./och-attribution.js";
+import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
  *  header — the source of truth. Matched to the client by slugified name. */
@@ -90,7 +91,7 @@ async function loadLeadIndex(databaseUrl: string, clientSlug: string): Promise<L
  *   npm run import-och -- --sheet=<id> --tab='Sheet1' --client=<slug>
  */
 
-const DEFAULT_SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
+const DEFAULT_SHEET_ID = ochSheetId();
 const DEFAULT_CLIENT = "ohio-community-health-och";
 
 // The Referent rule — which hand-typed origin values count as ours — lives in
@@ -233,14 +234,25 @@ async function main() {
   // to the front would otherwise turn every form fill into an admission.
   const meta = await sheetsGet(token, `${args.sheetId}?fields=sheets.properties.title`);
   const tabs: string[] = (meta.sheets ?? []).map((s: any) => s.properties?.title).filter(Boolean);
-  const tab = args.tab ?? tabs.find((t) => /admission/i.test(t)) ?? tabs[0];
+  // One rule for every job that reads the board (och-sheet-target.ts). A tab
+  // the caller named that is not there, or several tabs that all look like the
+  // board, is said out loud: a board read from last month's tab freezes every
+  // number with nothing failing.
+  const named = args.tab ?? process.env.OCH_ADMISSIONS_TAB?.trim() ?? null;
+  const pick = pickAdmissionTab(tabs, named);
+  if (pick.how === "override_missing") throw new Error(`The tab "${named}" is not in the sheet. Tabs now: ${tabs.join(", ") || "none"}.`);
+  const tab = pick.tab;
   if (!tab) throw new Error("No sheets found in the spreadsheet.");
+  if (pick.ambiguous) console.warn(`Several tabs look like the Admission Board (${pick.candidates.join(", ")}). Reading "${tab}". Set OCH_ADMISSIONS_TAB to choose.`);
   console.log(`Reading tab "${tab}" (available: ${tabs.join(", ") || "none"})`);
 
-  const range = encodeURIComponent(`${tab}!A1:Z5000`);
+  const range = encodeURIComponent(boardRange(tab));
   const values = await sheetsGet(token, `${args.sheetId}/values/${range}?valueRenderOption=FORMATTED_VALUE`);
   const rows: string[][] = values.values ?? [];
   if (!rows.length) throw new Error("The tab is empty.");
+  // A board this long has been cut off by the read limit. Counting only part of
+  // it would write lower numbers with a fresh date, so it is a stop.
+  if (rowsCapped(rows.length)) throw new Error(`The board has ${rows.length.toLocaleString("en-US")} rows, the most we read (${ROW_LIMIT.toLocaleString("en-US")}). Raise ROW_LIMIT in och-sheet-target.ts.`);
 
   const hIdx = findHeaderRow(rows);
   const header = rows[hIdx]!;

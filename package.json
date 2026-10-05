@@ -14,6 +14,8 @@
     "import-hubspot-metrics": "tsx src/import-hubspot-metrics.ts",
     "match-web-leads-to-crm": "tsx src/match-web-leads-to-crm.ts",
     "import-och": "tsx src/import-och.ts",
+    "och-sheet-check": "tsx src/och-sheet-canary.ts",
+    "verify-och-sheet": "tsx src/verify-och-sheet.ts",
     "import-web-inquiries": "tsx src/import-web-inquiries.ts",
     "import-offline-conversions": "tsx src/import-offline-conversions.ts",
     "import-ga4": "tsx src/import-ga4.ts",

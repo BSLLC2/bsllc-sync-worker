@@ -1,0 +1,54 @@
+name: Check OCH sheet
+
+# Opens OCH's Admission Board sheet read-only and says which of the known ways
+# the connection stops (our key, the sharing, a renamed or replaced tab, a
+# retitled column, a board that outgrew the read, a board gone quiet) has
+# happened, and whose job it is to fix. Runs BEFORE the admissions import
+# (07:30) and the web-leads publish (07:45), so a dead connection is named at
+# 07:10 with its cause rather than found weeks later as flat numbers.
+#
+# Read-only: writes nothing to the sheet and nothing to the database except
+# the heartbeat. Prints counts, tab names and dates, never a name or a phone.
+#
+# To point every OCH job at a different sheet or tab, set the repository
+# VARIABLES (not secrets) OCH_SHEET_ID and OCH_ADMISSIONS_TAB. Blank means the
+# defaults in src/och-sheet-target.ts.
+on:
+  schedule:
+    - cron: "10 7 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: och-sheet-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Check the sheet
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          OCH_SHEET_ID: ${{ vars.OCH_SHEET_ID }}
+          OCH_ADMISSIONS_TAB: ${{ vars.OCH_ADMISSIONS_TAB }}
+        run: |
+          set -o pipefail
+          npm run och-sheet-check 2>&1 | tee run.log
+      - name: Summary line
+        id: summary
+        if: always()
+        run: |
+          LINE="$(grep '^OCH-SHEET ' run.log | tail -1 | cut -c1-290)"
+          echo "summary=${LINE}" >> "$GITHUB_OUTPUT"
+      - name: Heartbeat
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # Success carries the ok/warn line as the note. Failure carries the run
+        # log's last line, which is the stop line (it is printed last on purpose).
+        run: npm run heartbeat -- --job=och_sheet_check --status=${{ job.status }} --log=run.log --note="${{ steps.summary.outputs.summary }}"

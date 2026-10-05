@@ -30,14 +30,17 @@ jobs:
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OCH_SHEET_ID: ${{ vars.OCH_SHEET_ID }}
+          OCH_ADMISSIONS_TAB: ${{ vars.OCH_ADMISSIONS_TAB }}
         run: |
+          set -o pipefail
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm run publish-och-web-leads -- --dry-run
+            npm run publish-och-web-leads -- --dry-run 2>&1 | tee run.log
           else
-            npm run publish-och-web-leads
+            npm run publish-och-web-leads 2>&1 | tee run.log
           fi
       - name: Heartbeat
         if: always()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npm run heartbeat -- --job=publish_och_web_leads --status=${{ job.status }}
+        run: npm run heartbeat -- --job=publish_och_web_leads --status=${{ job.status }} --log=run.log

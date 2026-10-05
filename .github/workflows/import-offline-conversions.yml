@@ -37,6 +37,8 @@ jobs:
           GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
           GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
           OCH_ADS_CUSTOMER_ID: ${{ secrets.OCH_ADS_CUSTOMER_ID }}
+          OCH_SHEET_ID: ${{ vars.OCH_SHEET_ID }}
+          OCH_ADMISSIONS_TAB: ${{ vars.OCH_ADMISSIONS_TAB }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           set -o pipefail

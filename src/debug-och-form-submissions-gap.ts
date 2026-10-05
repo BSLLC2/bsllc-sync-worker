@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
+import { ochSheetId } from "./och-sheet-target.js";
 
 /**
  * READ-ONLY. Reconciles OCH's website form log against every downstream step.
@@ -20,7 +21,7 @@ import pg from "pg";
  *
  *   npm run debug-och-form-submissions-gap
  */
-const SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
+const SHEET_ID = ochSheetId();
 const TAB = "Admission Board";
 const CLIENT = "ohio-community-health-och";
 const WEBHOOK_LIVE_FROM = "2026-08-07"; // ac0f74c — /api/webform did not exist before this.

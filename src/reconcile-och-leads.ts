@@ -4,6 +4,7 @@ import { JWT } from "google-auth-library";
 import pg from "pg";
 import { GoogleAdsApi } from "google-ads-api";
 import { loadConfig } from "./config.js";
+import { ochSheetId } from "./och-sheet-target.js";
 
 /**
  * READ-ONLY. Does Google Ads' lead count survive contact with the business?
@@ -18,7 +19,7 @@ import { loadConfig } from "./config.js";
  */
 
 const CUSTOMER_ID = "8350689003";
-const SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
+const SHEET_ID = ochSheetId();
 const CLIENT = "ohio-community-health-och";
 const W = { from: "2026-07-29", to: "2026-08-27" };
 

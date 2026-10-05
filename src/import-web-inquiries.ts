@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { JWT } from "google-auth-library";
 import pg from "pg";
 import { normalizeDob, phone10 } from "./lead-keys.js";
+import { ochSheetId } from "./och-sheet-target.js";
 
 /**
  * Web inquiries (paid/organic form fills) → dashboard `web_inquiries` table.
@@ -36,7 +37,7 @@ import { normalizeDob, phone10 } from "./lead-keys.js";
  *   npm run import-web-inquiries -- --sheet=<id> --tab='Web Inquiries' --client=<slug>
  */
 
-const DEFAULT_SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
+const DEFAULT_SHEET_ID = ochSheetId();
 const DEFAULT_TAB = "Web Inquiries";
 const DEFAULT_CLIENT = "ohio-community-health-och";
 

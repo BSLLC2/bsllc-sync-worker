@@ -9,6 +9,7 @@ import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd, isAdmittedStatus,
 // must agree about who a row is about. It resolves each column from the
 // heading and, when the client has renamed one, from the data underneath.
 import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote } from "./och-sheet-columns.js";
+import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -44,7 +45,7 @@ import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolve
  *   npm run import-offline-conversions -- --customer=1234567890 --lookback=120
  */
 
-const DEFAULT_SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
+const DEFAULT_SHEET_ID = ochSheetId();
 const DEFAULT_CLIENT_SLUG = "ohio-community-health-och";
 const CONVERSION_ACTION_NAME = "Admission (offline)";
 // Google only accepts a click conversion inside the conversion action's own
@@ -183,13 +184,17 @@ async function main() {
     const token = await sheetsToken();
     const meta = await sheetsGet(token, `${args.sheetId}?fields=sheets.properties.title`);
     const tabs: string[] = (meta.sheets ?? []).map((s: any) => s.properties?.title).filter(Boolean);
-    const tab = tabs.find((t) => /admission/i.test(t)) ?? tabs[0];
-    const range = encodeURIComponent(`${tab}!A1:Z5000`);
+    const named = process.env.OCH_ADMISSIONS_TAB?.trim() ?? null;
+    const pick = pickAdmissionTab(tabs, named);
+    if (pick.how === "override_missing") throw new Error(`The tab "${named}" is not in the sheet. Tabs now: ${tabs.join(", ") || "none"}.`);
+    const tab = pick.tab;
+    if (!tab) throw new Error("No sheets found in the spreadsheet.");
+    const range = encodeURIComponent(boardRange(tab));
     const values = await sheetsGet(token, `${args.sheetId}/values/${range}?valueRenderOption=FORMATTED_VALUE`);
     const rows: string[][] = values.values ?? [];
+    if (rowsCapped(rows.length)) throw new Error(`The board has ${rows.length.toLocaleString("en-US")} rows, the most we read (${ROW_LIMIT.toLocaleString("en-US")}). Raise ROW_LIMIT in och-sheet-target.ts.`);
     const hIdx = findHeaderRow(rows);
     const header = rows[hIdx] ?? [];
-    if (!tab) throw new Error("No sheets found in the spreadsheet.");
     // Columns come from the shared resolver: headings where the client's
     // wording still says what a column holds, the column's own data where it
     // does not. A name here goes into a conversion upload to Google, so a

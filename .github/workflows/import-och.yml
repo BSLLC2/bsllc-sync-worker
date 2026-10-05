@@ -59,6 +59,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DASHBOARD_DIR: ${{ github.workspace }}/dashboard
           DEBUG_MONTH: ${{ inputs.debug_month }}
+          OCH_SHEET_ID: ${{ vars.OCH_SHEET_ID }}
+          OCH_ADMISSIONS_TAB: ${{ vars.OCH_ADMISSIONS_TAB }}
         run: |
           ARGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
@@ -68,11 +70,12 @@ jobs:
             fi
             ARGS="$ARGS --debug-month=$DEBUG_MONTH"
           fi
-          npm run import-och -- $ARGS
+          set -o pipefail
+          npm run import-och -- $ARGS 2>&1 | tee run.log
 
       - name: Heartbeat
         if: always()
         working-directory: worker
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npm run heartbeat -- --job=import_och --status=${{ job.status }}
+        run: npm run heartbeat -- --job=import_och --status=${{ job.status }} --log=run.log

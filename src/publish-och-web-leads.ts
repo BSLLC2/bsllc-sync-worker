@@ -3,6 +3,7 @@ import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
 import { phone10 } from "./lead-keys.js";
+import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 
 /**
  * Writes OCH's website leads into a tab WE own inside their intake sheet —
@@ -19,9 +20,10 @@ import { phone10 } from "./lead-keys.js";
  *   npm run publish-och-web-leads -- --dry-run     # print, write nothing
  *   npm run publish-och-web-leads
  */
-const SHEET_ID = "1Ls-zDrNemixH2LiMYj9Hh7VumupNufYnRD6HEWL4u-8";
-const BOARD_TAB = "Admission Board";
+const SHEET_ID = ochSheetId();
 const OUR_TAB = "BS LLC — Web Leads";
+// Chosen at run time by och-sheet-target.ts, not typed here.
+let BOARD_TAB = "Admission Board";
 const CLIENT = "ohio-community-health-och";
 const INTERNAL_TEST_EMAILS = ["sebastienhue@gmail.com", "test-inquiry@bsllc.biz"];
 const dryRun = process.argv.includes("--dry-run");
@@ -97,8 +99,15 @@ async function main() {
   // Admission Board, read-only, indexed by phone.
   const board = new Map<string, Board>();
   {
-    const range = encodeURIComponent(`${BOARD_TAB}!A1:Z10000`);
+    // The same tab rule the import uses, so the two can never read different tabs.
+    const tabs: string[] = ((await sheets("GET", "?fields=sheets.properties.title")).sheets ?? []).map((s: any) => s?.properties?.title).filter(Boolean);
+    const named = process.env.OCH_ADMISSIONS_TAB?.trim() ?? null;
+    const pick = pickAdmissionTab(tabs, named);
+    if (!pick.tab) throw new Error(pick.how === "override_missing" ? `The tab "${named}" is not in the sheet. Tabs now: ${tabs.join(", ") || "none"}.` : "No sheets found in the spreadsheet.");
+    BOARD_TAB = pick.tab;
+    const range = encodeURIComponent(boardRange(BOARD_TAB));
     const rows: string[][] = (await sheets("GET", `/values/${range}?valueRenderOption=FORMATTED_VALUE`)).values ?? [];
+    if (rowsCapped(rows.length)) throw new Error(`The board has ${rows.length.toLocaleString("en-US")} rows, the most we read (${ROW_LIMIT.toLocaleString("en-US")}). Raise ROW_LIMIT in och-sheet-target.ts.`);
     let h = 0;
     for (let i = 0; i < Math.min(rows.length, 8); i++) if ((rows[i] ?? []).filter((x) => x && String(x).trim()).length >= 3) { h = i; break; }
     const header = rows[h] ?? [];
