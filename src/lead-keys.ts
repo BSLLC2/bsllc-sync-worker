@@ -75,8 +75,9 @@ export function parseSheetDate(v: unknown): Date | null {
 // via the "no" inside the parenthetical and treated "Discharged" (an
 // admission that already ended) as not admitted. OCH's live vocabulary —
 // "Admitted", "Did Not Admit", "Not Qualified", "Referred Out", "Potential"
-// — all classify correctly here.
-const STATUS_DENY = new Set(["not", "no", "denied", "lost", "inactive", "potential", "referred", "qualified", "tbd"]);
+// — all classify correctly here. "Pending" (not admitted yet) and a blank
+// status (no disposition written) are non-admissions too; both turned up live.
+const STATUS_DENY = new Set(["not", "no", "denied", "lost", "inactive", "potential", "referred", "qualified", "tbd", "pending"]);
 const STATUS_DENY_PREFIXES = ["declin", "reject"];
 const STATUS_ALLOW = new Set(["admitted", "enrolled", "accepted", "active", "discharged", "won", "y", "yes", "1"]);
 const STATUS_ALLOW_PREFIXES = ["admit", "complete"];
@@ -90,11 +91,14 @@ const STATUS_ALLOW_PREFIXES = ["admit", "complete"];
  *  dropped. */
 export function isAdmittedStatus(cell: unknown, unrecognized?: Set<string>): boolean {
   const raw = String(cell ?? "").trim();
+  // A blank status is nobody having written a disposition yet. It is not a new
+  // word, so it is not reported as one; it is simply not an admission.
+  if (!raw) return false;
   const tokens = raw.toLowerCase().replace(/\([^)]*\)/g, " ").split(/[^a-z0-9]+/).filter(Boolean);
   const deny = tokens.some((t) => STATUS_DENY.has(t) || STATUS_DENY_PREFIXES.some((p) => t.startsWith(p)));
   const allow = tokens.some((t) => STATUS_ALLOW.has(t) || STATUS_ALLOW_PREFIXES.some((p) => t.startsWith(p)));
   if (allow && !deny) return true;
-  if (!deny && !allow) unrecognized?.add(raw || "(blank)");
+  if (!deny && !allow) unrecognized?.add(raw);
   return false;
 }
 

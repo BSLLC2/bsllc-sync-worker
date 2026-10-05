@@ -7,6 +7,7 @@
  *
  *   npm run verify-och-sheet
  */
+import { isAdmittedStatus } from "./lead-keys.js";
 import { readFileSync, existsSync } from "node:fs";
 import { OCH_SHEET_ID_DEFAULT, ochSheetId, pickAdmissionTab, rowsCapped, boardRange, ROW_LIMIT, BOARD_TAB_NAME } from "./och-sheet-target.js";
 import { gatherFacts, type Doors } from "./och-sheet-gather.js";
@@ -338,6 +339,9 @@ async function glue() {
   check("glue: no database at all is skipped and said", noDb.skipped.some((x) => /no database/.test(x)), JSON.stringify(noDb.skipped));
   const odd = await drive({ drive: driveOk, rows: [HEAD, ...board(["9/30/2026"]).slice(1), ["Ada Brennan", "513-555-0111", "3/14/1988", "Waitlisted", "9/30/2026", "9/30/2026", "Google"]] });
   check("glue: a status word nobody has classified is status_unrecognized", lines(odd).join() === "status_unrecognized", lines(odd).join());
+  const pend = await drive({ drive: driveOk, rows: [HEAD, ...board(["9/30/2026"]).slice(1), ["Ada Brennan", "513-555-0111", "3/14/1988", "Pending", "9/30/2026", "9/30/2026", "Google"], ["Bo Kim", "513-555-0112", "3/15/1988", "", "9/30/2026", "9/30/2026", "Google"]] });
+  check("glue: Pending and a blank status are known non-admissions and say nothing", pend.findings.length === 0, lines(pend).join());
+  check("a status that is Pending or blank is never an admission", !isAdmittedStatus("Pending") && !isAdmittedStatus("") && !isAdmittedStatus(undefined) && isAdmittedStatus("Admitted"));
   const guessed = await drive({ drive: driveOk, tabs: ["Intake", "Web Leads"] });
   check("glue: no tab named like the board is tab_guessed and the first tab is read", lines(guessed).join() === "tab_guessed" && guessed.tab === "Intake", `${lines(guessed)} ${guessed.tab}`);
   check("glue: an empty tab is board_empty", lines(await drive({ drive: driveOk, rows: [HEAD] })).includes("board_empty"));
