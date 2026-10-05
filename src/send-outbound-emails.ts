@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { safeReplyTo } from "./reply-to";
 import "dotenv/config";
 import pg from "pg";
 import { JWT } from "google-auth-library";
@@ -52,7 +53,7 @@ function encodeHeaderWord(s: string): string {
 }
 
 /** RFC822 with an HTML part (links clickable) + a plain-text fallback. */
-function buildEmail(to: string, toName: string | null, subject: string, body: string, ccEmail: string | null): string {
+function buildEmail(to: string, toName: string | null, subject: string, body: string, ccEmail: string | null, replyTo: string | null = null): string {
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   // Turn bare URLs into links and newlines into <br> for the HTML part.
   const htmlBody = esc(body)
@@ -66,6 +67,7 @@ function buildEmail(to: string, toName: string | null, subject: string, body: st
     `From: BS LLC <${FROM}>`,
     `To: ${toHeader}`,
     ...(ccEmail?.trim() ? [`Cc: ${ccEmail.trim()}`] : []),
+    ...(safeReplyTo(replyTo) ? [`Reply-To: ${safeReplyTo(replyTo)}`] : []),
     `Subject: ${encodeHeaderWord(subject)}`,
     "MIME-Version: 1.0",
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
@@ -90,8 +92,11 @@ async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
-    const { rows } = await c.query<{ id: string; kind: string; to_email: string; to_name: string | null; subject: string; body: string; cc_email: string | null }>(
-      `SELECT id, kind, to_email, to_name, subject, body, cc_email
+    const { rows } = await c.query<{ id: string; kind: string; to_email: string; to_name: string | null; subject: string; body: string; cc_email: string | null; reply_to: string | null }>(
+      // reply_to is read through to_jsonb so this still runs against a database the app has not
+      // migrated yet (the column arrives with the app's next deploy); a missing key reads as null.
+      `SELECT id, kind, to_email, to_name, subject, body, cc_email,
+              to_jsonb(outbound_emails.*)->>'reply_to' AS reply_to
          FROM outbound_emails
         WHERE status = 'pending'
         ORDER BY created_at ASC
@@ -106,7 +111,7 @@ async function main() {
       }
       if (dryRun) { console.log(`  would send → ${r.to_email} · "${r.subject}"`); sent++; continue; }
       try {
-        await sendAsDigital(buildEmail(r.to_email, r.to_name, r.subject, r.body, r.cc_email));
+        await sendAsDigital(buildEmail(r.to_email, r.to_name, r.subject, r.body, r.cc_email, r.reply_to));
         await c.query(`UPDATE outbound_emails SET status='sent', sent_at=now(), error=NULL WHERE id=$1`, [r.id]);
         console.log(`  sent → ${r.to_email} (${r.kind})`); sent++;
       } catch (e) {

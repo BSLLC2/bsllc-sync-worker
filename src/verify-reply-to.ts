@@ -1,0 +1,12 @@
+import { safeReplyTo } from "./reply-to";
+let fails = 0;
+const check = (name: string, ok: boolean) => { console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); if (!ok) fails++; };
+check("a plain address passes", safeReplyTo("am@bsllc.biz") === "am@bsllc.biz");
+check("surrounding space is trimmed", safeReplyTo("  am@bsllc.biz ") === "am@bsllc.biz");
+check("null and empty give nothing", safeReplyTo(null) === null && safeReplyTo("") === null);
+check("a line break cannot smuggle a header", safeReplyTo("am@bsllc.biz\r\nBcc: x@y.com") === null);
+check("two addresses are refused", safeReplyTo("a@b.com, c@d.com") === null && safeReplyTo("a@b.com;c@d.com") === null);
+check("a display name form is refused", safeReplyTo("Katy <am@bsllc.biz>") === null);
+check("no domain dot is refused", safeReplyTo("am@bsllc") === null);
+console.log(fails ? `${fails} failed` : "all passed");
+process.exit(fails ? 1 : 0);
