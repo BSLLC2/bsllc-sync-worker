@@ -44,6 +44,10 @@ jobs:
         run: npm run verify-och-import
       - name: OCH attribution guard
         run: npm run verify-och-attribution
+      - name: OCH sheet connection guard
+        run: npm run verify-och-sheet
+      - name: OCH sheet connection, end to end against a pretend Google
+        run: npm run verify-och-e2e
       - name: GA4 per-channel import guard
         run: npm run verify-ga4-channels
       - name: QuickBooks invoice reconciliation guard

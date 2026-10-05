@@ -1,6 +1,5 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
-import { JWT } from "google-auth-library";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry, type AdmissionRecord } from "./emit.js";
 import { phone10, lastDobKey, lastNameOf, parseSheetDate, ym as ymOf, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
@@ -13,6 +12,7 @@ import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolve
 import { backfillExclusionLine } from "./lead-provenance.js";
 import { isAttributable, referentVerdict } from "./och-attribution.js";
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
+import { accessToken, sheetsBase, sheetsFetch } from "./och-google.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
  *  header — the source of truth. Matched to the client by slugified name. */
@@ -134,19 +134,15 @@ function serviceAccount(): { client_email: string; private_key: string } {
 }
 
 async function sheetsToken(): Promise<string> {
-  const sa = serviceAccount();
-  const jwt = new JWT({
-    email: sa.client_email,
-    key: sa.private_key,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-  });
-  const { token } = await jwt.getAccessToken();
+  const token = await accessToken(serviceAccount(), "https://www.googleapis.com/auth/spreadsheets.readonly");
   if (!token) throw new Error("Failed to mint a Sheets access token from the service account.");
   return token;
 }
 
 async function sheetsGet(token: string, path: string): Promise<any> {
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${path}`, {
+  // Retried on a 429, a 5xx or a dropped connection: a ten-second Google hiccup
+  // used to fail the whole morning's import with no cause named.
+  const res = await sheetsFetch(`${sheetsBase()}/${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (res.status === 403 || res.status === 404) {

@@ -1,7 +1,6 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
-import { JWT } from "google-auth-library";
 import { GoogleAdsApi } from "google-ads-api";
 import pg from "pg";
 import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd, isAdmittedStatus, reportUnrecognizedStatuses } from "./lead-keys.js";
@@ -10,6 +9,7 @@ import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd, isAdmittedStatus,
 // heading and, when the client has renamed one, from the data underneath.
 import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote } from "./och-sheet-columns.js";
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
+import { accessToken, sheetsBase } from "./och-google.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -96,9 +96,7 @@ function serviceAccount(): { client_email: string; private_key: string } {
   return json;
 }
 async function sheetsToken(): Promise<string> {
-  const sa = serviceAccount();
-  const jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"] });
-  const { token } = await jwt.getAccessToken();
+  const token = await accessToken(serviceAccount(), "https://www.googleapis.com/auth/spreadsheets.readonly");
   if (!token) throw new Error("Failed to mint a Sheets access token.");
   return token;
 }
@@ -108,7 +106,7 @@ async function sheetsGet(token: string, path: string): Promise<any> {
   // retryable statuses with backoff before giving up; a 403/404 is still
   // immediate.
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await fetch(`${sheetsBase()}/${path}`, { headers: { Authorization: `Bearer ${token}` } });
     if (res.ok) return res.json();
     const body = await res.text();
     if ((res.status === 429 || res.status >= 500) && attempt < 4) {

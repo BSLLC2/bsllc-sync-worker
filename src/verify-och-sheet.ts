@@ -9,7 +9,9 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { OCH_SHEET_ID_DEFAULT, ochSheetId, pickAdmissionTab, rowsCapped, boardRange, ROW_LIMIT, BOARD_TAB_NAME } from "./och-sheet-target.js";
-import { gatherFacts, SHEETS, DRIVE, type Doors } from "./och-sheet-gather.js";
+import { gatherFacts, type Doors } from "./och-sheet-gather.js";
+import { readBoard, droppedMonths } from "./och-board-readings.js";
+import { sheetsBase, driveBase } from "./och-google.js";
 import { checkOchSheet, summaryLine, classifyTokenError, hasStop, CAUSE_CODES, QUIET_AFTER_DAYS, type CheckFacts } from "./och-sheet-check.js";
 
 let failed = 0;
@@ -32,7 +34,8 @@ check("a whole sheet address pasted in gives its id",
 const p1 = pickAdmissionTab(["Admission Board", "Web Inquiries"]);
 check("one tab that looks like the board is the board", p1.tab === "Admission Board" && p1.how === "only_match" && !p1.ambiguous);
 const p2 = pickAdmissionTab(["Admissions Sep", "Admission Board", "Notes"]);
-check("several look like it: the one named Admission Board wins and is not ambiguous", p2.tab === "Admission Board" && p2.how === "named_board" && !p2.ambiguous);
+check("several look like it: the one named Admission Board is read, and the look-alike is still flagged", p2.tab === "Admission Board" && p2.how === "named_board" && p2.ambiguous);
+check("naming the tab clears the flag", !pickAdmissionTab(["Admissions Sep", "Admission Board"], "Admission Board").ambiguous);
 const p3 = pickAdmissionTab(["Admissions Sep", "Admissions Oct"]);
 check("several look like it and none is the board: the first, and it says so", p3.tab === "Admissions Sep" && p3.ambiguous && p3.candidates.length === 2);
 const p4 = pickAdmissionTab(["Sheet1", "Web Inquiries"]);
@@ -61,6 +64,7 @@ const base = (over: Partial<CheckFacts> = {}): CheckFacts => ({
   rowsRead: 400,
   rowsCapped: false,
   newestAdmissionYmd: "2026-10-02",
+  board: null,
   ...over,
 });
 const codes = (f: CheckFacts) => checkOchSheet(f).map((x) => x.code);
@@ -109,6 +113,41 @@ check("a quiet board on a sheet nobody has edited does not claim a new tab", (()
   return !!r && !/another tab/.test(r.line);
 })());
 check("no dated admission at all is not read as quiet (a null is not a date)", !codes(base({ newestAdmissionYmd: null })).includes("board_quiet"));
+
+
+// ── What the numbers say ────────────────────────────────────────────────────
+const RB = { dateCols: [5], statusCol: 3, hasStatusCol: true };
+const rb = (rows: string[][]) => readBoard([HEAD0, ...rows], RB, 0, "2026-10-05");
+const HEAD0 = ["Name", "Phone", "DOB", "Status", "Inquiry", "Admitted", "Referent"];
+const row = (status: string, admitted: string) => ["Ada Brennan", "513-555-0100", "3/14/1988", status, "9/1/2026", admitted, "Google"];
+{
+  const r = rb([row("Admitted", "8/3/2026"), row("Admitted", "8/20/2026"), row("Did Not Admit", "8/21/2026"), row("Admitted", "9/2/2026"), row("Admitted", "10/1/2026"), row("Admitted", "10/1/2027"), row("Admitted", ""), row("Waitlisted", "9/3/2026"), row("Waitlisted - hold", "9/3/2026"), row("Waitlisted", "9/4/2026")]);
+  check("readBoard counts admissions per complete month, with the import's own status rule", r.admittedByMonth["2026-08"] === 2 && r.admittedByMonth["2026-09"] === 1, JSON.stringify(r));
+  check("readBoard keeps the open month apart from the complete ones", r.currentMonthAdmitted === 1 && r.admittedByMonth["2026-10"] === undefined);
+  check("readBoard sets a future-dated admission aside and says so", r.futureDated === 1, r.futureDated);
+  check("readBoard counts an admission with no date and puts it in no month", r.admittedNoDate === 1, r.admittedNoDate);
+  check("readBoard counts DISTINCT unrecognised words, not rows, and never quotes them", r.unrecognizedStatuses === 2 && !JSON.stringify(r).includes("Waitlisted"), JSON.stringify(r));
+  const all = readBoard([HEAD0, row("", "8/3/2026"), row("anything", "8/4/2026")], { ...RB, hasStatusCol: false }, 0, "2026-10-05");
+  check("with no status column every dated row is an admission, as the import reads it", all.admittedByMonth["2026-08"] === 2 && all.unrecognizedStatuses === 0, JSON.stringify(all));
+}
+{
+  const d = droppedMonths({ "2026-08": 22, "2026-09": 30 }, { "2026-08": 26, "2026-09": 28, "2026-10": 99 }, "2026-10-05");
+  check("a month that reads lower than stored is reported, a month that rose is not, and the open month is not compared", d.length === 1 && d[0]!.ym === "2026-08" && d[0]!.now === 22 && d[0]!.then === 26, JSON.stringify(d));
+  check("a wobble of one is not reported", droppedMonths({ "2026-08": 25 }, { "2026-08": 26 }, "2026-10-05").length === 0);
+  check("a two-row fall on a big month is under the share floor and is not reported", droppedMonths({ "2026-08": 98 }, { "2026-08": 100 }, "2026-10-05").length === 0);
+  check("a month the board no longer has at all is a fall to nought, not a null", droppedMonths({}, { "2026-08": 12 }, "2026-10-05")[0]?.now === 0);
+  check("with nothing stored nothing is compared (a null is unanswered)", droppedMonths({ "2026-08": 1 }, null, "2026-10-05").length === 0);
+  check("only the last six complete months are compared", droppedMonths({}, Object.fromEntries(["2025-01", "2025-02", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"].map((m) => [m, 20])), "2026-10-05").length === 6);
+  const f = base({ board: { unrecognizedStatuses: 0, dropped: [{ ym: "2026-08", now: 22, then: 26 }, { ym: "2026-07", now: 10, then: 14 }] } });
+  const x = checkOchSheet(f).find((y) => y.code === "past_months_changed");
+  check("a fall is a warning that names the month and both counts, and counts the others", !!x && x.level === "warn" && /Aug 2026 now reads 22 admissions on the board against 26/.test(x.line) && /1 other earlier month/.test(x.line), x?.line);
+  check("a fall with nothing to compare against says nothing", checkOchSheet(base({ board: { unrecognizedStatuses: 0, dropped: null } })).length === 0);
+  const u = checkOchSheet(base({ board: { unrecognizedStatuses: 2, dropped: [] } })).find((y) => y.code === "status_unrecognized");
+  check("an unrecognised status word is a warning that is ours, with a count and no word", !!u && u.level === "warn" && u.who === "us" && /^2 status words/.test(u.line), u?.line);
+  const g = checkOchSheet(base({ tabs: ["Intake", "Web Leads"], pick: pickAdmissionTab(["Intake", "Web Leads"]) }));
+  check("no tab named like the board, with other tabs around, is tab_guessed", g.length === 1 && g[0]!.code === "tab_guessed" && g[0]!.level === "warn", g.map((y) => y.code).join());
+  check("a sheet with one tab and no look-alike is not a guess", checkOchSheet(base({ tabs: ["Sheet1"], pick: pickAdmissionTab(["Sheet1"]) })).length === 0);
+}
 
 // ── The line the dashboard reads ────────────────────────────────────────────
 const every: CheckFacts[] = [
@@ -167,8 +206,14 @@ if (existsSync(wf)) {
   // so a file-wide match would pass with the heartbeat's own condition deleted.
   const hb = y.split(/\n\s*- name: /).find((b) => /^Heartbeat/.test(b)) ?? "";
   check("the check records a heartbeat under its own job name, with the log as the note", /--job=och_sheet_check/.test(hb) && /--log=/.test(hb));
+  // A step output can carry text OCH typed (a tab name). Pasted into a script
+  // line it is a command-injection hole, so no run: block may interpolate one.
+  const runBlocks = y.split("\n").filter((l) => /^\s*run:/.test(l) || /^\s+npm run /.test(l) || /^\s+LINE=/.test(l));
+  check("no script line interpolates a step output (a tab name could be a command)", !runBlocks.some((l) => /\$\{\{\s*steps\./.test(l)), runBlocks.filter((l) => /\$\{\{\s*steps\./.test(l)).join(" | "));
   check("the heartbeat step runs even when the check fails (a failed run must record as a failure)", /if:\s*always\(\)/.test(hb));
   check("the sheet and tab overrides come from repository variables, not secrets", /vars\.OCH_SHEET_ID/.test(y) && /vars\.OCH_ADMISSIONS_TAB/.test(y));
+  const stepCheck = y.split(/\n\s*- name: /).find((b) => /^Check the sheet/.test(b)) ?? "";
+  check("the check step can read what was stored last time (DATABASE_URL on it)", /DATABASE_URL: \$\{\{ secrets\.DATABASE_URL \}\}/.test(stepCheck));
 } else check("the workflow exists", false);
 for (const w of ["import-och", "import-offline-conversions", "publish-och-web-leads"]) {
   const p = new URL(`../.github/workflows/${w}.yml`, import.meta.url);
@@ -200,6 +245,7 @@ interface Fake {
   drive?: { status: number | null; trashed?: boolean; canEdit?: boolean; modifiedTime?: string } | "off";
   tokenError?: unknown;
   driveTokenError?: unknown;
+  stored?: Record<string, number> | null | "throws" | "absent";
 }
 function fake(f: Fake): { doors: Doors; urls: string[] } {
   const urls: string[] = [];
@@ -209,9 +255,10 @@ function fake(f: Fake): { doors: Doors; urls: string[] } {
       if (!scope.includes("drive") && f.tokenError) throw f.tokenError;
       return `tok:${scope.split("/").pop()}`;
     },
+    stored: f.stored === "absent" || f.stored === undefined ? undefined : async () => { if (f.stored === "throws") throw new Error("connection refused"); return f.stored as Record<string, number> | null; },
     get: async (url) => {
       urls.push(url);
-      if (url.startsWith(DRIVE)) {
+      if (url.startsWith(driveBase())) {
         if (f.drive === "off" || !f.drive) return { status: 403, body: { error: { message: "Google Drive API has not been used in project" } } };
         return { status: f.drive.status, body: f.drive.status === 200 ? { trashed: f.drive.trashed ?? false, modifiedTime: f.drive.modifiedTime ?? "2026-10-04T10:00:00.000Z", capabilities: { canEdit: f.drive.canEdit ?? true } } : null };
       }
@@ -235,7 +282,7 @@ async function glue() {
   check("glue: it found the newest admission date on the board", ok.facts.newestAdmissionYmd === "2026-10-02", ok.facts.newestAdmissionYmd);
   check("glue: it counted the rows it read", ok.facts.rowsRead === 4, ok.facts.rowsRead);
   check("glue: it asked for the sheet it was told to, by that id", ok.urls.every((u) => u.includes(SHEET)));
-  check("glue: it only ever calls Sheets and Drive", ok.urls.every((u) => u.startsWith(SHEETS) || u.startsWith(DRIVE)));
+  check("glue: it only ever calls Sheets and Drive", ok.urls.every((u) => u.startsWith(sheetsBase()) || u.startsWith(driveBase())));
   check("glue: the board is requested by a quoted tab name", ok.urls.some((u) => u.includes(encodeURIComponent("'Admission Board'!A1:Z"))), ok.urls.join("\n"));
   const text = [summaryLine(ok.findings, { tab: ok.tab, rows: ok.facts.rowsRead, newest: ok.facts.newestAdmissionYmd })].join(" ");
   check("glue: nothing about a patient reaches the output", !NAMES.some((n) => text.includes(n)) && !/513-555/.test(text) && !/1988/.test(text), text);
@@ -255,9 +302,9 @@ async function glue() {
   const bin = await drive({ drive: { ...driveOk, trashed: true } });
   check("glue: a trashed sheet is sheet_in_bin", lines(bin).includes("sheet_in_bin"), lines(bin).join());
   const noDrive = await drive({ drive: "off" });
-  check("glue: Drive being off is skipped, said, and blamed on nobody", noDrive.findings.length === 0 && noDrive.skipped.length === 1 && /Google Drive did not answer/.test(noDrive.skipped[0]!), `${lines(noDrive)} | ${noDrive.skipped}`);
+  check("glue: Drive being off is skipped, said, and blamed on nobody", noDrive.findings.length === 0 && noDrive.skipped.filter((x) => /Google Drive/.test(x)).length === 1, `${lines(noDrive)} | ${noDrive.skipped}`);
   const noDriveToken = await drive({ driveTokenError: new Error("insufficient scope") });
-  check("glue: Drive refusing its scope is skipped too, never a dead key", noDriveToken.findings.length === 0 && noDriveToken.skipped.length === 1, `${lines(noDriveToken)}`);
+  check("glue: Drive refusing its scope is skipped too, never a dead key", noDriveToken.findings.length === 0 && noDriveToken.skipped.filter((x) => /Google Drive/.test(x)).length === 1, `${lines(noDriveToken)}`);
   check("glue: read-only access is read_only", lines(await drive({ drive: { ...driveOk, canEdit: false } })).join() === "read_only");
 
   const amb = await drive({ drive: driveOk, tabs: ["Admissions Sep", "Admissions Oct"] });
@@ -278,6 +325,21 @@ async function glue() {
 
   const big = await drive({ drive: driveOk, rows: [HEAD, ...Array.from({ length: ROW_LIMIT }, () => ["Ada Brennan", "513-555-0100", "3/14/1988", "Admitted", "9/30/2026", "9/30/2026", "Google"])] });
   check("glue: a board that fills the read is board_too_long", lines(big).includes("board_too_long"), lines(big).join());
+
+  const dropped = await drive({ drive: driveOk, rows: board(["8/1/2026", "8/2/2026", "9/30/2026"]), stored: { "2026-08": 5, "2026-09": 1 } });
+  check("glue: August reading lower than stored is past_months_changed", lines(dropped).join() === "past_months_changed" && dropped.facts.board?.dropped?.[0]?.then === 5, `${lines(dropped)} ${JSON.stringify(dropped.facts.board)}`);
+  const same = await drive({ drive: driveOk, rows: board(["8/1/2026", "8/2/2026", "9/30/2026"]), stored: { "2026-08": 2, "2026-09": 1 } });
+  check("glue: figures that match what was stored say nothing", same.findings.length === 0, lines(same).join());
+  const noStore = await drive({ drive: driveOk, stored: null });
+  check("glue: nothing stored is skipped and said, never read as unchanged", noStore.findings.length === 0 && noStore.skipped.some((x) => /nothing stored/.test(x)) && noStore.facts.board?.dropped === null, JSON.stringify(noStore.skipped));
+  const boom = await drive({ drive: driveOk, stored: "throws" });
+  check("glue: a database that will not answer is skipped, never a finding", boom.findings.length === 0 && boom.skipped.some((x) => /nothing stored/.test(x)), `${lines(boom)} ${boom.skipped}`);
+  const noDb = await drive({ drive: driveOk });
+  check("glue: no database at all is skipped and said", noDb.skipped.some((x) => /no database/.test(x)), JSON.stringify(noDb.skipped));
+  const odd = await drive({ drive: driveOk, rows: [HEAD, ...board(["9/30/2026"]).slice(1), ["Ada Brennan", "513-555-0111", "3/14/1988", "Waitlisted", "9/30/2026", "9/30/2026", "Google"]] });
+  check("glue: a status word nobody has classified is status_unrecognized", lines(odd).join() === "status_unrecognized", lines(odd).join());
+  const guessed = await drive({ drive: driveOk, tabs: ["Intake", "Web Leads"] });
+  check("glue: no tab named like the board is tab_guessed and the first tab is read", lines(guessed).join() === "tab_guessed" && guessed.tab === "Intake", `${lines(guessed)} ${guessed.tab}`);
   check("glue: an empty tab is board_empty", lines(await drive({ drive: driveOk, rows: [HEAD] })).includes("board_empty"));
 }
 

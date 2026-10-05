@@ -1,9 +1,9 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
-import { JWT } from "google-auth-library";
 import pg from "pg";
 import { phone10 } from "./lead-keys.js";
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
+import { accessToken, sheetsBase, sheetsFetch } from "./och-google.js";
 
 /**
  * Writes OCH's website leads into a tab WE own inside their intake sheet —
@@ -32,20 +32,20 @@ function env(n: string): string { const v = process.env[n]; if (!v?.trim()) thro
 const et = (d: Date, opts: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", ...opts }).format(d);
 const fmtWhen = (d: Date) => et(d, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 
-let jwt: JWT | null = null;
 let saEmail = "";
+let cachedToken: string | null = null;
 async function token(): Promise<string> {
-  if (!jwt) {
+  if (!cachedToken) {
     const sa = JSON.parse(env("GOOGLE_SERVICE_ACCOUNT_JSON"));
     saEmail = sa.client_email;
-    jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
+    cachedToken = await accessToken(sa, "https://www.googleapis.com/auth/spreadsheets");
   }
-  const { token: t } = await jwt.getAccessToken();
-  if (!t) throw new Error("Could not mint a Sheets token.");
-  return t;
+  if (!cachedToken) throw new Error("Could not mint a Sheets token.");
+  return cachedToken;
 }
 async function sheets(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<any> {
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}${path}`, {
+  // Reads are retried on a 5xx or a dropped connection; a write is sent once.
+  const res = await sheetsFetch(`${sheetsBase()}/${SHEET_ID}${path}`, {
     method,
     headers: { Authorization: `Bearer ${await token()}`, "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),

@@ -34,6 +34,9 @@ jobs:
       - name: Check the sheet
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          # Read-only: lets the check compare the board with the figures the import
+          # stored last time. Without it the comparison is skipped and said so.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           OCH_SHEET_ID: ${{ vars.OCH_SHEET_ID }}
           OCH_ADMISSIONS_TAB: ${{ vars.OCH_ADMISSIONS_TAB }}
         run: |
@@ -49,6 +52,10 @@ jobs:
         if: always()
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Through an environment variable, never pasted into the script: the
+          # line carries a tab name OCH typed, and a quote or a backtick in it
+          # would otherwise be run as a command.
+          NOTE: ${{ steps.summary.outputs.summary }}
         # Success carries the ok/warn line as the note. Failure carries the run
         # log's last line, which is the stop line (it is printed last on purpose).
-        run: npm run heartbeat -- --job=och_sheet_check --status=${{ job.status }} --log=run.log --note="${{ steps.summary.outputs.summary }}"
+        run: npm run heartbeat -- --job=och_sheet_check --status=${{ job.status }} --log=run.log --note="$NOTE"

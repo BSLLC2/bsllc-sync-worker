@@ -42,7 +42,10 @@ export type TabHow =
   | "override"
   /** Exactly one tab looks like the board. */
   | "only_match"
-  /** Several look like the board and one is named "Admission Board". */
+  /** Several look like the board and one is named "Admission Board". Still
+   *  flagged: a look-alike appearing beside the board is the first sign OCH has
+   *  started a new tab, weeks before the board goes quiet. Naming the tab in
+   *  OCH_ADMISSIONS_TAB is the answer, and it clears the flag. */
   | "named_board"
   /** Several look like the board, none is named that: the first, flagged. */
   | "first_match"
@@ -80,7 +83,7 @@ export function pickAdmissionTab(tabs: readonly string[], preferred?: string | n
   if (candidates.length > 1) {
     const board = candidates.find((t) => same(t, BOARD_TAB_NAME));
     return board
-      ? { tab: board, how: "named_board", candidates, ambiguous: false }
+      ? { tab: board, how: "named_board", candidates, ambiguous: true }
       : { tab: candidates[0]!, how: "first_match", candidates, ambiguous: true };
   }
   return { tab: names[0]!, how: "first_tab", candidates, ambiguous: false };

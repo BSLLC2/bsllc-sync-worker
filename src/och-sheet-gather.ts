@@ -2,6 +2,7 @@ import { findHeaderRow, resolveAdmissionColumns } from "./och-sheet-columns.js";
 import { parseSheetDate, ymd } from "./lead-keys.js";
 import { pickAdmissionTab, boardRange, rowsCapped } from "./och-sheet-target.js";
 import { classifyTokenError, type CheckFacts } from "./och-sheet-check.js";
+import { readBoard, droppedMonths } from "./och-board-readings.js";
 
 /**
  * Gathers the facts och-sheet-check.ts decides on, through two injected doors:
@@ -13,12 +14,17 @@ import { classifyTokenError, type CheckFacts } from "./och-sheet-check.js";
  */
 export interface Doors {
   token(scope: string): Promise<string | null>;
+  /**
+   * Admissions per month as last stored, or null when there is nothing to
+   * compare with (no database, no earlier run). Optional: a check run without
+   * it simply does not compare.
+   */
+  stored?(): Promise<Record<string, number> | null>;
   /** `status` is null when the connection failed after retries. */
   get(url: string, token: string): Promise<{ status: number | null; body: any }>;
 }
 
-export const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
-export const DRIVE = "https://www.googleapis.com/drive/v3/files";
+import { sheetsBase, driveBase } from "./och-google.js";
 const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly";
 const down = (s: number | null) => s == null || s === 429 || s >= 500;
@@ -32,7 +38,7 @@ export async function gatherFacts(
     key: { state: "ok", serviceEmail: o.serviceEmail },
     sheet: null,
     drive: { checked: false, trashed: null, canEdit: null, modifiedYmd: null },
-    tabs: [], pick: null, columns: null, rowsRead: null, rowsCapped: false, newestAdmissionYmd: null,
+    tabs: [], pick: null, columns: null, rowsRead: null, rowsCapped: false, newestAdmissionYmd: null, board: null,
   };
   const skipped: string[] = [];
   let tab: string | null = null;
@@ -46,7 +52,7 @@ export async function gatherFacts(
   }
   if (!sheetsToken) return { facts, skipped, tab };
 
-  const meta = await doors.get(`${SHEETS}/${o.sheetId}?fields=sheets.properties.title`, sheetsToken);
+  const meta = await doors.get(`${sheetsBase()}/${o.sheetId}?fields=sheets.properties.title`, sheetsToken);
   facts.sheet = { status: meta.status, unavailable: down(meta.status) };
   if (facts.sheet.unavailable || meta.status !== 200) return { facts, skipped, tab };
 
@@ -56,7 +62,7 @@ export async function gatherFacts(
   const skipMsg = "the bin, edit-access and last-edit checks (Google Drive did not answer)";
   try {
     const dt = await doors.token(DRIVE_SCOPE);
-    const d = dt ? await doors.get(`${DRIVE}/${o.sheetId}?fields=trashed,modifiedTime,capabilities/canEdit&supportsAllDrives=true`, dt) : null;
+    const d = dt ? await doors.get(`${driveBase()}/${o.sheetId}?fields=trashed,modifiedTime,capabilities/canEdit&supportsAllDrives=true`, dt) : null;
     if (d && d.status === 200 && d.body) {
       facts.drive = {
         checked: true,
@@ -74,7 +80,7 @@ export async function gatherFacts(
   tab = pick.tab;
   if (!tab) return { facts, skipped, tab };
 
-  const vals = await doors.get(`${SHEETS}/${o.sheetId}/values/${encodeURIComponent(boardRange(tab))}?valueRenderOption=FORMATTED_VALUE`, sheetsToken);
+  const vals = await doors.get(`${sheetsBase()}/${o.sheetId}/values/${encodeURIComponent(boardRange(tab))}?valueRenderOption=FORMATTED_VALUE`, sheetsToken);
   if (vals.status !== 200) {
     // The tab read failing is a statement about access or Google, not about the tab.
     facts.sheet = { status: vals.status, unavailable: down(vals.status) };
@@ -98,6 +104,12 @@ export async function gatherFacts(
         }
       }
       facts.newestAdmissionYmd = newest;
+      const reading = readBoard(rows, cols, hIdx, o.today);
+      let stored: Record<string, number> | null = null;
+      try { stored = (await doors.stored?.()) ?? null; } catch { stored = null; }
+      if (!doors.stored) skipped.push("the comparison with the figures we stored last time (no database)");
+      else if (!stored) skipped.push("the comparison with the figures we stored last time (nothing stored to compare with)");
+      facts.board = { unrecognizedStatuses: reading.unrecognizedStatuses, dropped: stored ? droppedMonths(reading.admittedByMonth, stored, o.today) : null };
     } catch (e) {
       facts.columns = { ok: false, detail: (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200) };
     }

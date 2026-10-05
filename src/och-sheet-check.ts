@@ -29,11 +29,13 @@
  * birth: it sees counts, tab names and dates only.
  */
 import type { TabPick } from "./och-sheet-target.js";
+import type { Drop } from "./och-board-readings.js";
 
 export const CAUSE_CODES = [
   "key_missing", "key_unreadable", "key_rejected",
   "sheet_not_found", "access_removed", "sheet_in_bin", "read_only",
   "tab_missing", "tab_ambiguous", "headings", "board_too_long", "board_empty", "board_quiet",
+  "tab_guessed", "past_months_changed", "status_unrecognized",
   "google_unavailable", "check_crashed",
 ] as const;
 export type CauseCode = (typeof CAUSE_CODES)[number];
@@ -75,6 +77,13 @@ export interface CheckFacts {
   rowsCapped: boolean;
   /** Newest admission date on the tab that is not in the future. */
   newestAdmissionYmd: string | null;
+  /**
+   * What the numbers on the board say, read the way the import reads them.
+   * Null when the board could not be read. `dropped` is null when there was
+   * nothing stored to compare with (no database, or no earlier run): a null is
+   * unanswered, never "nothing changed".
+   */
+  board: { unrecognizedStatuses: number; dropped: Drop[] | null } | null;
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -203,6 +212,17 @@ export function checkOchSheet(f: CheckFacts): Finding[] {
     });
   }
 
+  if (pick.how === "first_tab" && f.tabs.length > 1) {
+    add({
+      code: "tab_guessed", level: "warn", who: "either",
+      line: `No tab is named like the Admission Board, so we are reading the first tab, "${pick.tab}". Tabs: ${tabList(f.tabs)}.`,
+      steps: [
+        "Open the sheet and check whether that tab is the board.",
+        "If it is not, put the board's exact tab name in the OCH_ADMISSIONS_TAB variable on bsllc-sync-worker.",
+      ],
+    });
+  }
+
   // 4. The headings.
   if (f.columns && !f.columns.ok) {
     add({
@@ -244,8 +264,36 @@ export function checkOchSheet(f: CheckFacts): Finding[] {
       });
     }
   }
+
+  // 7. What the numbers say. Counts only.
+  const b = f.board;
+  if (b && b.dropped && b.dropped.length > 0) {
+    const top = b.dropped[0]!;
+    const rest = b.dropped.length - 1;
+    add({
+      code: "past_months_changed", level: "warn", who: "client",
+      line: `${monthYear(top.ym)} now reads ${top.now} admissions on the board against ${top.then} when we last read it${rest > 0 ? `, and ${rest} other earlier month${rest === 1 ? "" : "s"} read lower too` : ""}.`,
+      steps: [
+        "Ask OCH whether rows were deleted or re-dated since the last read.",
+        "If it is a correction, nothing to do: the next import takes it. If rows were removed by mistake, ask them to restore the sheet from Version history.",
+      ],
+    });
+  }
+  if (b && b.unrecognizedStatuses > 0) {
+    const n = b.unrecognizedStatuses;
+    add({
+      code: "status_unrecognized", level: "warn", who: "us",
+      line: `${n} status word${n === 1 ? "" : "s"} on the board ${n === 1 ? "is" : "are"} not read as an admission or a denial, so those rows are not counted.`,
+      steps: [
+        "Run the OCH admissions import by hand and open its log. It lists each status word it did not recognise.",
+        "If one is a real admission, add it to the allowed words in src/lead-keys.ts.",
+      ],
+    });
+  }
   return out;
 }
+
+const monthYear = (ym: string) => `${MONTHS[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
 
 /**
  * What a failure to mint a token means. Google answers a deleted, disabled or

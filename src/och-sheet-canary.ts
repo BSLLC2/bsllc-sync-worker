@@ -1,7 +1,8 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import { createPrivateKey } from "node:crypto";
-import { JWT } from "google-auth-library";
+import pg from "pg";
+import { accessToken, sheetsFetch } from "./och-google.js";
 import { ochSheetId } from "./och-sheet-target.js";
 import { checkOchSheet, summaryLine, hasStop, type CheckFacts } from "./och-sheet-check.js";
 import { gatherFacts, type Doors } from "./och-sheet-gather.js";
@@ -25,7 +26,6 @@ import { gatherFacts, type Doors } from "./och-sheet-gather.js";
  */
 
 const businessDay = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type KeyFile = { client_email?: string; private_key?: string };
 function readKey(): { state: CheckFacts["key"]["state"]; json: KeyFile | null } {
@@ -43,20 +43,45 @@ function readKey(): { state: CheckFacts["key"]["state"]; json: KeyFile | null } 
 
 /** GET with three tries on a 429, a 5xx or a dropped connection. 4xx answers are answers. */
 async function getJson(url: string, token: string): Promise<{ status: number | null; body: any }> {
-  let last: number | null = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.status === 429 || res.status >= 500) { last = res.status; await sleep(3000 * (attempt + 1)); continue; }
-      let body: any = null;
-      try { body = await res.json(); } catch { /* an empty body is fine */ }
-      return { status: res.status, body };
-    } catch {
-      last = null;
-      await sleep(3000 * (attempt + 1));
-    }
+  try {
+    const res = await sheetsFetch(url, { headers: { Authorization: `Bearer ${token}` } }, 3);
+    let body: any = null;
+    try { body = await res.json(); } catch { /* an empty body is fine */ }
+    return { status: res.status, body };
+  } catch {
+    return { status: null, body: null };
   }
-  return { status: last, body: null };
+}
+
+const OCH_SLUG = "ohio-community-health-och";
+
+/**
+ * Admissions per month as the import last stored them, newest write per month.
+ * Read-only. Null when the client is not found or nothing was ever stored: a
+ * null is unanswered, never "no change".
+ */
+async function storedAdmissions(databaseUrl: string, slug: string): Promise<Record<string, number> | null> {
+  const c = new pg.Client({ connectionString: databaseUrl });
+  await c.connect();
+  try {
+    const slugify = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const clients = await c.query<{ id: string; name: string }>("SELECT id, name FROM clients");
+    const match = clients.rows.find((r) => slugify(r.name) === slug);
+    if (!match) return null;
+    const { rows } = await c.query<{ ym: string; v: number }>(
+      `SELECT DISTINCT ON (to_char(period_start AT TIME ZONE 'UTC', 'YYYY-MM'))
+              to_char(period_start AT TIME ZONE 'UTC', 'YYYY-MM') AS ym, value_numeric AS v
+         FROM metric_snapshots
+        WHERE client_id = $1 AND source = 'manual' AND metric_key = 'manual.admissions'
+          AND data_state = 'live' AND value_numeric IS NOT NULL AND period_start IS NOT NULL
+        ORDER BY to_char(period_start AT TIME ZONE 'UTC', 'YYYY-MM'), synced_at DESC`,
+      [match.id],
+    );
+    if (!rows.length) return null;
+    return Object.fromEntries(rows.map((r) => [r.ym, Number(r.v)]));
+  } finally {
+    await c.end();
+  }
 }
 
 async function main() {
@@ -70,11 +95,12 @@ async function main() {
     facts = {
       today, key: { state, serviceEmail: json?.client_email ?? null }, sheet: null,
       drive: { checked: false, trashed: null, canEdit: null, modifiedYmd: null },
-      tabs: [], pick: null, columns: null, rowsRead: null, rowsCapped: false, newestAdmissionYmd: null,
+      tabs: [], pick: null, columns: null, rowsRead: null, rowsCapped: false, newestAdmissionYmd: null, board: null,
     };
   } else {
     const doors: Doors = {
-      token: async (scope) => (await new JWT({ email: json.client_email, key: json.private_key, scopes: [scope] }).getAccessToken()).token ?? null,
+      token: (scope) => accessToken(json, scope),
+      stored: process.env.DATABASE_URL?.trim() ? () => storedAdmissions(process.env.DATABASE_URL!.trim(), OCH_SLUG) : undefined,
       get: getJson,
     };
     const g = await gatherFacts(doors, { sheetId: ochSheetId(), preferredTab: process.env.OCH_ADMISSIONS_TAB?.trim() || null, today, serviceEmail: json.client_email ?? null });
