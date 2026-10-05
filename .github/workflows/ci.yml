@@ -28,6 +28,8 @@ jobs:
         run: npm run verify:lead-cadence
       - name: Ads findings guard
         run: npm run verify-ads-findings
+      - name: Ads evidence-strength guard
+        run: npm run verify-ads-evidence-strength
       - name: Zero-vs-nothing guard
         run: npm run verify-zero-vs-nothing
       - name: Meta importer guard

@@ -44,6 +44,8 @@ import type { ClientServiceFacts } from "./service-relevance.js";
 import { trafficReadiness, CALL_TRACKING_PHONE_SHARE, type AdDestination, type PhoneDemandFacts } from "./traffic-readiness.js";
 import { rankImpact, leadValueCents, type RankReading } from "./impact-rank.js";
 import { bidTargetEvidenceLine, bidTargetReading, supersedeReason, targetIsAbsent } from "./bid-target.js";
+import { keywordZeroReading, targetReadiness, gapAgainstNoise, termHasEnoughClicks, MIN_CLICKS_FOR_WASTED_TERM } from "./evidence-strength.js";
+import { termCoversService } from "./service-relevance.js";
 
 /**
  * Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts.
@@ -65,7 +67,7 @@ import { bidTargetEvidenceLine, bidTargetReading, supersedeReason, targetIsAbsen
  * attached, and `sequenceFindings` orders groups on that instead of on size.
  * No existing threshold moved and no existing figure changed.
  */
-export const ADS_RULESET_VERSION = 7;
+export const ADS_RULESET_VERSION = 8;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -1417,6 +1419,10 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     const overTarget = cpaCents != null && target != null
       && cpaCents > Math.round(target.cents * THRESHOLDS.cpaOverTargetRatio);
     const underTarget = cpaCents != null && target != null && cpaCents <= target.cents;
+    // The gap against the noise on the figure it is measured from (ruleset 8).
+    const noise = cpaCents != null && target != null
+      ? gapAgainstNoise({ costPerConversionCents: cpaCents, targetCents: target.cents, conversions: c.conversions })
+      : null;
 
     const budgetLost = c.budgetLostShare ?? 0;
     if (budgetLost > THRESHOLDS.budgetLostShare) {
@@ -1519,6 +1525,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
               : costPerOutcomeReadable
                 ? `Under one conversion in the window, so no cost per conversion is worked out — dividing by a fraction turns a small spend into an enormous unit price`
                 : `No cost per conversion is worked out: ${trackingCaveat(tracking)}`,
+            ...(overTarget && noise?.line ? [noise.line] : []),
             ...targetLines,
           ],
         },
@@ -1666,7 +1673,15 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
      * about, and a row on every untargeted campaign in the book would be the
      * noise that teaches people to scroll past the queue.
      */
-    const bidTargetAbsent = overTarget && cpaCents != null && target != null && targetIsAbsent(bidTarget);
+    // WHETHER SETTING A TARGET IS WORTH SAYING YET (ruleset 8). A cost target
+    // needs about 15 conversions a month to have anything to steer on, and none
+    // at all where the conversion column is not trusted. Below that, the honest
+    // recommendation is to hold it, and `cpa_above_target` carries the sentence
+    // saying so instead of this row asking for a change that cannot work.
+    const targetFit = targetReadiness({ conversions: c.conversions, trackingTrusted: zeroMeansZero });
+    const bidTargetWanted = overTarget && cpaCents != null && target != null && targetIsAbsent(bidTarget);
+    const bidTargetAbsent = bidTargetWanted && targetFit.ready;
+    const bidTargetHeld = bidTargetWanted && !targetFit.ready ? targetFit.line : null;
 
     if (bidTargetAbsent && cpaCents != null && target != null) {
       const overCents = cpaCents - target.cents;
@@ -1674,7 +1689,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       out.push({
         entityType: "campaign", entityId: `${c.id}:bid_target`, entityName: c.name, campaignId: c.id,
         findingType: "bid_target_absent",
-        severity: cpaCents > target.cents * 2 ? "high" : "medium",
+        severity: noise?.withinNoise ? "low" : cpaCents > target.cents * 2 ? "high" : "medium",
         riskLevel: "medium",
         // A bid strategy change has no guarded path here — the adapter's own
         // capability block says so in as many words — so there is no payload
@@ -1697,6 +1712,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
             `${usd(c.costMicros)} · ${c.clicks} clicks · ${c.conversions.toFixed(1)} conversions (30 days)`,
             `$${(cpaCents / 100).toFixed(2)} a conversion, $${(overCents / 100).toFixed(2)} over`,
             bidTargetEvidenceLine(bidTarget),
+            ...(noise?.line ? [noise.line] : []),
             ...targetLines,
           ],
         },
@@ -1729,7 +1745,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       out.push({
         entityType: "campaign", entityId: `${c.id}:cost_target`, entityName: c.name, campaignId: c.id,
         findingType: "cpa_above_target",
-        severity: cpaCents > target.cents * 2 ? "high" : "medium",
+        severity: noise?.withinNoise ? "low" : cpaCents > target.cents * 2 ? "high" : "medium",
         riskLevel: "medium",
         // Bringing a cost per conversion down is search terms, landing pages,
         // bids and offer. Two of those have no guarded path here and the other
@@ -1755,6 +1771,8 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
           lines: [
             `${usd(c.costMicros)} · ${c.clicks} clicks · ${c.conversions.toFixed(1)} conversions (30 days)`,
             `$${(cpaCents / 100).toFixed(2)} a conversion, $${(overCents / 100).toFixed(2)} over`,
+            ...(noise?.line ? [noise.line] : []),
+            ...(bidTargetHeld ? [bidTargetHeld] : []),
             ...targetLines,
           ],
         },
@@ -1939,6 +1957,11 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
    * A campaign with no entry in a map that WAS read is a campaign that blocks
    * nothing, which is an answer and behaves exactly as it always has.
    */
+  const confirmedServices = input.services?.services ?? [];
+  const servicesConfirmed = input.services?.services != null;
+  const heldFewClicksBy = new Map<string, number>();
+  const heldCoreServiceBy = new Map<string, number>();
+  const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
   const negativesRead = input.negativesByCampaign;
   const negativesFor = (campaignId: string): ReadonlySet<string> =>
     negativesRead?.get(campaignId) ?? EMPTY_NEGATIVES;
@@ -1948,6 +1971,15 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     if (t.conversions > 0 || t.allConversions > 0) continue;
     if (t.costMicros < THRESHOLDS.searchTermWasteMicros) continue;
     if (alreadyNegated(t.term, negativesFor(t.campaignId))) continue;
+    // ONE CLICK IS NOT A PATTERN (ruleset 8). A term that cost $47 on a single
+    // click is one person, and nothing says it was wasted rather than unlucky.
+    // The person who ran the OCH account held exactly these back by hand.
+    if (!termHasEnoughClicks(t.clicks)) { bump(heldFewClicksBy, t.campaignName); continue; }
+    // A SEARCH THAT IS A CONFIRMED SERVICE IS NEVER PROPOSED FOR BLOCKING. Where
+    // somebody has confirmed what this client sells, a term carrying every word
+    // of one of those services is the business they want, not waste. Where no
+    // list is confirmed nothing can be said either way, and the row says so.
+    if (confirmedServices.some((svc) => termCoversService(t.term, svc.name))) { bump(heldCoreServiceBy, t.campaignName); continue; }
     // A protected term is one the client has told us never to block. Blocking a
     // partner or brand term by accident costs far more than the spend it saves,
     // so it is filtered here AND refused again by the apply path's guard.
@@ -1993,6 +2025,8 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
      * than the claim carrying a footnote.
      */
     const seen = visibility.get(first.campaignId) ?? null;
+    const heldFewClicks = heldFewClicksBy.get(campaignName) ?? 0;
+    const heldCoreService = heldCoreServiceBy.get(campaignName) ?? 0;
     out.push({
       entityType: "campaign", entityId: `${first.campaignId}:wasted_terms`, entityName: campaignName, campaignId: first.campaignId,
       findingType: "wasted_search_term",
@@ -2014,7 +2048,10 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         ...win,
         lines: sorted.slice(0, 12).map((t) => `${usd(t.costMicros)} · ${t.clicks} clicks · "${t.term}"`)
           .concat(sorted.length > 12 ? [`…and ${sorted.length - 12} more`] : [])
-          .concat(seen ? [seen.line] : []),
+          .concat(seen ? [seen.line] : [])
+          .concat(servicesConfirmed ? [] : [`This client's services are not confirmed, so none of these terms was checked against what they sell. Read each one before approving: a core search can look exactly like waste.`])
+          .concat(heldFewClicks > 0 ? [`${heldFewClicks} other ${heldFewClicks === 1 ? "term" : "terms"} with a single click ${heldFewClicks === 1 ? "is" : "are"} left out. One click is one person, so ${MIN_CLICKS_FOR_WASTED_TERM} is the least that counts, and that line is ours.`] : [])
+          .concat(heldCoreService > 0 ? [`${heldCoreService} other ${heldCoreService === 1 ? "term is" : "terms are"} left out because ${heldCoreService === 1 ? "it carries" : "they carry"} every word of a service this client confirmed selling.`] : []),
       },
       estImpactCents: microsToCents(recoverable),
       impactUnit: "usd_month",
@@ -2133,9 +2170,21 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   // Same reasoning as the search terms above: "this keyword converted nothing"
   // and "nothing on this account is recorded" are the same row, and one of them
   // is a reason to stop paying for a keyword the client's business depends on.
-  const deadKeywords = zeroMeansZero
+  // ENOUGH CLICKS TO CALL IT DEAD (ruleset 8). "No conversions" on a handful of
+  // clicks is what chance does to a good keyword, so a keyword is called dead
+  // only when, at its campaign's own conversion rate, this many clicks with
+  // nothing would happen by chance 5% of the time or less. `evidence-strength.ts`
+  // holds the arithmetic. A keyword held back for thin evidence comes back by
+  // itself the day its clicks pass the line.
+  const campaignById = new Map(input.campaigns.map((c) => [c.id, c] as const));
+  const zeroReadingOf = (k: KeywordRow) => {
+    const camp = campaignById.get(k.campaignId);
+    return keywordZeroReading({ clicks: k.clicks, campaignClicks: camp?.clicks ?? 0, campaignConversions: camp?.conversions ?? 0 });
+  };
+  const spendingNothing = zeroMeansZero
     ? input.keywords.filter((k) => k.conversions === 0 && k.costMicros >= THRESHOLDS.keywordWasteMicros)
     : [];
+  const deadKeywords = spendingNothing.filter((k) => zeroReadingOf(k).enough);
   const heldBackKeywords = zeroMeansZero
     ? []
     : input.keywords.filter((k) => k.conversions === 0 && k.costMicros >= THRESHOLDS.keywordWasteMicros);
@@ -2160,6 +2209,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
           `${k.matchType} match in "${k.campaignName}"${k.adGroupName ? ` › ${k.adGroupName}` : ""}`,
           k.finalUrls.length ? `Lands on ${k.finalUrls.join(", ")}` : "Inherits the ad's final URL",
           k.qualityScore ? `Quality score ${k.qualityScore}` : "No quality score reported",
+          zeroReadingOf(k).line,
         ],
       },
       estImpactCents: microsToCents(Math.round(monthly * RECOVERY_RATE)),
