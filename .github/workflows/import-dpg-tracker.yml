@@ -1,0 +1,100 @@
+name: Import DPG tracker
+
+# Reads the "DPG — Lead to Closed-Won Tracker" Google Sheet (read-only, the shared
+# service account) and plants Diesel Power Group's attributed closed deals as
+# dashboard snapshots via `npm run sync`: won revenue by the month each deal
+# CLOSED, a deal count, and a summary (what was read, when, what is pending).
+# It stands in for DPG's Dynamics 365 origin field until that is fixed.
+#
+# The sheet is hand-built by BS LLC (DPG's Odoo sales matched to our lead log).
+# It is never written to. A heading it cannot find, a sheet it cannot open or a
+# tab that is gone is a STOP with a named cause: nothing is written, the last
+# good figures stand, and the heartbeat note says why.
+#
+# One-time setup, owner:
+#   1. Share the sheet with the service account's email as Viewer
+#      (npm run show-service-account-email prints it).
+#   2. Run this workflow once by hand ("Run workflow", dry_run true, then false).
+# To point it somewhere else, set the repository VARIABLES (not secrets)
+# DPG_TRACKER_SHEET_ID, DPG_TRACKER_TAB_GID, DPG_TRACKER_TAB and
+# DPG_BILLING_WINDOW_START. Blank means the defaults in src/dpg-tracker.ts.
+on:
+  schedule:
+    - cron: "20 8 * * *" # 08:20 UTC daily, after the OCH jobs
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Read and print only, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: import-dpg-tracker
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Read the tracker
+        working-directory: worker
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+          DPG_TRACKER_SHEET_ID: ${{ vars.DPG_TRACKER_SHEET_ID }}
+          DPG_TRACKER_TAB_GID: ${{ vars.DPG_TRACKER_TAB_GID }}
+          DPG_TRACKER_TAB: ${{ vars.DPG_TRACKER_TAB }}
+          DPG_BILLING_WINDOW_START: ${{ vars.DPG_BILLING_WINDOW_START }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          if [ "$DRY_RUN" = "true" ]; then ARGS="--dry-run"; fi
+          set -o pipefail
+          npm run import-dpg-tracker -- $ARGS 2>&1 | tee run.log
+
+      - name: Summary line
+        id: summary
+        if: always()
+        working-directory: worker
+        run: |
+          LINE="$(grep '^DPG-SHEET ' run.log | tail -1 | cut -c1-290)"
+          echo "summary=${LINE}" >> "$GITHUB_OUTPUT"
+
+      - name: Heartbeat
+        if: always()
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Through an environment variable, never pasted into the script: the
+          # line can carry a tab name somebody typed, and a quote or a backtick
+          # in it would otherwise be run as a command.
+          NOTE: ${{ steps.summary.outputs.summary }}
+        # Success carries the ok/warn line as the note. Failure carries the run
+        # log's last line, which is the stop line (it is printed last on purpose).
+        run: npm run heartbeat -- --job=import_dpg_tracker --status=${{ job.status }} --log=run.log --note="$NOTE"

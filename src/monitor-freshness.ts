@@ -29,7 +29,7 @@ const DASH = (process.env.DASHBOARD_URL || "https://bsllc-account-health.vercel.
 const SLA_FALLBACK: Record<string, number> = {
   google_ads: 36, ga4: 36, gsc: 36, hubspot: 36, d365: 36, seo: 252, aeo: 252, authority: 252,
   email_import: 3, db_backup: 36, mrr_snapshot: 1116, review_email: 2, comment_notify: 2, seo_import: 252, aeo_import: 252, webops_import: 36,
-  domain_authority_import: 252, import_d365: 36, import_ga4: 36, import_gsc: 36, import_hubspot: 36, import_hubspot_metrics: 36, import_och: 36,
+  domain_authority_import: 252, import_d365: 36, import_ga4: 36, import_gsc: 36, import_hubspot: 36, import_hubspot_metrics: 36, import_och: 36, import_dpg_tracker: 36,
   // Meta paid social. Daily, like the other metric importers; the real value
   // comes from import-meta.yml's own cron via job-cadence.ts.
   import_meta: 36,
@@ -50,7 +50,7 @@ const LABEL: Record<string, string> = {
   qbo_financials: "QBO financials", qbo_invoice: "QBO invoice on signature", qbo_invoices_sync: "QBO invoices sync", qbo_items_sync: "QBO catalog sync", qbo_send_invoice: "QBO send invoice",
   research: "Research queue", send_sms: "Client SMS", slack_post: "Slack CRM posts", task_digest: "Task digest", team_notify: "Team notifications", push_notify: "Push notifications", outbound_email: "Outbound email", morning_audit: "Morning audit",
   email_import: "Email import", db_backup: "DB backup", mrr_snapshot: "MRR snapshot", review_email: "Review emails", comment_notify: "Comment alerts", d365_import: "D365 import", incremental_ads: "Ads sync", seo_import: "SEO import", aeo_import: "AEO import", webops_import: "WebOps import",
-  import_d365: "D365 import", import_ga4: "GA4 import", import_gsc: "Search Console import", import_hubspot: "HubSpot import", import_och: "OCH admissions import",
+  import_d365: "D365 import", import_ga4: "GA4 import", import_gsc: "Search Console import", import_hubspot: "HubSpot import", import_och: "OCH admissions import", import_dpg_tracker: "DPG tracker import",
   incremental_sync: "Google Ads sync", snapshot_plans: "Plan snapshots", offline_conversions: "Offline conversions (close-the-loop)",
   publish_och_web_leads: "OCH web-leads tab",
   backfill_client_since: "Contract-start backfill",

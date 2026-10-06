@@ -50,6 +50,8 @@ jobs:
         run: npm run verify-och-sheet
       - name: OCH sheet connection, end to end against a pretend Google
         run: npm run verify-och-e2e
+      - name: DPG tracker import, against a pretend Google
+        run: npm run verify-dpg-tracker
       - name: Reply-To header guard
         run: npm run verify-reply-to
       - name: GA4 per-channel import guard

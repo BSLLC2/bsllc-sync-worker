@@ -1,0 +1,24 @@
+name: One-off — record the evidence note for DPG's closed-deal tracker
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true = print only"
+        required: false
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: npm run oneoff-seed-dpg-tracker -- --dry-run="$DRY_RUN"

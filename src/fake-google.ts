@@ -14,7 +14,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
-export interface FakeTab { name: string; rows: string[][] }
+export interface FakeTab { name: string; rows: string[][]; /** The tab's sheetId (its gid). Optional; the OCH jobs never ask for it. */ gid?: number }
 export interface FakeState {
   sheetId: string;
   tokenMode: "ok" | "revoked" | "down";
@@ -95,7 +95,7 @@ export class FakeGoogle {
         if (!this.state.drive.canEdit) return this.send(res, 403, { error: { code: 403, message: "The caller does not have permission" } });
         return this.send(res, 200, {});
       }
-      if (path === sheetPrefix) return this.send(res, 200, { sheets: this.state.tabs.map((t) => ({ properties: { title: t.name } })) });
+      if (path === sheetPrefix) return this.send(res, 200, { sheets: this.state.tabs.map((t) => ({ properties: t.gid === undefined ? { title: t.name } : { sheetId: t.gid, title: t.name } })) });
       const m = path.match(new RegExp(`^${sheetPrefix}/values/(.+)$`));
       if (m) {
         const range = m[1]!;
