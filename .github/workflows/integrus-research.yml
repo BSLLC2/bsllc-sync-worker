@@ -1,0 +1,33 @@
+name: Integrus research pull (READ ONLY)
+
+# DataForSEO-only research for the Integrus strategy deck. PART a = baseline,
+# keyword clusters, competitor gap, referral map. PART b = AI answers (AEO),
+# backlink intersection, directory and trade-outlet checks. No writes.
+on:
+  workflow_dispatch:
+    inputs:
+      part:
+        description: "a or b"
+        required: true
+        default: "a"
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run research
+        env:
+          PART: ${{ inputs.part }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run integrus-research 2>&1 | tee integrus-research-${{ inputs.part }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integrus-research-${{ inputs.part }}
+          path: integrus-research-${{ inputs.part }}.txt

@@ -201,7 +201,8 @@
     "integrus-strategy-check-2": "tsx src/integrus-strategy-check-2.ts",
     "verify-qbo-reconcile": "tsx src/verify-qbo-reconcile.ts",
     "verify-alert-reminder": "tsx src/verify-alert-reminder.ts",
-    "verify-reply-to": "tsx src/verify-reply-to.ts"
+    "verify-reply-to": "tsx src/verify-reply-to.ts",
+    "integrus-research": "tsx src/integrus-research.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
