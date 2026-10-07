@@ -4,12 +4,13 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { GoogleAdsApi } from "google-ads-api";
 import { loadConfig, digitsOnly } from "./config.js";
-import { evaluate, platformSignals, ADS_RULESET_VERSION, type DerivedFinding } from "./ads/rules.js";
+import { evaluateAudit, platformSignals, ADS_RULESET_VERSION, type DerivedFinding } from "./ads/rules.js";
+import { accountingLines } from "./ads/run-accounting.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import {
-  upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, protectedPatternsFor, clientEconomicsFor,
+  upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, protectedPatternsFor, brandPatternsFor, clientEconomicsFor,
   outcomeFeedFactsFor, clientServicesFor, researchFactsFor, phoneDemandFor, seoTargetsFor,
 } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
@@ -116,7 +117,11 @@ async function auditOne(
   // the gap reading says which — they lead to different acts.
   const seoTargets = await seoTargetsFor(c, clientId);
   const phone = await phoneDemandFor(c, slugify(clientName), start, end);
-  const input = { ...platformInput, economics, outcomes, services, research, seoTargets, phone };
+  // The client's own name, for the landing-page check only: the front page is
+  // right for a search for the company. Null where unread, and then no keyword
+  // is let through as a brand.
+  const brandPatterns = await brandPatternsFor(c, clientId);
+  const input = { ...platformInput, economics, outcomes, services, research, seoTargets, phone, brandPatterns };
   console.log(
     `  goal: ${economics.cplCeilingCents != null ? `$${(economics.cplCeilingCents / 100).toFixed(2)} cost-per-lead ceiling (${economics.cplCeilingMonth})` : "no cost-per-lead ceiling recorded"}`
     + ` · ${economics.customerValueCents != null ? `$${(economics.customerValueCents / 100).toFixed(2)} a customer` : "no customer value recorded"}`
@@ -198,7 +203,11 @@ async function auditOne(
       : `${phone.phoneLeads}/${phone.totalLeads} by phone`}`,
   );
 
-  const rulesFindings = evaluate(input);
+  const { findings: rulesFindings, accounting } = evaluateAudit(input);
+  // WHAT WAS DROPPED OR ROUTED, BY NAME. A finding that stops appearing because
+  // the account already handled it is the point; one that stops appearing with
+  // nobody told is the failure. Every drop is printed here.
+  for (const l of accountingLines(accounting)) console.log(`  ${l}`);
   // Then, and only then, the language seam — which today is identity.
   const { findings, engine } = refineNarrative(rulesFindings);
   console.log(`  rules v${ADS_RULESET_VERSION} produced ${findings.length} finding(s) · narrative engine: ${engine}`);

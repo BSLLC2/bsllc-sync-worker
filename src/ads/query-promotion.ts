@@ -44,6 +44,8 @@
  * against, and none of them is mechanical. `applicability: "vendor"`.
  */
 
+import { firstBlockingNegative, rulesForCampaign, type NegativeRule, type NegativeRuleFacts } from "./negative-match.js";
+
 /** One query as the search-terms report gave it, over the long window. */
 export interface PromotionQueryInput {
   term: string;
@@ -114,6 +116,15 @@ export interface ExistingKeyword {
    * has measured.
    */
   qualityScore?: number | null;
+  /** The campaign it sits in, by id. Absent where the platform did not give one. */
+  campaignId?: string | null;
+  /**
+   * The keyword's OWN landing page(s), verbatim. Empty = it carries none and
+   * inherits its ad's, which is a real answer. NULL or absent = not read, which
+   * is a different one: the landing-page reading never treats it as a page of
+   * its own.
+   */
+  finalUrls?: string[] | null;
 }
 
 /** Whether a keyword can be served today, read from the three statuses that
@@ -216,7 +227,10 @@ export type PromotionSkipReason =
   /** Under the conversion floor, the spend floor, or both. */
   | "below_floor"
   /** A pattern the client told us to leave alone. */
-  | "protected";
+  | "protected"
+  /** A negative keyword already blocks it, so making it a keyword would put a
+   *  recommendation in front of somebody that the account already refuses. */
+  | "blocked_by_negative";
 
 /**
  * A converting query whose keyword exists and cannot serve.
@@ -236,6 +250,22 @@ export interface DormantMatch {
   where: string;
   /** Which level is switched off, in words. */
   because: string;
+}
+
+/**
+ * A converting query this reading did NOT recommend, because a negative keyword
+ * already blocks it. Kept as a record rather than a count so the run can name
+ * the negative and the figures: a recommendation that disappears with nobody
+ * told is the failure this module exists against.
+ */
+export interface BlockedPromotion {
+  term: string;
+  campaignId: string;
+  campaignName: string;
+  conversions: number;
+  costMicros: number;
+  /** The rule that blocks it, so a sentence can name it. */
+  by: NegativeRule;
 }
 
 export interface PromotedQuery {
@@ -296,6 +326,16 @@ export interface PromotionReading {
    * claims it knows which of the two it was.
    */
   alreadyStateUnread: number;
+  /** Converting queries a negative already blocks, each with the rule that does. */
+  blocked: BlockedPromotion[];
+  /**
+   * False where the campaign-level negatives could not be read, so the check
+   * above did not run. Said on the row: a query a negative blocks can still be
+   * listed, and the row must not read as though it was checked.
+   */
+  negativesRead: boolean;
+  /** Negative sources (shared lists, account level) this run could not read. */
+  negativeSourcesUnread: string[];
   /** One clause naming why nothing was produced. Null where something was. */
   silence: string | null;
 }
@@ -335,6 +375,12 @@ export interface PromotionInput {
   columnCountsOutcomes: "yes" | "no" | "unknown";
   /** Lowercased patterns the client has told us never to touch. */
   protectedPatterns: string[];
+  /**
+   * Every negative keyword the account holds, with its match type, so a query
+   * one of them blocks is not recommended as a keyword. Absent or NULL
+   * `byCampaign` = not read, and nothing is dropped on a list nobody saw.
+   */
+  negatives?: NegativeRuleFacts | null;
 }
 
 /**
@@ -354,9 +400,12 @@ export interface PromotionInput {
  * difference is visible on the row.
  */
 export function queryPromotions(i: PromotionInput): PromotionReading {
+  const negativesRead = Boolean(i.negatives && i.negatives.byCampaign != null);
+  const negativeSourcesUnread = i.negatives ? [...i.negatives.unread] : [];
   const empty = {
     byCampaign: [] as CampaignPromotions[],
     alreadyKeywords: 0, alreadyServing: 0, dormant: [] as DormantMatch[], alreadyStateUnread: 0,
+    blocked: [] as BlockedPromotion[], negativesRead, negativeSourcesUnread,
   };
 
   // A conversion on a column that counts page views is a page view. Bidding
@@ -388,6 +437,7 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
   let alreadyServing = 0;
   let alreadyStateUnread = 0;
   const dormant: DormantMatch[] = [];
+  const blocked: BlockedPromotion[] = [];
   const byCampaign = new Map<string, PromotedQuery[]>();
   for (const t of i.terms) {
     if (t.conversions < PROMOTE_MIN_CONVERSIONS) continue;
@@ -397,6 +447,19 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
     // inside that instruction even though it is not the blocking the
     // protection was written against.
     if (isProtected(t.term)) continue;
+    // A NEGATIVE ALREADY BLOCKS IT. Checked against the campaign's own
+    // negatives, the shared lists attached to it and the account's, with each
+    // rule's own match type. Where the negatives could not be read nothing is
+    // dropped: the row then says so instead of reading as though it checked.
+    const rules = rulesForCampaign(i.negatives, t.campaignId);
+    const blocker = rules ? firstBlockingNegative(t.term, rules) : null;
+    if (blocker) {
+      blocked.push({
+        term: t.term, campaignId: t.campaignId, campaignName: t.campaignName,
+        conversions: t.conversions, costMicros: t.costMicros, by: blocker,
+      });
+      continue;
+    }
     // The account already holds this text as a keyword. Refused, whatever its
     // statuses say — proposing a second copy is the one mistake this rule must
     // not make, and a keyword in a paused ad group is still a keyword. Which
@@ -468,8 +531,10 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
 
   // Dearest first, so the sentence leads on the biggest one.
   dormant.sort((a, b) => b.costMicros - a.costMicros || a.term.localeCompare(b.term));
+  blocked.sort((a, b) => b.costMicros - a.costMicros || a.term.localeCompare(b.term));
 
   return {
+    blocked, negativesRead, negativeSourcesUnread,
     verdict: out.length ? "found" : "none",
     byCampaign: out,
     alreadyKeywords, alreadyServing, dormant, alreadyStateUnread,
@@ -481,7 +546,9 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
       ? null
       : dormant.length
         ? `Nothing here is worth adding as a new keyword. ${dormantLine(dormant)}`
-        : "Every query over the floors is already in the account as a keyword that can serve, so there is nothing to add.",
+        : blocked.length
+          ? `Every query over the floors is already a keyword that can serve or is blocked by a negative the account already holds, so there is nothing to add.`
+          : "Every query over the floors is already in the account as a keyword that can serve, so there is nothing to add.",
   };
 }
 

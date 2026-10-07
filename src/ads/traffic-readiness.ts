@@ -36,6 +36,7 @@
  */
 
 import type { ConversionActionRow } from "./rules.js";
+import { negTokens } from "./negative-match.js";
 
 /** One enabled ad and where it sends a click. */
 export interface AdDestination {
@@ -46,6 +47,24 @@ export interface AdDestination {
    *  does not pull final URLs leaves it null and the reading says so rather
    *  than calling the account's landing pages fine. */
   finalUrl: string | null;
+}
+
+/**
+ * One keyword the account can serve, and where a click on IT lands.
+ *
+ * An ad's final URL is only where a click lands when the keyword that matched
+ * carries no page of its own. A keyword with its own Final URL overrides the ad,
+ * so judging a campaign by its ads alone called a keyword that goes to
+ * /locations/cincinnati-ohio/ a front-page landing.
+ */
+export interface KeywordLanding {
+  campaignId: string;
+  text: string;
+  /** Its own landing page(s), verbatim. Empty or null = it carries none of its
+   *  own, which this reading treats the same way: it inherits its ad's. */
+  finalUrls: string[] | null;
+  /** Whether it can serve today. A keyword that cannot is not a landing. */
+  canServe: "yes" | "no" | "unknown";
 }
 
 /** What the client's own lead record says about how enquiries arrive. */
@@ -72,6 +91,26 @@ export interface ReadinessCheck {
   /** Money a month riding on the problem, in cents. Null where there is none
    *  to name — never nought, which reads as "this costs nothing". */
   atStakeCents: number | null;
+  /**
+   * HOW THE CAMPAIGN'S KEYWORDS LAND, where they were read. Present on a
+   * landing-page check whose ads all point at the front page, so the run can
+   * say how many keywords were let through and why — a row that clears with
+   * nobody told is the failure this exists against.
+   */
+  keywordLanding?: KeywordLandingCount | null;
+}
+
+export interface KeywordLandingCount {
+  /** Keywords that can serve in this campaign. */
+  keywords: number;
+  /** …with a page of their own that is not the front page. */
+  ownPage: number;
+  /** …that are the client's own name or an alias, landing on the front page. */
+  brand: number;
+  /** …that land on the front page and are neither. */
+  onFront: number;
+  /** Keywords whose serving state could not be read, counted as landing on the front page. */
+  unreadState: number;
 }
 
 /**
@@ -121,6 +160,75 @@ export function isSiteRoot(url: string): boolean {
   }
 }
 
+/**
+ * Is this keyword the client's own name?
+ *
+ * The brand's words appear in the keyword as a contiguous run of whole words,
+ * so "ohio community health" matches "ohio community health cincinnati" and
+ * "ohiocommunityhealth" matches itself. Lowercased, punctuation folded, no
+ * stemming: a keyword that merely shares a letter run with the brand is not
+ * the brand, and a wrong yes here drops a finding.
+ */
+export function isBrandKeyword(text: string, brandPatterns: readonly string[]): boolean {
+  const q = negTokens(text);
+  if (q.length === 0) return false;
+  for (const raw of brandPatterns) {
+    const n = negTokens(raw);
+    if (n.length === 0) continue;
+    for (let i = 0; i + n.length <= q.length; i++) {
+      let hit = true;
+      for (let j = 0; j < n.length; j++) if (q[i + j] !== n[j]) { hit = false; break; }
+      if (hit) return true;
+    }
+  }
+  return false;
+}
+
+/** Sort one campaign's serving keywords into where their clicks land. */
+export function classifyKeywordLanding(
+  keywords: readonly KeywordLanding[],
+  brandPatterns: readonly string[] | null | undefined,
+): KeywordLandingCount {
+  let ownPage = 0, brand = 0, onFront = 0, unreadState = 0, total = 0;
+  for (const k of keywords) {
+    if (k.canServe === "no") continue;
+    total += 1;
+    if (k.canServe === "unknown") { unreadState += 1; onFront += 1; continue; }
+    const urls = (k.finalUrls ?? []).filter((u) => String(u ?? "").trim());
+    if (urls.length > 0 && urls.some((u) => !isSiteRoot(u))) { ownPage += 1; continue; }
+    if (brandPatterns && isBrandKeyword(k.text, brandPatterns)) { brand += 1; continue; }
+    onFront += 1;
+  }
+  return { keywords: total, ownPage, brand, onFront, unreadState };
+}
+
+// ── Sentences, every one in this block ─────────────────────────────────────
+
+/** "6 keywords serve here: 3 have a page of their own, 2 are the client's own name, 1 lands on the front page." */
+export function keywordLandingLine(l: KeywordLandingCount): string {
+  const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+  const parts = [
+    `${l.ownPage} ${l.ownPage === 1 ? "has" : "have"} a page of ${l.ownPage === 1 ? "its" : "their"} own`,
+    `${l.brand} ${l.brand === 1 ? "is" : "are"} the client's own name (the front page is right for ${l.brand === 1 ? "it" : "those"})`,
+    `${l.onFront} ${l.onFront === 1 ? "lands" : "land"} on the front page`,
+  ];
+  const unread = l.unreadState > 0 ? `, and ${n(l.unreadState, "keyword's", "keywords'")} serving state could not be read so ${l.unreadState === 1 ? "it is" : "they are"} counted as landing there` : "";
+  return `${n(l.keywords, "keyword serves", "keywords serve")} in this campaign: ${parts.join(", ")}${unread}.`;
+}
+
+/** The money on the row is the campaign's, which holds keywords that land elsewhere. */
+export const KEYWORD_LANDING_UPPER_BOUND =
+  "The spend above is the whole campaign's, so it is an upper bound: the keywords that land on their own page are inside it.";
+/** The keyword list could not be read, so the row is judged on the ads alone. */
+export const KEYWORD_PAGES_NOT_READ =
+  "Which keywords carry a page of their own could not be read this run, so this is judged on the ads alone.";
+/** No serving keywords in the campaign to count. */
+export const KEYWORDS_NONE_IN_CAMPAIGN =
+  "No keyword in this campaign could be matched to its ads here, so this is judged on the ads alone.";
+/** Brand patterns absent. */
+export const BRAND_NOT_READ =
+  "The client's own name was not available to this run, so a keyword that is the brand is counted as landing on the front page.";
+
 export interface ReadinessInput {
   campaigns: Array<{ id: string; name: string; costMicros: number; channelType: string | null }>;
   /** Enabled ads and where they send a click. Empty = none were read. */
@@ -135,6 +243,20 @@ export interface ReadinessInput {
   /** Days the evidence window covers, so a 90-day spend can be said as a
    *  monthly one without a second opinion about what a month is. */
   windowDays: number;
+  /**
+   * Every keyword the account holds, with its own landing page. NULL OR ABSENT
+   * = not read, and the check then behaves exactly as it did before keywords
+   * were consulted: judged on the ads alone, and saying so.
+   */
+  keywords?: KeywordLanding[] | null;
+  /**
+   * The client's own name, aliases and domain label, lowercased — the part of
+   * the protected list the CLIENT did not have to type. A keyword that is
+   * one of these landing on the front page is the correct landing, because the
+   * front page is what somebody searching for the company is looking for.
+   * NULL OR ABSENT = not read, and no keyword is let through as a brand.
+   */
+  brandPatterns?: string[] | null;
 }
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
@@ -177,6 +299,26 @@ export function trafficReadiness(i: ReadinessInput): ReadinessCheck[] {
     const roots = read.filter((a) => isSiteRoot(a.finalUrl as string));
     if (roots.length === read.length) {
       const urls = Array.from(new Set(read.map((a) => a.finalUrl as string))).slice(0, 3);
+      // WHERE A CLICK ACTUALLY LANDS IS DECIDED BY THE KEYWORD FIRST. Every ad
+      // here points at the front page, but a keyword with a Final URL of its
+      // own overrides its ad, and a keyword that is the client's own name is
+      // right to land on the front page. Both are counted, and only what is
+      // left lands somewhere that cannot answer what was searched.
+      const kwHere = i.keywords == null ? null : i.keywords.filter((k) => k.campaignId === c.id);
+      const landing = kwHere && kwHere.length > 0 ? classifyKeywordLanding(kwHere, i.brandPatterns) : null;
+      if (landing && landing.onFront === 0) {
+        out.push({
+          key: "generic_landing_page", state: "clear",
+          campaignId: c.id, campaignName: c.name,
+          title: `"${c.name}" sends its clicks to real pages, or to the front page where that is right`,
+          summary: "",
+          lines: [keywordLandingLine(landing), "The ads all point at the front page, and every keyword that can serve either carries a page of its own or is the client's own name."],
+          metrics: { ads: read.length, rootAds: roots.length, costMicros: c.costMicros, keywords: landing.keywords, keywordsOwnPage: landing.ownPage, keywordsBrand: landing.brand, keywordsOnFront: 0 },
+          atStakeCents: null,
+          keywordLanding: landing,
+        });
+        continue;
+      }
       out.push({
         key: "generic_landing_page", state: "open",
         campaignId: c.id, campaignName: c.name,
@@ -190,9 +332,17 @@ export function trafficReadiness(i: ReadinessInput): ReadinessCheck[] {
           ...urls.map((u) => `sends to ${u}`),
           `${usd(c.costMicros)} spent over the window behind them`,
           ...(unread > 0 ? [`${unread} further ad(s) had no final URL to read`] : []),
+          ...(landing ? [keywordLandingLine(landing), KEYWORD_LANDING_UPPER_BOUND] : []),
+          ...(!landing && i.keywords != null ? [KEYWORDS_NONE_IN_CAMPAIGN] : []),
+          ...(i.keywords == null ? [KEYWORD_PAGES_NOT_READ] : []),
+          ...(landing && i.brandPatterns == null ? [BRAND_NOT_READ] : []),
         ],
-        metrics: { ads: read.length, rootAds: roots.length, costMicros: c.costMicros },
+        metrics: {
+          ads: read.length, rootAds: roots.length, costMicros: c.costMicros,
+          ...(landing ? { keywords: landing.keywords, keywordsOwnPage: landing.ownPage, keywordsBrand: landing.brand, keywordsOnFront: landing.onFront } : {}),
+        },
         atStakeCents: monthly(c.costMicros),
+        keywordLanding: landing,
       });
     } else {
       out.push({

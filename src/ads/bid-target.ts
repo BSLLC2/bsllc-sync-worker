@@ -215,3 +215,25 @@ export function supersedeReason(campaignName: string): string {
   return `Replaced by a sharper reading of the same campaign: "${campaignName}" is over its cost target AND its bidding carries no cost target, `
     + `so the cost is the consequence rather than the fault. The cost figures are on the new row.`;
 }
+
+// ── What to do instead, where a target is held back ─────────────────────────
+/**
+ * `targetReadiness` already refuses to recommend a cost target below about 15
+ * conversions a month and says it is held back. That says what NOT to do and
+ * leaves the reader to work out what to do instead. On a campaign that bids
+ * manually the answer is "stay manual", and a person reading the row should not
+ * have to infer it.
+ *
+ * It follows the reading's own kind, so a campaign on an automated strategy is
+ * not told to "stay manual" when it is not manual. Nothing here changes whether
+ * the target row is raised: that is `targetReadiness`, untouched.
+ */
+export function stayPutLine(kind: BidTargetKind, reason: "conversions" | "tracking"): string | null {
+  const until = reason === "tracking"
+    ? "until conversion tracking can be trusted"
+    : "until the campaign has the conversions for a target to steer on";
+  if (kind === "manual") return `Stay manual ${until}. Moving it to a strategy that bids toward a cost is not recommended yet.`;
+  if (kind === "no_target_on_strategy") return `Leave the bidding as it is, with no cost target set, ${until}.`;
+  if (kind === "other_goal") return `Leave the bidding goal as it is ${until}.`;
+  return null;
+}

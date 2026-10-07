@@ -310,12 +310,37 @@ export async function mappedAccounts(
  * again at mutation time — but catching it at detection means the finding never
  * reaches a human's screen looking like a good idea.
  */
-export async function protectedPatternsFor(c: pg.Client, clientId: string): Promise<string[]> {
+/**
+ * The client's own name, aliases and domain label, lowercased, and NOTHING the
+ * client had to type. `protectedPatternsFor` below is this list plus the terms
+ * collected from the client (partners, sister brands, a competitor term they
+ * bid on deliberately). The landing-page check needs only the first half: the
+ * front page is right for a search for the company, and is not automatically
+ * right for a search for a partner. NULL where the client could not be read —
+ * unanswered, never an empty brand.
+ */
+export async function brandPatternsFor(c: pg.Client, clientId: string): Promise<string[] | null> {
+  try {
+    return await derivedBrandPatternsFor(c, clientId);
+  } catch {
+    return null;
+  }
+}
+
+/** THROWS on a failed read, unlike `brandPatternsFor`. The protected-term guard
+ *  must never lose the client's own name to a swallowed error: a protected list
+ *  that silently comes back empty is a guard that is off. */
+async function derivedBrandPatternsFor(c: pg.Client, clientId: string): Promise<string[] | null> {
   const { rows } = await c.query<{ name: string; aliases: string | null; seo_domain: string | null }>(
     `SELECT name, aliases, seo_domain FROM clients WHERE id = $1`, [clientId],
   );
   const r = rows[0];
-  if (!r) return [];
+  if (!r) return null;
+  return derivedBrandPatterns(r);
+}
+
+/** Pure. A client row in, the brand patterns out. Exported so a guard can drive it. */
+export function derivedBrandPatterns(r: { name: string; aliases: string | null; seo_domain: string | null }): string[] {
   const out = new Set<string>();
   const add = (v: string | null | undefined) => {
     const t = (v ?? "").trim().toLowerCase();
@@ -326,6 +351,13 @@ export async function protectedPatternsFor(c: pg.Client, clientId: string): Prom
   // The bare domain label ("ohiocommunityhealth" from ohiocommunityhealth.com)
   // catches branded queries typed as a URL.
   if (r.seo_domain) add(r.seo_domain.replace(/^www\./, "").split(".")[0]);
+  return Array.from(out);
+}
+
+export async function protectedPatternsFor(c: pg.Client, clientId: string): Promise<string[]> {
+  const derived = await derivedBrandPatternsFor(c, clientId);
+  if (derived == null) return [];
+  const out = new Set<string>(derived);
   // The half we cannot derive: partners, sister brands, product names the
   // client owns, competitor terms they bid on deliberately. Collected by the
   // "Protected terms collected from the client" launch step into
@@ -333,7 +365,10 @@ export async function protectedPatternsFor(c: pg.Client, clientId: string): Prom
   // source of truth as the derived patterns, not a second one — one function
   // still answers "what may never be blocked for this client", and the apply
   // path keeps refusing a collision at mutation time regardless.
-  for (const t of await collectedProtectedTerms(c, clientId)) add(t);
+  for (const t of await collectedProtectedTerms(c, clientId)) {
+    const v = t.trim().toLowerCase();
+    if (v.length >= 3) out.add(v);
+  }
   return Array.from(out);
 }
 
@@ -424,6 +459,8 @@ export async function clientEconomicsFor(
     closeRatePct: null,
     cplCeilingCents: null,
     cplCeilingMonth: null,
+    adBudgetMonthlyCents: null,
+    adBudgetMonth: null,
   };
 
   try {
@@ -463,6 +500,28 @@ export async function clientEconomicsFor(
     }
   } catch {
     /* table not deployed → unanswered */
+  }
+
+  // THE AD BUDGET THE CLIENT APPROVED. Same table, same trap: `ad_budget_cents`
+  // is `DEFAULT 0` and a nought there is a blank, so it is resolved to null
+  // here and nothing downstream sees a nought. Read from its OWN newest
+  // non-nought row rather than the ceiling's row, because the two are typed
+  // independently and the newest row for one may have left the other blank.
+  try {
+    const month = windowEnd.slice(0, 7);
+    const { rows } = await c.query<{ month: string; ad_budget_cents: number | null }>(
+      `SELECT month, ad_budget_cents FROM client_targets
+        WHERE client_id = $1 AND month <= $2 AND ad_budget_cents > 0
+        ORDER BY month DESC LIMIT 1`,
+      [clientId, month],
+    );
+    const r = rows[0];
+    if (r && r.ad_budget_cents != null && Number(r.ad_budget_cents) > 0) {
+      out.adBudgetMonthlyCents = Number(r.ad_budget_cents);
+      out.adBudgetMonth = r.month;
+    }
+  } catch {
+    /* column not deployed → unanswered */
   }
 
   return out;

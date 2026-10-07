@@ -41,11 +41,21 @@ import { keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, typ
 import type { RecordedTarget } from "./keyword-sourcing.js";
 import { skippedSeedsLine } from "./service-seed.js";
 import type { ClientServiceFacts } from "./service-relevance.js";
-import { trafficReadiness, CALL_TRACKING_PHONE_SHARE, type AdDestination, type PhoneDemandFacts } from "./traffic-readiness.js";
+import {
+  trafficReadiness, CALL_TRACKING_PHONE_SHARE,
+  type AdDestination, type PhoneDemandFacts, type KeywordLanding, type KeywordLandingCount,
+} from "./traffic-readiness.js";
+import {
+  blockedPromotionLine, negativeSourcesUnreadLine, type NegativeRuleFacts, type NegativeMatchType,
+} from "./negative-match.js";
+import type { BlockedPromotion } from "./query-promotion.js";
 import { rankImpact, leadValueCents, type RankReading } from "./impact-rank.js";
-import { bidTargetEvidenceLine, bidTargetReading, supersedeReason, targetIsAbsent } from "./bid-target.js";
+import { bidTargetEvidenceLine, bidTargetReading, supersedeReason, targetIsAbsent, stayPutLine } from "./bid-target.js";
 import { keywordZeroReading, targetReadiness, gapAgainstNoise, termHasEnoughClicks, MIN_CLICKS_FOR_WASTED_TERM } from "./evidence-strength.js";
-import { termCoversService } from "./service-relevance.js";
+import {
+  serviceBlockVerdict, coreSearchNote, allCoreHeldLine, CORE_SEARCHES_HEADER,
+  type HeldCoreSearch,
+} from "./service-relevance.js";
 
 /**
  * Bump on ANY threshold or impact-formula change. Mirror: shared/ads-findings.ts.
@@ -66,8 +76,30 @@ import { termCoversService } from "./service-relevance.js";
  * every row that can reach one into cents a month with the KIND of claim
  * attached, and `sequenceFindings` orders groups on that instead of on size.
  * No existing threshold moved and no existing figure changed.
+ *
+ * 8: the engine asks of its own evidence what a reviewer asked by hand — enough
+ * clicks to call a keyword dead, enough conversions for a target to steer on,
+ * a gap bigger than the noise on its figure.
+ *
+ * 9: the findings reflect what has been DONE in the account, not only what is
+ * still true. The account is worked through Google Ads Editor imports, so four
+ * rules kept describing a world from before somebody's change:
+ *   - `converting_search_term` no longer recommends a query a negative already
+ *     blocks (campaign, shared-list and account negatives, with match types);
+ *   - `generic_landing_page` counts a keyword's own Final URL, and accepts the
+ *     front page for a keyword that is the client's own name;
+ *   - `wasted_search_term` never proposes a negative that would block a
+ *     service the client sells, and lists what it held back under the row;
+ *   - `budget_limited` on an account already spending the budget the client
+ *     approved is marked for the client's budget decision, not raised as a
+ *     separate row to act on.
+ * and a campaign below the conversions a cost target needs is told to stay as it
+ * is. No threshold moved. The "acted on, measuring" label is NOT in this
+ * module: it is derived from the account's change history at read time in the
+ * dashboard (shared/ads-acted-on.ts), because it changes with the date and a
+ * stored label would go stale between weekly runs.
  */
-export const ADS_RULESET_VERSION = 8;
+export const ADS_RULESET_VERSION = 9;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -159,6 +191,44 @@ export const RECOVERY_RATE = 0.7;
  *  would actually capture by raising budget. Impression share lost is not
  *  demand gained — the auction does not hand it over one-for-one. */
 export const BUDGET_CAPTURE_RATE = 0.5;
+
+/**
+ * Days in a month for turning a daily budget into a monthly one. Google's own
+ * figure for how much a campaign may spend in a month against its daily cap.
+ */
+export const BUDGET_DAYS_PER_MONTH = 30.4;
+
+/**
+ * How close the account's daily budgets, added up over a month, have to be to
+ * the monthly ad budget the client approved before the cap is read as THEIR
+ * choice. OURS: five per cent under is inside the rounding of a budget typed in
+ * whole dollars a day against one typed as a monthly figure.
+ */
+export const APPROVED_BUDGET_REACHED_SHARE = 0.95;
+
+/**
+ * The account's daily budgets as a monthly figure, in cents. A budget shared by
+ * two campaigns is one budget, so it is counted once, by its resource name; a
+ * campaign with no resource name is counted on its own.
+ */
+export function accountMonthlyBudgetCents(campaigns: readonly Pick<CampaignRow, "id" | "dailyBudgetMicros" | "budgetResourceName">[]): number {
+  const seen = new Set<string>();
+  let micros = 0;
+  for (const c of campaigns) {
+    const key = c.budgetResourceName ?? `campaign:${c.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    micros += c.dailyBudgetMicros;
+  }
+  return Math.round((micros / 10_000) * BUDGET_DAYS_PER_MONTH);
+}
+
+/** Is this account already spending the budget the client approved? Null where
+ *  no approved budget is recorded: unanswered, never "no". */
+export function atApprovedBudget(accountMonthlyCents: number, approvedMonthlyCents: number | null | undefined): boolean | null {
+  if (approvedMonthlyCents == null || !(approvedMonthlyCents > 0)) return null;
+  return accountMonthlyCents >= approvedMonthlyCents * APPROVED_BUDGET_REACHED_SHARE;
+}
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 // Platform-neutral shapes. Each adapter normalizes its own API into these, so
@@ -397,6 +467,15 @@ export interface ClientEconomics {
   cplCeilingCents: number | null;
   /** The month that ceiling was typed for, so a stale one says how old it is. */
   cplCeilingMonth: string | null;
+  /**
+   * The monthly ad budget the CLIENT approved, from `client_targets.ad_budget_cents`,
+   * above nought. Null = nobody has recorded one. The column is `DEFAULT 0` and
+   * a nought there is a blank, so it is resolved to null once, in
+   * `clientEconomicsFor`, exactly as the ceiling above is.
+   */
+  adBudgetMonthlyCents?: number | null;
+  /** The month that figure was typed for, so a stale one says how old it is. */
+  adBudgetMonth?: string | null;
 }
 
 // ── The conversion column, and whether anything may be read off it ──────────
@@ -1101,6 +1180,24 @@ export interface AuditInput {
    * rather than proposing negatives that may already be there.
    */
   negativesByCampaign: ReadonlyMap<string, Set<string>> | null;
+  /**
+   * The same negatives WITH THEIR MATCH TYPES, per campaign (shared lists
+   * attached to the campaign folded in) plus the account-level ones, and the
+   * sources this run could not read. It is a separate input from the two above
+   * because those are flat texts the waste rule reads conservatively as
+   * phrases, and the rule that asks "is this converting query already blocked"
+   * pays for a wrong yes with a lost recommendation, so it needs the types.
+   * ABSENT OR NULL `byCampaign` = not read: nothing is dropped on a list
+   * nobody saw, and the row says so.
+   */
+  negativeRules?: NegativeRuleFacts | null;
+  /**
+   * The client's own name, aliases and domain label, lowercased — the part of
+   * the protected list the CLIENT did not type (`brandPatternsFor`). Used by
+   * the landing-page check to accept the front page for a keyword that IS the
+   * brand. NULL OR ABSENT = not read, and no keyword is accepted as a brand.
+   */
+  brandPatterns?: string[] | null;
   /** Campaign names we must never touch (client-protected brand/partner terms). */
   protectedPatterns: string[];
   /**
@@ -1236,7 +1333,16 @@ export interface DerivedFinding {
   applicability: "api" | "vendor";
   title: string;
   summary: string;
-  evidence: { metrics: Record<string, number>; windowStart: string; windowEnd: string; lines: string[] };
+  evidence: {
+    metrics: Record<string, number>; windowStart: string; windowEnd: string; lines: string[];
+    /**
+     * What was LEFT OUT of this row on purpose, and why, one line each. They are
+     * not records of the finding: the dashboard reads `lines` as the records a
+     * decision is measured against ("12 new since Sep 30"), so a held-back
+     * search listed there would be counted as one. Absent where nothing was held.
+     */
+    notes?: string[];
+  };
   /** Monthly impact in CENTS (or leads × 100 when impactUnit is leads_month). */
   estImpactCents: number;
   impactUnit: "usd_month" | "leads_month";
@@ -1276,6 +1382,16 @@ export interface DerivedFinding {
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+/** The blocking negatives behind a list of dropped promotions, counted per rule. */
+function blockedBy(blocked: BlockedPromotion[]): { text: string; matchType: NegativeMatchType; count: number }[] {
+  const m = new Map<string, { text: string; matchType: NegativeMatchType; count: number }>();
+  for (const b of blocked) {
+    const key = `${b.by.matchType}|${b.by.text}`;
+    const e = m.get(key);
+    if (e) e.count += 1; else m.set(key, { text: b.by.text, matchType: b.by.matchType, count: 1 });
+  }
+  return Array.from(m.values()).sort((a, b) => b.count - a.count || a.text.localeCompare(b.text));
+}
 /** Micros → cents, the unit the findings table stores impact in. */
 const microsToCents = (micros: number) => Math.round(micros / 10_000);
 
@@ -1314,6 +1430,42 @@ export function materiallyChanged(previousHash: string | null, nextHash: string)
  * which is why the same input always yields the same findings.
  */
 export function evaluate(input: AuditInput): DerivedFinding[] {
+  return evaluateAudit(input).findings;
+}
+
+/**
+ * EVERYTHING THE RUN DROPPED OR ROUTED ON PURPOSE, as records.
+ *
+ * A finding that stops appearing because the account already handled it is the
+ * point of ruleset 9, and a finding that stops appearing with nobody told is
+ * the failure this feature must not become. Every drop below is counted here
+ * and printed by the run, naming the thing that caused it.
+ */
+export interface AuditAccounting {
+  /** Converting queries not recommended as keywords because a negative blocks them. */
+  promotionsBlocked: BlockedPromotion[];
+  /** Whether the campaign negatives were read; false = nothing was dropped on them. */
+  negativesRead: boolean;
+  /** Negative sources (shared lists, account level) this run could not read. */
+  negativeSourcesUnread: string[];
+  /** Per campaign: how its keywords landed, where the landing-page check used them. */
+  landing: { campaignName: string; cleared: boolean; counts: KeywordLandingCount }[];
+  /** Candidate negatives held back because they would block a service the client sells. */
+  coreSearchesNotBlocked: HeldCoreSearch[];
+  /** Campaigns whose every candidate was held, so no wasted-search row exists for them. */
+  wasteRowsNotRaised: { campaignName: string; terms: number; costMicros: number }[];
+  /** budget_limited rows marked for the client's own budget decision. */
+  budgetRoutedToClient: { campaignName: string; accountMonthlyCents: number; approvedMonthlyCents: number }[];
+  /** Campaigns told to stay as they are because a cost target is held back. */
+  targetHeld: { campaignName: string; conversions: number; strategy: string | null }[];
+}
+
+export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; accounting: AuditAccounting } {
+  const accounting: AuditAccounting = {
+    promotionsBlocked: [], negativesRead: false, negativeSourcesUnread: [],
+    landing: [], coreSearchesNotBlocked: [], wasteRowsNotRaised: [],
+    budgetRoutedToClient: [], targetHeld: [],
+  };
   const out: DerivedFinding[] = [];
   const { windowStart, windowEnd } = input;
   const win = { windowStart, windowEnd };
@@ -1387,6 +1539,13 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
 
   const targets = costTargets(input.economics);
   const target = governingTarget(targets);
+  // WHAT THE CLIENT APPROVED TO SPEND, against what the account is set to spend.
+  // Added up over the account because the approved figure is recorded for the
+  // client, not per campaign: nothing on the record says how an approved total
+  // is shared out, and inventing a split would read as a fact.
+  const accountBudgetMonthlyCents = accountMonthlyBudgetCents(input.campaigns);
+  const approvedBudgetMonthlyCents = input.economics?.adBudgetMonthlyCents ?? null;
+  const approvedBudgetReached = atApprovedBudget(accountBudgetMonthlyCents, approvedBudgetMonthlyCents);
   /** Printed under every figure that leaned on a target, and under every one
    *  that could not lean on one. A missing target is named, never passed over. */
   const targetLines = targets.length
@@ -1465,9 +1624,25 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       // while stopping the work that would fix it.
       const campaignReadiness = biddingByCampaign.get(c.id) ?? null;
       const biddingAllowsBudget = campaignReadiness == null || campaignReadiness.mayProposeBudgetStep;
-      const propose = converting && !overTarget && biddingAllowsBudget && Boolean(c.budgetResourceName);
+      // THE CLIENT'S OWN BUDGET DECISION. A campaign that converts under target,
+      // whose bidding can take a move, on an account already spending the ad
+      // budget the client approved, is not a change for us to propose: raising
+      // it is asking the client for more money. That has its own path (More ad
+      // budget, then Ask the client) and this row is marked for it instead of
+      // standing as a separate thing to approve. Nothing is dropped: the row
+      // stays, carries `atApprovedBudget`, and feeds that card.
+      const routedToClient = approvedBudgetReached === true && converting && !overTarget && biddingAllowsBudget;
+      if (routedToClient) {
+        accounting.budgetRoutedToClient.push({
+          campaignName: c.name, accountMonthlyCents: accountBudgetMonthlyCents,
+          approvedMonthlyCents: approvedBudgetMonthlyCents as number,
+        });
+      }
+      const propose = converting && !overTarget && biddingAllowsBudget && Boolean(c.budgetResourceName) && !routedToClient;
 
-      const headline = !zeroMeansZero
+      const headline = routedToClient
+        ? `"${c.name}" is capped at the budget the client approved — more is the client's decision`
+        : !zeroMeansZero
         ? `"${c.name}" is budget-capped, and nothing here can tell whether it is working`
         : !converting
           ? `"${c.name}" is budget-capped but converting nothing — fix relevance before adding budget`
@@ -1479,7 +1654,13 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
               ? `"${c.name}" is budget-capped and converting under target — it loses ${pct(budgetLost)} of impressions to budget`
               : `"${c.name}" is budget-capped and converting — it loses ${pct(budgetLost)} of impressions to budget`;
 
-      const body = !zeroMeansZero
+      const body = routedToClient
+        ? `The campaign gave up ${pct(budgetLost)} of its available impressions because its daily budget ran out, while converting `
+          + `${underTarget ? "under" : "within reach of"} target. The account's daily budgets add up to about ${usd(accountBudgetMonthlyCents * 10_000)} a month against `
+          + `the ${usd((approvedBudgetMonthlyCents ?? 0) * 10_000)} a month recorded as the client's ad budget${input.economics?.adBudgetMonth ? ` (for ${input.economics.adBudgetMonth})` : ""}, `
+          + `so the cap is the one the client set. Raising it means asking them for more, and that request has its own place: `
+          + `More ad budget on the client's page, then Ask the client.`
+        : !zeroMeansZero
         ? `The campaign gave up ${pct(budgetLost)} of its available impressions because the daily budget ran out. Whether that `
           + `matters depends on whether it converts, and this account's conversion column cannot be read — so no budget change is `
           + `proposed here. Settle the tracking finding on this account first.`
@@ -1503,7 +1684,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
       out.push({
         entityType: "campaign", entityId: c.id, entityName: c.name, campaignId: c.id,
         findingType: "budget_limited",
-        severity: budgetLost > THRESHOLDS.budgetLostShareHigh ? "high" : "medium",
+        severity: routedToClient ? "low" : budgetLost > THRESHOLDS.budgetLostShareHigh ? "high" : "medium",
         riskLevel: propose ? "low" : "high",
         applicability: propose ? "api" : "vendor",
         title: headline,
@@ -1514,12 +1695,24 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
             budgetLostShare: budgetLost, impressionShare: c.impressionShare ?? 0,
             dailyBudgetMicros: c.dailyBudgetMicros,
             ...(cpaCents != null ? { costPerConversionCents: cpaCents } : {}),
+            // THE ROUTING FLAG. The dashboard reads this one metric to send the
+            // row to the client's budget decision instead of the queue's open
+            // list. A flag, not a status: it is gone the day the account stops
+            // spending what the client approved.
+            ...(routedToClient
+              ? { atApprovedBudget: 1, approvedBudgetMonthlyCents: approvedBudgetMonthlyCents as number, accountBudgetMonthlyCents }
+              : {}),
           },
           ...win,
           lines: [
             `${usd(c.costMicros)} spent · ${c.clicks} clicks · ${c.conversions.toFixed(1)} conversions (30 days)`,
             `Impression share ${pct(c.impressionShare ?? 0)} · lost to budget ${pct(budgetLost)}`,
             `Daily budget ${usd(c.dailyBudgetMicros)}`,
+            ...(routedToClient
+              ? [`Account budgets add up to about ${usd(accountBudgetMonthlyCents * 10_000)} a month against ${usd((approvedBudgetMonthlyCents ?? 0) * 10_000)} a month approved by the client. Reaching the approved figure is read as ${Math.round(APPROVED_BUDGET_REACHED_SHARE * 100)}% of it, and that share is ours.`]
+              : approvedBudgetMonthlyCents == null
+                ? [`No ad budget is recorded for this client, so whether this cap is the budget they approved cannot be said.`]
+                : []),
             cpaCents != null
               ? `Each conversion costs $${(cpaCents / 100).toFixed(2)}`
               : costPerOutcomeReadable
@@ -1532,7 +1725,9 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         estImpactCents: propose ? claimCents : 0,
         impactUnit: "usd_month",
         impactAssumption: !propose
-          ? (!zeroMeansZero
+          ? (routedToClient
+            ? `No impact claimed: the cap is the budget the client approved, so more budget is a request to them and not a change this proposes.`
+            : !zeroMeansZero
               ? `No figure claimed: the conversion column on this account cannot be read, so there is nothing to work a return out of.`
               : !converting
                 ? `No impact claimed: this campaign converts nothing, so extra budget has no modelled return.`
@@ -1563,6 +1758,8 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
           : null,
         guardNote: propose
           ? "Budget guard: max 2× and max $100/day movement per run, and refused entirely if the budget has moved since this was worked out."
+          : routedToClient
+            ? "No API change proposed — this account is spending the budget the client approved, so more is the client's decision to make."
           : !zeroMeansZero
             ? "No API change proposed — this engine does not spend more on an account whose conversion column it cannot read."
             : overTarget
@@ -1682,6 +1879,15 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     const bidTargetWanted = overTarget && cpaCents != null && target != null && targetIsAbsent(bidTarget);
     const bidTargetAbsent = bidTargetWanted && targetFit.ready;
     const bidTargetHeld = bidTargetWanted && !targetFit.ready ? targetFit.line : null;
+    // WHAT TO DO INSTEAD. "A target is held back" says what not to do; the line
+    // before it says what to do, so a campaign on manual bidding reads "stay
+    // manual" rather than leaving the reader to work that out.
+    const stayPut = bidTargetHeld
+      ? stayPutLine(bidTarget.kind, zeroMeansZero ? "conversions" : "tracking")
+      : null;
+    if (bidTargetHeld) {
+      accounting.targetHeld.push({ campaignName: c.name, conversions: c.conversions, strategy: bidTarget.strategy });
+    }
 
     if (bidTargetAbsent && cpaCents != null && target != null) {
       const overCents = cpaCents - target.cents;
@@ -1772,6 +1978,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
             `${usd(c.costMicros)} · ${c.clicks} clicks · ${c.conversions.toFixed(1)} conversions (30 days)`,
             `$${(cpaCents / 100).toFixed(2)} a conversion, $${(overCents / 100).toFixed(2)} over`,
             ...(noise?.line ? [noise.line] : []),
+            ...(stayPut ? [stayPut] : []),
             ...(bidTargetHeld ? [bidTargetHeld] : []),
             ...targetLines,
           ],
@@ -1960,7 +2167,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
   const confirmedServices = input.services?.services ?? [];
   const servicesConfirmed = input.services?.services != null;
   const heldFewClicksBy = new Map<string, number>();
-  const heldCoreServiceBy = new Map<string, number>();
+  const heldCoreBy = new Map<string, HeldCoreSearch[]>();
   const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
   const negativesRead = input.negativesByCampaign;
   const negativesFor = (campaignId: string): ReadonlySet<string> =>
@@ -1975,11 +2182,21 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     // click is one person, and nothing says it was wasted rather than unlucky.
     // The person who ran the OCH account held exactly these back by hand.
     if (!termHasEnoughClicks(t.clicks)) { bump(heldFewClicksBy, t.campaignName); continue; }
-    // A SEARCH THAT IS A CONFIRMED SERVICE IS NEVER PROPOSED FOR BLOCKING. Where
+    // A NEGATIVE THAT WOULD BLOCK A CONFIRMED SERVICE IS NEVER PROPOSED. Where
     // somebody has confirmed what this client sells, a term carrying every word
-    // of one of those services is the business they want, not waste. Where no
-    // list is confirmed nothing can be said either way, and the row says so.
-    if (confirmedServices.some((svc) => termCoversService(t.term, svc.name))) { bump(heldCoreServiceBy, t.campaignName); continue; }
+    // of one of those services is the business they want, not waste — and so is
+    // a term that sits inside a service's own name, because a phrase negative on
+    // "recovery centers" also blocks "addiction recovery centers near me". The
+    // term is held back and LISTED under the row with its spend, so the money
+    // stays visible. Where no list is confirmed nothing can be said either way,
+    // and the row says so.
+    const coreBlock = serviceBlockVerdict(t.term, confirmedServices);
+    if (coreBlock) {
+      const held: HeldCoreSearch = { term: t.term, campaignName: t.campaignName, costMicros: t.costMicros, clicks: t.clicks, block: coreBlock };
+      heldCoreBy.set(t.campaignName, [...(heldCoreBy.get(t.campaignName) ?? []), held]);
+      accounting.coreSearchesNotBlocked.push(held);
+      continue;
+    }
     // A protected term is one the client has told us never to block. Blocking a
     // partner or brand term by accident costs far more than the spend it saves,
     // so it is filtered here AND refused again by the apply path's guard.
@@ -2026,7 +2243,7 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
      */
     const seen = visibility.get(first.campaignId) ?? null;
     const heldFewClicks = heldFewClicksBy.get(campaignName) ?? 0;
-    const heldCoreService = heldCoreServiceBy.get(campaignName) ?? 0;
+    const heldCore = [...(heldCoreBy.get(campaignName) ?? [])].sort((a, b) => b.costMicros - a.costMicros);
     out.push({
       entityType: "campaign", entityId: `${first.campaignId}:wasted_terms`, entityName: campaignName, campaignId: first.campaignId,
       findingType: "wasted_search_term",
@@ -2051,7 +2268,17 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
           .concat(seen ? [seen.line] : [])
           .concat(servicesConfirmed ? [] : [`This client's services are not confirmed, so none of these terms was checked against what they sell. Read each one before approving: a core search can look exactly like waste.`])
           .concat(heldFewClicks > 0 ? [`${heldFewClicks} other ${heldFewClicks === 1 ? "term" : "terms"} with a single click ${heldFewClicks === 1 ? "is" : "are"} left out. One click is one person, so ${MIN_CLICKS_FOR_WASTED_TERM} is the least that counts, and that line is ours.`] : [])
-          .concat(heldCoreService > 0 ? [`${heldCoreService} other ${heldCoreService === 1 ? "term is" : "terms are"} left out because ${heldCoreService === 1 ? "it carries" : "they carry"} every word of a service this client confirmed selling.`] : []),
+          ,
+        // Held back on purpose and kept OUT of `lines`: the dashboard reads
+        // `lines` as the records a decision is measured against, and a search
+        // this row declined to propose is not one of them.
+        ...(heldCore.length > 0
+          ? { notes: [
+              CORE_SEARCHES_HEADER,
+              ...heldCore.slice(0, 8).map(coreSearchNote),
+              ...(heldCore.length > 8 ? [`…and ${heldCore.length - 8} more core searches not blocked`] : []),
+            ] }
+          : {}),
       },
       estImpactCents: microsToCents(recoverable),
       impactUnit: "usd_month",
@@ -2071,6 +2298,18 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
         guard: `Negative-keyword guard: any term colliding with a protected pattern aborts the whole run; terms already present are skipped, not duplicated. Removal is a first-class operation, so a negative that turns out to block wanted traffic is one click to undo.`,
       },
       guardNote: "Protected-term collision aborts the run; duplicates are skipped.",
+    });
+  }
+
+  // A campaign whose EVERY candidate was held back has no row at all, and the
+  // spend would then vanish from the report. It is counted here and printed by
+  // the run, naming the campaign, the count and the money.
+  for (const [campaignName, held] of heldCoreBy) {
+    // Where the whole rule was held for a broken conversion column the missing
+    // row has THAT reason, and the tracking row already says it.
+    if (!zeroMeansZero || wasteByCampaign.has(campaignName)) continue;
+    accounting.wasteRowsNotRaised.push({
+      campaignName, terms: held.length, costMicros: held.reduce((s2, h) => s2 + h.costMicros, 0),
     });
   }
 
@@ -2100,7 +2339,11 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     // on the queries producing the most of them is the finding doing harm.
     columnCountsOutcomes: tracking.countsOutcomes,
     protectedPatterns: input.protectedPatterns,
+    negatives: input.negativeRules ?? null,
   });
+  accounting.promotionsBlocked = promotions.blocked;
+  accounting.negativesRead = promotions.negativesRead;
+  accounting.negativeSourcesUnread = promotions.negativeSourcesUnread;
   for (const cp of promotions.byCampaign) {
     const seen = visibility.get(cp.campaignId) ?? null;
     out.push({
@@ -2144,6 +2387,20 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
           ...(promotions.alreadyStateUnread > 0
             ? [`${promotions.alreadyStateUnread} other converting quer${promotions.alreadyStateUnread === 1 ? "y is" : "ies are"} already in the account as a keyword whose status this run could not read. They are left out of this row either way.`]
             : []),
+          // NEGATIVES. The check that a query is not already blocked is only as
+          // good as what was read, so the row says which it was.
+          ...(promotions.blocked.filter((b) => b.campaignId === cp.campaignId).length > 0
+            ? [blockedPromotionLine(
+                cp.campaignName,
+                promotions.blocked.filter((b) => b.campaignId === cp.campaignId).length,
+                blockedBy(promotions.blocked.filter((b) => b.campaignId === cp.campaignId)),
+              )]
+            : []),
+          ...(!promotions.negativesRead
+            ? ["This account's negative keywords could not be read this run, so a query one of them blocks can still be listed here."]
+            : promotions.negativeSourcesUnread.length > 0
+              ? [negativeSourcesUnreadLine(promotions.negativeSourcesUnread)]
+              : []),
           // The switched-off matches are named on whichever row is going out,
           // because each is work somebody has to decide about and none of it
           // is "add a keyword".
@@ -2737,7 +2994,22 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     phone: input.phone,
     campaignMinSpendMicros: THRESHOLDS.campaignMinSpendMicros,
     windowDays: 30,
+    // Where each keyword's click actually lands. Null where the list was not
+    // read: the check then judges on the ads alone and says so.
+    keywords: input.existingKeywords == null
+      ? null
+      : input.existingKeywords
+          .filter((k): k is ExistingKeyword & { campaignId: string } => Boolean(k.campaignId))
+          .map((k): KeywordLanding => ({
+            campaignId: k.campaignId, text: k.text, finalUrls: k.finalUrls ?? null, canServe: keywordCanServe(k),
+          })),
+    brandPatterns: input.brandPatterns ?? null,
   });
+  for (const r of trafficChecks) {
+    if (r.key === "generic_landing_page" && r.keywordLanding && r.campaignName) {
+      accounting.landing.push({ campaignName: r.campaignName, cleared: r.state === "clear", counts: r.keywordLanding });
+    }
+  }
   for (const r of trafficChecks) {
     // `clear` and `cant_tell` are real answers and the module produces them on
     // purpose, so silence is never read as a pass — but only `open` is a row in
@@ -2938,5 +3210,5 @@ export function evaluate(input: AuditInput): DerivedFinding[] {
     ...f,
     rank: rankImpact(f, targets, input.economics, f.atStakeCents ?? null),
   }));
-  return sequenceFindings(ranked);
+  return { findings: sequenceFindings(ranked), accounting };
 }

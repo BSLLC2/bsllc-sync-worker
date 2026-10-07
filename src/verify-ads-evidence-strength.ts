@@ -166,8 +166,11 @@ console.log("\n7. The wasted-search-term list leaves out one-click terms and cor
   ok("an ordinary term stays in the list", /"cheap random thing"/.test(lines));
   ok("a one-click term is absent", !/"one click wonder"/.test(lines));
   ok("a term covering a confirmed service is absent", !/"detox program near me"/.test(lines));
+  const notes = row?.evidence.notes?.join("\n") ?? "";
   ok("the row says what it left out and why",
-    /1 other term with a single click is left out/.test(lines) && /1 other term is left out because it carries every word of a service/.test(lines));
+    /1 other term with a single click is left out/.test(lines)
+      && /core search, not blocked/.test(notes) && /"detox program near me"/.test(notes) && /carries every word of "detox program"/.test(notes),
+    "the core search is named, with its spend, under the row and not among its records");
   ok("no 'services not confirmed' line when they are", !/services are not confirmed/.test(lines));
 
   const unconfirmed = evaluate(input({
@@ -179,7 +182,7 @@ console.log("\n7. The wasted-search-term list leaves out one-click terms and cor
   ok("…and a one-click term is still absent", !/"one click wonder"/.test(ulines));
 }
 
-ok("the ruleset version is 8", ADS_RULESET_VERSION === 8);
+ok("the ruleset version is 9", ADS_RULESET_VERSION === 9);
 
 console.log(`\n${"─".repeat(72)}`);
 console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);
