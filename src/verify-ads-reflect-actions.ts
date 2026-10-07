@@ -441,6 +441,8 @@ section("6. budget_limited on an account spending the budget the client approved
   ok("…and the sentence names the figures and where the request goes",
     /More ad budget on the client's page, then Ask the client/.test(row?.summary ?? "")
     && /\$3430\.00 a month recorded as the client's ad budget \(for 2026-10\)/.test(row?.summary ?? ""), row?.summary.slice(0, 220) ?? "");
+  ok("…and carries the budget's own id, so a change to that budget can be matched to the row",
+    row?.evidence.metrics.budgetResourceId === 902, String(row?.evidence.metrics.budgetResourceId));
   ok("it is accounted for in the run", book.accounting.budgetRoutedToClient.length === 1
     && /Brand Awareness: budget row marked for the client's budget decision/.test(accountingLines(book.accounting).join("\n")));
 

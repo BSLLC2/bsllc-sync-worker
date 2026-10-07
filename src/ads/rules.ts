@@ -1382,6 +1382,12 @@ export interface DerivedFinding {
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+/** The numeric id at the tail of a budget's resource name, or null. */
+export function budgetIdOf(resourceName: string | null | undefined): number | null {
+  const last = String(resourceName ?? "").trim().split("/").pop() ?? "";
+  return /^\d+$/.test(last) ? Number(last) : null;
+}
+
 /** The blocking negatives behind a list of dropped promotions, counted per rule. */
 function blockedBy(blocked: BlockedPromotion[]): { text: string; matchType: NegativeMatchType; count: number }[] {
   const m = new Map<string, { text: string; matchType: NegativeMatchType; count: number }>();
@@ -1695,6 +1701,12 @@ export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; 
             budgetLostShare: budgetLost, impressionShare: c.impressionShare ?? 0,
             dailyBudgetMicros: c.dailyBudgetMicros,
             ...(cpaCents != null ? { costPerConversionCents: cpaCents } : {}),
+            // THE BUDGET'S OWN ID. A change to a budget is reported against the
+            // budget, and Google does not always name the campaign on it, so
+            // the dashboard matches a budget change to this row by this id as
+            // well as by campaign. Absent where the campaign carries no budget
+            // resource name: unanswered, never a nought.
+            ...(budgetIdOf(c.budgetResourceName) != null ? { budgetResourceId: budgetIdOf(c.budgetResourceName) as number } : {}),
             // THE ROUTING FLAG. The dashboard reads this one metric to send the
             // row to the client's budget decision instead of the queue's open
             // list. A flag, not a status: it is gone the day the account stops
