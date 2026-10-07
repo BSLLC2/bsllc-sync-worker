@@ -93,7 +93,8 @@ async function authority(creds: DfsCreds, domain: string) {
   ]);
   return { rank: n(bl?.rank), backlinks: n(bl?.backlinks), refdoms: n(bl?.referring_domains), kw: n(ov?.count), etv: n(ov?.etv), top10: n(ov?.pos_1) == null ? null : (n(ov?.pos_1) ?? 0) + (n(ov?.pos_2_3) ?? 0) + (n(ov?.pos_4_10) ?? 0), err: bl?._err || ov?._err || "" };
 }
-async function ranked(creds: DfsCreds, domain: string, limit: number) {
+type RankedRow = { keyword: string; volume: number | null; kd: number | null; rank: number | null; url: string };
+async function ranked(creds: DfsCreds, domain: string, limit: number): Promise<RankedRow[]> {
   const r = await dfs(creds, "POST", "/dataforseo_labs/google/ranked_keywords/live", [{ target: domain, location_name: "United States", language_name: "English", limit, order_by: ["keyword_data.keyword_info.search_volume,desc"] }]);
   return (r?.[0]?.items ?? []).map((it: any) => ({ keyword: String(it?.keyword_data?.keyword ?? ""), volume: n(it?.keyword_data?.keyword_info?.search_volume), kd: n(it?.keyword_data?.keyword_properties?.keyword_difficulty), rank: n(it?.ranked_serp_element?.serp_item?.rank_absolute), url: String(it?.ranked_serp_element?.serp_item?.url ?? "") }));
 }
@@ -244,7 +245,7 @@ async function partB(creds: DfsCreds) {
   console.log(`# ${DOMAIN} referring domains pulled: ${integrusRef.size}`);
   const compRefs = await pool(COMPETITORS, 3, async (d) => ({ d, list: await refdoms(d) }));
   const agg = new Map<string, { rank: number | null; links_to: string[] }>();
-  for (const { d, list } of compRefs) for (const it of list) { const e = agg.get(it.domain) ?? { rank: it.rank, links_to: [] }; if (!e.links_to.includes(d)) e.links_to.push(d); e.rank = Math.max(e.rank ?? 0, it.rank ?? 0); agg.set(it.domain, e); }
+  for (const { d, list } of compRefs) for (const it of list) { const e = agg.get(it.domain) ?? { rank: it.rank, links_to: [] as string[] }; if (!e.links_to.includes(d)) e.links_to.push(d); e.rank = Math.max(e.rank ?? 0, it.rank ?? 0); agg.set(it.domain, e); }
   block("5a_backlink_targets", ["referring_domain", "backlink_rank_0_1000", "links_to_n_competitors", "competitors", "links_to_integrus", "type_auto", "source", "date"]);
   const targets = [...agg.entries()].filter(([d, e]) => e.links_to.length >= 2 && !integrusRef.has(d) && !/google|facebook|linkedin|twitter|youtube|instagram|wikipedia|blogspot|wordpress\.com|\.gov$/.test(d)).sort((a, b) => (b[1].rank ?? 0) - (a[1].rank ?? 0)).slice(0, 30);
   for (const [d, e] of targets) row(d, e.rank, e.links_to.length, e.links_to.join("|"), "no", typeOf(d), "backlinks/referring_domains (top 600 by rank per competitor; 'no' = not in Integrus's live referring domains)", RUN);
