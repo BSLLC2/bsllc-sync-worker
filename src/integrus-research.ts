@@ -268,9 +268,44 @@ async function partB(creds: DfsCreds) {
   console.log(`\nPART B DONE`);
 }
 
+async function partC(creds: DfsCreds) {
+  console.log(`\nRUN ${RUN} · PART C · DataForSEO · read-only (AI Overview retry, backlink intersection re-pull, directory re-check)`);
+  block("4b_google_ai_overview", ["question", "ai_overview_shown", "urls_cited", "domains_cited", "integrus_mentioned", "answer_excerpt", "source", "date"]);
+  for (const q of AEO_QUESTIONS) {
+    let done = false;
+    for (let attempt = 0; attempt < 3 && !done; attempt++) {
+      try { const s = await serp(creds, q); row(q, s.hasAi ? "yes" : "no", s.aiRefs.join(" | "), [...new Set(s.aiRefs.map(hostOf).filter(Boolean))].join(" | "), s.hasAi ? (/integrus/i.test(s.aiText + s.aiRefs.join(" ")) ? "yes" : "no") : "n/a", s.hasAi ? s.aiText.slice(0, 700) : "(no AI Overview shown, US desktop)", "serp/google/organic/live/advanced", RUN); done = true; }
+      catch (e) { if (attempt === 2) row(q, "error", "", "", "n/a", `error after 3 attempts: ${String(e).slice(0, 100)}`, "serp/live", RUN); else await new Promise((r) => setTimeout(r, 4000)); }
+    }
+  }
+  end();
+  const SPAM = /\.(website|site|store|shop|space|online|xyz|top|click|icu|fun)$|backlink|checker|seo|rank|dapa|\.io$|flokii|storeboard|clientsbee|pitchcentric|nidana/i;
+  async function refdoms(d: string) {
+    try { const r = await dfs(creds, "POST", "/backlinks/referring_domains/live", [{ target: d, limit: 1000, order_by: ["rank,desc"], backlinks_status_type: "live", exclude_internal_backlinks: true }]); return (r?.[0]?.items ?? []).map((it: any) => ({ domain: String(it?.domain ?? ""), rank: n(it?.rank) })); }
+    catch (e) { console.log(`# referring_domains ${d}: ${String(e).slice(0, 100)}`); return []; }
+  }
+  const integrusRef = new Set((await refdoms(DOMAIN)).map((x: any) => x.domain));
+  const compRefs = await pool(COMPETITORS.filter((d) => d !== "skytale.com"), 3, async (d) => ({ d, list: await refdoms(d) }));
+  const agg = new Map<string, { rank: number | null; links_to: string[] }>();
+  for (const { d, list } of compRefs) for (const it of list) { const e = agg.get(it.domain) ?? { rank: it.rank, links_to: [] as string[] }; if (!e.links_to.includes(d)) e.links_to.push(d); e.rank = Math.max(e.rank ?? 0, it.rank ?? 0); agg.set(it.domain, e); }
+  block("5a_backlink_targets_v2", ["referring_domain", "backlink_rank_0_1000", "links_to_n_competitors", "competitors", "links_to_integrus", "type_auto", "source", "date"]);
+  const targets = [...agg.entries()].filter(([d, e]) => e.links_to.length >= 2 && !integrusRef.has(d) && (e.rank ?? 0) >= 5 && !SPAM.test(d) && !/google|facebook|linkedin|twitter|x\.com|youtube|instagram|wikipedia|blogspot|wordpress\.com|\.gov$|apple\.com|spotify|amazon/.test(d)).sort((a, b) => (b[1].rank ?? 0) - (a[1].rank ?? 0)).slice(0, 40);
+  for (const [d, e] of targets) row(d, e.rank, e.links_to.length, e.links_to.join("|"), "no", typeOf(d), "backlinks/referring_domains (top 1000 by rank per competitor; rank>=5; link-farm domains excluded)", RUN);
+  end();
+  block("5b_directories_v2", ["directory", "query", "hits", "example_url", "source", "date"]);
+  for (const d of ["axial.net", "crunchbase.com", "expertise.com", "mergersandacquisitions.net", "pitchbook.com", "ibba.org", "amaaonline.com"]) {
+    for (const q of [`site:${d} integrus`, `"integrus partners" ${d.split(".")[0]}`]) {
+      try { const s = await serp(creds, q); const hits = s.organic.filter((o) => o.domain.endsWith(d)); row(d, q, hits.length, hits[0]?.url ?? "", "serp/live", RUN); }
+      catch (e) { row(d, q, /No Search Results/.test(String(e)) ? 0 : "error", "", `serp/live (${String(e).slice(0, 60)})`, RUN); }
+    }
+  }
+  end();
+  console.log(`\nPART C DONE`);
+}
+
 async function main() {
   const creds = credsFromEnv();
   const part = (process.env.PART || "a").toLowerCase();
-  if (part === "a") await partA(creds); else await partB(creds);
+  if (part === "a") await partA(creds); else if (part === "c") await partC(creds); else await partB(creds);
 }
 main().catch((e) => { console.error(e instanceof Error ? e.stack ?? e.message : e); process.exit(1); });
