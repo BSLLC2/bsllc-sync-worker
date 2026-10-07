@@ -249,9 +249,21 @@ async function main() {
     const { rows: [internal] } = await c.query<{ id: string }>(`SELECT id FROM clients WHERE name = $1`, [INTERNAL_CLIENT]);
     if (!internal) throw new Error("internal client missing");
     const open = new Map((await c.query<{ external_id: string; status: string }>(`SELECT external_id, status FROM commitments WHERE client_id = $1 AND source = 'data-audit' AND status <> 'complete'`, [internal.id])).rows.map((r) => [r.external_id, r.status]));
-    let created = 0, refreshed = 0, closed = 0;
+    // The unique index uq_commitments_source_external covers (source, external_id)
+    // whatever the status, so a task this audit auto-closed earlier still holds
+    // its key. When the condition comes back the finding is REOPENED, never
+    // inserted again: the duplicate insert used to crash the whole run, and the
+    // heartbeat and every later step with it.
+    const doneByKey = new Map((await c.query<{ id: string; external_id: string }>(`SELECT id, external_id FROM commitments WHERE source = 'data-audit' AND status = 'complete' AND external_id = ANY($1::text[])`, [findings.map((f) => f.key)])).rows.map((r) => [r.external_id, r.id]));
+    let created = 0, refreshed = 0, closed = 0, reopened = 0;
     for (const f of findings) {
-      if (open.has(f.key)) {
+      const doneId = doneByKey.get(f.key);
+      if (!open.has(f.key) && doneId) {
+        reopened++;
+        if (!dryRun) await c.query(
+          `UPDATE commitments SET status = $2, completed_at = NULL, title = $3, description = $4 || E'\n\nReopened by the morning audit: the condition is back.', priority = $5, due_date = to_char(now() + interval '3 days', 'YYYY-MM-DD'), last_updated_at = now() WHERE id = $1`,
+          [doneId, f.status ?? "not_started", f.title, f.description, f.priority]);
+      } else if (open.has(f.key)) {
         refreshed++;
         if (!dryRun) await c.query(`UPDATE commitments SET title = $3, description = $4, priority = $5, last_updated_at = now() WHERE client_id = $1 AND source = 'data-audit' AND external_id = $2 AND status <> 'complete'`, [internal.id, f.key, f.title, f.description, f.priority]);
       } else {
@@ -271,7 +283,7 @@ async function main() {
     }
 
     console.log(`auto-fixes: ${fixes.length ? fixes.join("; ") : "none needed"}`);
-    console.log(`findings: ${findings.length} (${created} new task(s), ${refreshed} refreshed, ${closed} auto-closed)${dryRun ? " — DRY RUN, nothing written" : ""}`);
+    console.log(`findings: ${findings.length} (${created} new task(s), ${reopened} reopened, ${refreshed} refreshed, ${closed} auto-closed)${dryRun ? " — DRY RUN, nothing written" : ""}`);
     for (const f of findings) console.log(`  ${f.priority}  ${f.title}`);
     if (!dryRun) await c.query(`INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ('morning_audit', now(), true, $1) ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = true, note = EXCLUDED.note`, [`${findings.length} findings, ${fixes.length} fixes`]);
   } finally { await c.end(); }
