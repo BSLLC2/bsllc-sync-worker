@@ -241,3 +241,86 @@ export function noServicesLine(facts: ClientServiceFacts): string {
   return "Nothing on this client's record says what they actually sell, so there is no way to tell demand they are missing from demand they were never in. "
     + `Confirm their services on the client page and this reads on the next audit.${waiting}`;
 }
+
+// ── Would blocking this search block something the client sells? ────────────
+/**
+ * WHY `termCoversService` ALONE WAS NOT ENOUGH.
+ *
+ * It answers one direction: the term carries every word of a service, so the
+ * term IS that service with qualifiers ("emergency commercial roofing repair").
+ * A phrase negative works in the other direction too, and that is the one it
+ * missed. A negative "recovery centers" blocks every query holding those two
+ * words, which includes "addiction recovery centers near me" — and
+ * "addiction recovery centers" is a service this client sells. The term is
+ * SHORTER than the service, so it covers none of the service's words.
+ *
+ * Two relations, then, and either one means the negative would block something
+ * sold:
+ *
+ *   covers    the term carries every word of a confirmed service.
+ *   part_of   the term's words appear together, in order, inside a confirmed
+ *             service's own name, so a phrase negative on the term blocks that
+ *             service's own searches.
+ *
+ * Only what the client SELLS is read (`stance = 'offers'`, confirmed — see
+ * `clientServicesFor`), so a service they do not offer can never hold a
+ * negative back. Where no list is confirmed nothing is held and the waste row
+ * says so, which is `servicesConfirmed` in rules.ts and is unchanged.
+ *
+ * The hold errs toward proposing FEWER negatives: a negative that blocks a
+ * service is the expensive direction to be wrong in, and a term held in error
+ * stays visible, listed under the row with its spend.
+ */
+export type ServiceBlockRelation = "covers" | "part_of";
+
+export interface ServiceBlock {
+  /** The confirmed service, verbatim. */
+  service: string;
+  relation: ServiceBlockRelation;
+}
+
+export function serviceBlockVerdict(term: string, services: readonly ConfirmedService[]): ServiceBlock | null {
+  const t = serviceTokens(term);
+  if (t.length === 0) return null;
+  for (const svc of services) {
+    if (termCoversService(term, svc.name)) return { service: svc.name, relation: "covers" };
+  }
+  for (const svc of services) {
+    const s = serviceTokens(svc.name);
+    if (s.length === 0 || t.length > s.length) continue;
+    for (let i = 0; i + t.length <= s.length; i++) {
+      let hit = true;
+      for (let j = 0; j < t.length; j++) if (s[i + j] !== t[j]) { hit = false; break; }
+      if (hit) return { service: svc.name, relation: "part_of" };
+    }
+  }
+  return null;
+}
+
+/** One search held back from the negative list, carried to the row and the run. */
+export interface HeldCoreSearch {
+  term: string;
+  campaignName: string;
+  costMicros: number;
+  clicks: number;
+  block: ServiceBlock;
+}
+
+const usdMicros = (m: number) => `$${(m / 1_000_000).toFixed(2)}`;
+
+/** The line under the wasted-searches row for one search it will not block. */
+export function coreSearchNote(h: HeldCoreSearch): string {
+  const why = h.block.relation === "covers"
+    ? `it carries every word of "${h.block.service}", which this client sells`
+    : `a negative on it would also block "${h.block.service}", which this client sells`;
+  return `core search, not blocked · ${usdMicros(h.costMicros)} · ${h.clicks} click${h.clicks === 1 ? "" : "s"} · "${h.term}" — ${why}`;
+}
+
+/** Said once above the notes, so the row cannot read as though they were missed. */
+export const CORE_SEARCHES_HEADER =
+  "Not proposed as negatives. Each is a search for something this client sells, so its spend stays on the account to be improved with a better page or ad, not blocked:";
+
+/** What the run prints when every candidate on a campaign was held back and so no row exists. */
+export function allCoreHeldLine(campaignName: string, n: number, costMicros: number): string {
+  return `${campaignName}: ${n} search${n === 1 ? "" : "es"} (${usdMicros(costMicros)} over 90 days) converted nothing and ${n === 1 ? "was" : "were"} not proposed as ${n === 1 ? "a negative" : "negatives"} because ${n === 1 ? "it is" : "they are"} core searches. No row was raised.`;
+}

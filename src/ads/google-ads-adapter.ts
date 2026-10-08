@@ -28,6 +28,10 @@ import type {
 import type { ConversionLagRow } from "./bidding-readiness.js";
 import type { DailyConversionRow } from "./tracking-outage.js";
 import type { ExistingKeyword } from "./query-promotion.js";
+import {
+  shapeCampaignNegativeRules, shapeSharedNegativeRules, shapeAccountNegativeRules, combineNegativeRules,
+  type NegativeRuleFacts,
+} from "./negative-match.js";
 
 /** The API returns enums as integers over REST, not their string names, so a
  *  `=== "BROAD"` comparison silently never matches. Map both forms. */
@@ -143,6 +147,13 @@ export function enumName(map: Record<string, string>, v: unknown): string | null
  * the account HOLDS is always read whole and only what it SPENT is cut.
  */
 export const KEYWORD_PERFORMANCE_LIMIT = 300;
+/** Keywords asked about in the last-spend pull: the dearest that converted
+ *  nothing, which are the ones `dead_keyword` can raise a row for. */
+export const LAST_SPEND_CANDIDATE_LIMIT = 120;
+/** A dated pull this size or larger is treated as cut short and not used,
+ *  because a missing day would read as an earlier stop. 120 keywords x 90 days
+ *  is 10,800 at the very most. */
+export const LAST_SPEND_ROW_LIMIT = 12_000;
 
 /**
  * The negative keywords an account already holds, in the two shapes the rules
@@ -352,6 +363,22 @@ export class GoogleAdsAdapter implements PlatformAdapter {
           ].some((v) => v != null && Number(v) > 0),
         ]))
       : null;
+    /** A COST target's figure in micros: target CPA on the strategy, or the
+     *  target CPA a Maximize Conversions strategy carries. A return-on-spend
+     *  target is a ratio and is deliberately not a price, so it is not here. */
+    const costTargetMicros = (...vals: unknown[]): number | null => {
+      for (const v of vals) if (v != null && Number(v) > 0) return Number(v);
+      return null;
+    };
+    const portfolioTargetMicros: Map<string, number | null> | null = strategyRows
+      ? new Map(strategyRows.map((r: any) => [
+          String(r.bidding_strategy?.id ?? ""),
+          costTargetMicros(
+            r.bidding_strategy?.target_cpa?.target_cpa_micros,
+            r.bidding_strategy?.maximize_conversions?.target_cpa_micros,
+          ),
+        ]))
+      : null;
     /** The digits at the tail of a resource name, or null. */
     const strategyIdOf = (rn: unknown): string | null => {
       const last = String(rn ?? "").trim().split("/").pop() ?? "";
@@ -416,6 +443,14 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       // false here is what makes the bid-target reading stay silent instead of
       // reporting a target that may well be set.
       bidTargetRead: portfolioCarriesTarget(r) !== null,
+      // The cost target's figure itself, so a target set ABOVE the recorded
+      // ceiling can be told apart from no target. The campaign's own wins over
+      // a portfolio's; null where neither carries a cost target.
+      bidTargetMicros: costTargetMicros(
+        r.campaign?.target_cpa?.target_cpa_micros,
+        r.campaign?.maximize_conversions?.target_cpa_micros,
+        portfolioTargetMicros?.get(strategyIdOf(r.campaign?.bidding_strategy) ?? "") ?? null,
+      ),
     }));
 
     // ── Existing negatives, so we never propose a duplicate ───────────────
@@ -443,10 +478,69 @@ export class GoogleAdsAdapter implements PlatformAdapter {
              campaign_criterion.keyword.text, campaign_criterion.keyword.match_type
         FROM campaign_criterion
        WHERE campaign_criterion.negative = TRUE AND campaign_criterion.type = 'KEYWORD'`, log);
+    // The match type was always selected and never read. It is decoded here so
+    // the query-promotion rule can tell an exact negative (blocks one query)
+    // from a phrase or a broad one (blocks every query holding the words).
+    const campaignRules = shapeCampaignNegativeRules(negRows, matchType);
+
+    // THE TWO SOURCES THE PULL ABOVE NEVER SAW, both read-only GAQL, and both
+    // allowed to fail without costing the first. A negative on a shared list
+    // attached to a campaign, or on the account itself, blocks a query exactly
+    // as a campaign's own does; leaving them out meant a query the account
+    // already refuses was still recommended as a keyword. A failed read of
+    // either is NAMED on the result and never read as "nothing is blocked
+    // there" — it can only ever leave a blocked query listed, which is clutter.
+    const sharedAttachRows = await tryQuery(customer, "shared negative list attachments", `
+      SELECT campaign.id, shared_set.id, shared_set.name
+        FROM campaign_shared_set
+       WHERE shared_set.type = 'NEGATIVE_KEYWORDS'
+         AND campaign_shared_set.status = 'ENABLED'`, log);
+    const sharedCriterionRows = await tryQuery(customer, "shared negative list keywords", `
+      SELECT shared_set.id, shared_set.name,
+             shared_criterion.keyword.text, shared_criterion.keyword.match_type
+        FROM shared_criterion
+       WHERE shared_set.type = 'NEGATIVE_KEYWORDS'
+         AND shared_set.status = 'ENABLED'
+         AND shared_criterion.type = 'KEYWORD'`, log);
+    const accountNegRows = await tryQuery(customer, "account-level negatives", `
+      SELECT customer_negative_criterion.keyword.text, customer_negative_criterion.keyword.match_type
+        FROM customer_negative_criterion
+       WHERE customer_negative_criterion.type = 'KEYWORD'`, log);
+    const negativeRules: NegativeRuleFacts = combineNegativeRules(
+      campaignRules,
+      shapeSharedNegativeRules(sharedAttachRows, sharedCriterionRows, matchType),
+      shapeAccountNegativeRules(accountNegRows, matchType),
+    );
+    if (negativeRules.unread.length) log(`    ⚠ could not read ${negativeRules.unread.join(" or ")} — a query one of them blocks can still be listed`);
+
+    // The flat sets the waste rule and the growth reading stand on, with the
+    // shared and account texts FOLDED IN so the waste rule stops proposing a
+    // negative a shared list already holds. The base read is still the one
+    // that decides null: a failed campaign read leaves both null.
     const negatives = shapeNegatives(negRows);
-    const existingNegatives = negatives.all;
-    const negativesByCampaign = negatives.byCampaign;
-    log(negativesLine(negatives));
+    let existingNegatives = negatives.all;
+    let negativesByCampaign = negatives.byCampaign;
+    if (existingNegatives && negativesByCampaign && negativeRules.byCampaign) {
+      const allTexts = new Set(existingNegatives);
+      const byCampaign = new Map<string, Set<string>>();
+      for (const [id, set] of negativesByCampaign) byCampaign.set(id, new Set(set));
+      for (const [id, rules] of negativeRules.byCampaign) {
+        const set = byCampaign.get(id) ?? new Set<string>();
+        for (const r of rules) { set.add(r.text); allTexts.add(r.text); }
+        byCampaign.set(id, set);
+      }
+      for (const r of negativeRules.account) {
+        allTexts.add(r.text);
+        for (const c of campaigns) {
+          const set = byCampaign.get(c.id) ?? new Set<string>();
+          set.add(r.text);
+          byCampaign.set(c.id, set);
+        }
+      }
+      existingNegatives = allTexts;
+      negativesByCampaign = byCampaign;
+    }
+    log(negativesLine({ all: existingNegatives, byCampaign: negativesByCampaign }));
 
     // ── Every keyword the account holds, as a SETTINGS read ────────────────
     // Not the `keyword_view` pull below: that one is filtered to
@@ -483,7 +577,8 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       SELECT ad_group_criterion.resource_name,
              ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
              ad_group_criterion.status, ad_group_criterion.quality_info.quality_score,
-             ad_group.name, ad_group.status, campaign.name, campaign.status
+             ad_group_criterion.final_urls,
+             ad_group.name, ad_group.status, campaign.id, campaign.name, campaign.status
         FROM ad_group_criterion
        WHERE ad_group_criterion.type = 'KEYWORD'
          AND ad_group_criterion.negative = FALSE
@@ -496,6 +591,13 @@ export class GoogleAdsAdapter implements PlatformAdapter {
           matchType: matchType(r.ad_group_criterion?.keyword?.match_type),
           adGroupName: r.ad_group?.name ? String(r.ad_group.name) : null,
           campaignName: r.campaign?.name ? String(r.campaign.name) : null,
+          campaignId: r.campaign?.id != null ? String(r.campaign.id) : null,
+          // The keyword's own landing page. An empty list is "it inherits its
+          // ad's", and an absent field (the query dropping it) is null — "not
+          // read" — so the landing-page reading never mistakes one for the other.
+          finalUrls: r.ad_group_criterion && "final_urls" in r.ad_group_criterion
+            ? (Array.isArray(r.ad_group_criterion.final_urls) ? r.ad_group_criterion.final_urls.map(String) : [])
+            : null,
           criterionResourceName: r.ad_group_criterion?.resource_name ? String(r.ad_group_criterion.resource_name) : null,
           // Over REST these arrive as integers, so an undecoded value would
           // compare equal to no status name and read as "not enabled" on every
@@ -589,6 +691,35 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       conversions: Number(r.metrics?.conversions ?? 0),
       finalUrls: Array.isArray(r.ad_group_criterion?.final_urls) ? r.ad_group_criterion.final_urls.map(String) : [],
     }));
+
+    // THE LAST DAY EACH CANDIDATE TOOK SPEND. The 90-day pull above sums the
+    // window, so a keyword that stopped spending weeks ago kept the same total
+    // on every run until the window rolled past it. Only the keywords the
+    // dead-keyword rule can read are asked about (spent, converted nothing),
+    // capped, in one dated query. A failed or capped read leaves the date null,
+    // which the rule reads as "not read" and never as "still spending".
+    const lastSpendCandidates = keywords
+      .filter((k) => k.conversions === 0 && k.costMicros > 0 && k.criterionResourceName)
+      .slice(0, LAST_SPEND_CANDIDATE_LIMIT);
+    if (lastSpendCandidates.length > 0) {
+      const names = lastSpendCandidates.map((k) => `'${k.criterionResourceName.replace(/'/g, "\\'")}'`).join(", ");
+      const dated = await tryQuery(customer, "keyword last spend", `
+        SELECT ad_group_criterion.resource_name, segments.date, metrics.cost_micros
+          FROM keyword_view
+         WHERE segments.date BETWEEN '${ctx.windowStart}' AND '${ctx.windowEnd}' AND metrics.cost_micros > 0
+           AND ad_group_criterion.resource_name IN (${names})`, log);
+      if (dated && dated.length < LAST_SPEND_ROW_LIMIT) {
+        const last = new Map<string, string>();
+        for (const r of dated) {
+          const rn = String(r.ad_group_criterion?.resource_name ?? "");
+          const d = String(r.segments?.date ?? "");
+          if (rn && /^\d{4}-\d{2}-\d{2}$/.test(d) && (last.get(rn) ?? "") < d) last.set(rn, d);
+        }
+        for (const k of keywords) k.lastSpendOn = last.get(k.criterionResourceName) ?? null;
+      } else if (dated) {
+        log?.(`keyword last spend: ${dated.length} dated rows came back, at or over the ${LAST_SPEND_ROW_LIMIT} this run reads, so no last-spend date is used this run.`);
+      }
+    }
 
     // Scope to live ad groups in live campaigns. Filtering on ad_group_ad.status
     // alone still counts enabled ads sitting inside paused ad groups or paused
@@ -701,6 +832,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       ads,
       existingNegatives,
       negativesByCampaign,
+      negativeRules,
       protectedPatterns: ctx.protectedPatterns,
       tracking,
       conversionLag,

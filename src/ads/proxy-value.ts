@@ -55,6 +55,35 @@ export interface ProxyEconomics {
   customerValueCents: number | null;
   customerValueFromClient: boolean;
   closeRatePct: number | null;
+  /** Why a missing figure is missing, where the record knows. Structurally
+   *  `MissingFigureWhy` in rules.ts, restated for the same no-cycle reason. */
+  closeRateWhy?: { kind: "recorded_absent" | "stored_as_nought" | "not_asked"; by?: string | null; at?: string | null } | null;
+  customerValueWhy?: { kind: "recorded_absent" | "stored_as_nought" | "not_asked"; by?: string | null; at?: string | null } | null;
+}
+
+/**
+ * The sentence for a missing input, which says WHY from the record when the
+ * record knows. "Nobody has answered it" is true of a blank and FALSE of a
+ * figure a named person recorded as not known, or a nought somebody saved, or
+ * a retainer account the launch never asks: reading the false sentence is how a
+ * row kept saying the close rate was missing the day after a launch step was
+ * answered. The ordinary blank keeps the ordinary sentence.
+ */
+function missingSentence(
+  what: string,
+  blank: string,
+  why: ProxyEconomics["closeRateWhy"] | undefined,
+): string {
+  if (why?.kind === "recorded_absent") {
+    return `${what} Recorded on the account as not known${why.by ? ` by ${why.by}` : ""}${why.at ? ` on ${why.at}` : ""}. That was a real answer, and it is why the launch step is complete without a figure; nothing here will invent one. It ends when a figure is typed in.`;
+  }
+  if (why?.kind === "stored_as_nought") {
+    return `${what} A nought is saved on the account record, and a nought is the shape of a blank rather than a figure, so it counts as unanswered. Type the real figure over it.`;
+  }
+  if (why?.kind === "not_asked") {
+    return `${what} This account is on the retainer model, which the launch never asks for it, so the step finished without one and nobody has been asked. Ask the client if an estimated lead value is wanted.`;
+  }
+  return blank;
 }
 
 /** One conversion action, reduced to what deciding a value needs. */
@@ -177,10 +206,18 @@ export function proxyConversionValue(
   const e = economics ?? { customerValueCents: null, customerValueFromClient: false, closeRatePct: null };
   const missing: string[] = [];
   if (e.customerValueCents == null || e.customerValueCents <= 0) {
-    missing.push("What one customer is worth to this client. Nobody has answered it on the account record — and a nought there is the shape of the blank, not an answer.");
+    missing.push(missingSentence(
+      "What one customer is worth to this client.",
+      "What one customer is worth to this client. Nobody has answered it on the account record — and a nought there is the shape of the blank, not an answer.",
+      e.customerValueWhy,
+    ));
   }
   if (e.closeRatePct == null || e.closeRatePct <= 0) {
-    missing.push("What share of leads become customers. Nobody has answered it on the account record, and it is the figure a real client can honestly not have at kickoff — which is a reason to ask them for it, never to pick one.");
+    missing.push(missingSentence(
+      "What share of leads become customers.",
+      "What share of leads become customers. Nobody has answered it on the account record, and it is the figure a real client can honestly not have at kickoff — which is a reason to ask them for it, never to pick one.",
+      e.closeRateWhy,
+    ));
   }
 
   const actionNames = counting.map((a) => a.name);

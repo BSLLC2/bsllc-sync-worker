@@ -86,6 +86,7 @@
  *     a person's own list is the one thing this must not do.
  */
 
+import { EVIDENCE_LIST_CEILING } from "./evidence-list.js";
 import { normalizeQueryText, keywordCanServe, type ExistingKeyword } from "./query-promotion.js";
 import {
   relevanceOf, relevanceLine, noServicesLine,
@@ -645,7 +646,7 @@ export function keywordGaps(i: GapInput): GapReading {
     const lines: string[] = [];
     lines.push(relevanceLine(g.relevance, i.services));
     if (seedSource) lines.push(seedSource);
-    for (const t of terms.slice(0, 8)) {
+    for (const t of terms.slice(0, EVIDENCE_LIST_CEILING)) {
       // WHERE IT CAME FROM AND WHAT IT IS, on every row, because a term off
       // the client's own list and one an expansion returned are two different
       // claims and a reader was being left to guess which.
@@ -659,7 +660,7 @@ export function keywordGaps(i: GapInput): GapReading {
       else if (t.competitorRank != null) bits.push(`a competitor ranks #${t.competitorRank}`);
       lines.push(`"${t.keyword}" — ${bits.join(" · ")}`);
     }
-    if (terms.length > 8) lines.push(`…and ${terms.length - 8} more term(s) under the same service`);
+    if (terms.length > EVIDENCE_LIST_CEILING) lines.push(`…and ${terms.length - EVIDENCE_LIST_CEILING} more term(s) under the same service`);
     const setAsideLine = tofuSetAsideLine(setAsideTerms.length, setAsideVolume || null);
     if (setAsideLine) lines.push(setAsideLine);
     const keptOwn = keptOwnTargetsLine(ownListTerms.filter((t) => t.band === "tofu").length);

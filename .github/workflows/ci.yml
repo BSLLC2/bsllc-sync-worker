@@ -30,6 +30,8 @@ jobs:
         run: npm run verify-ads-findings
       - name: Ads evidence-strength guard
         run: npm run verify-ads-evidence-strength
+      - name: Ads findings reflect what was done in the account
+        run: npm run verify-ads-reflect-actions
       - name: Zero-vs-nothing guard
         run: npm run verify-zero-vs-nothing
       - name: Meta importer guard

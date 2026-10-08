@@ -158,6 +158,7 @@
     "verify-ads-reversal": "tsx src/verify-ads-reversal.ts",
     "verify-ads-findings": "tsx src/verify-ads-findings.ts",
     "verify-ads-evidence-strength": "tsx src/verify-ads-evidence-strength.ts",
+    "verify-ads-reflect-actions": "tsx src/verify-ads-reflect-actions.ts",
     "verify-ads-keyword-coverage": "tsx src/verify-ads-keyword-coverage.ts",
     "verify-ads-growth": "tsx src/verify-ads-growth.ts",
     "verify-ads-write": "tsx src/verify-ads-write.ts",
