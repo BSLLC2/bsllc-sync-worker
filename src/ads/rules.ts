@@ -1376,6 +1376,13 @@ export interface AuditInput {
    */
   keywordsTruncated?: boolean;
   /**
+   * True where the search-terms report came back at its row limit, so terms
+   * behind the cut were not read. The sweep uses it: a waste or a promotion row
+   * whose terms all sit behind the cut is NOT gone from the account, and
+   * closing it as cleared would be the audit reading its own limit as an answer.
+   */
+  searchTermsTruncated?: boolean;
+  /**
    * What a named person confirmed this client actually sells. Read from
    * Postgres by the caller, not from the ad platform — it is not the platform's
    * to know. ABSENT means it was not gathered; `services: null` inside it means

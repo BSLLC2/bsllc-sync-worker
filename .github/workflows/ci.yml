@@ -32,6 +32,8 @@ jobs:
         run: npm run verify-ads-evidence-strength
       - name: Ads findings reflect what was done in the account
         run: npm run verify-ads-reflect-actions
+      - name: Ads audit run summary and sweep guard (pure sections)
+        run: npm run verify-ads-run-summary
       - name: Zero-vs-nothing guard
         run: npm run verify-zero-vs-nothing
       - name: Meta importer guard
@@ -68,3 +70,33 @@ jobs:
       # silent for twenty days on a client whose leads had stopped.
       - name: Alert reminder times the alert, not the run
         run: npm run verify-alert-reminder
+
+  # The audit's store functions (sweep, orphan sweep, re-open, run record) drive
+  # real SQL, so they run against a throwaway Postgres service container and a
+  # scratch schema the guard creates and drops. No credential, no client data:
+  # every row is invented. The main job above stays free of any database.
+  ads-store:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ads_verify
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ADS_VERIFY_DATABASE_URL: postgresql://postgres:ci@localhost:5432/ads_verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Ads audit store guard (real SQL)
+        run: npm run verify-ads-run-summary

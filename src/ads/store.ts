@@ -29,6 +29,11 @@ import type { ResearchFacts, ResearchKeyword } from "./keyword-gap.js";
 import type { RecordedTarget } from "./keyword-sourcing.js";
 import type { PhoneDemandFacts } from "./traffic-readiness.js";
 import { parseCompetitorNames } from "./competitor-names.js";
+import {
+  planSweep, planOrphanClosures, isMachineClosure,
+  type NotRechecked, type OrphanGroup, type MappingState, type OrphanPlan,
+} from "./sweep-plan.js";
+import { failureReason, type AdsRunSummary, type RunOutcome, type ClosedRecord } from "./run-summary.js";
 
 export type Actor = string;
 
@@ -72,8 +77,9 @@ export async function upsertFinding(
 
   const { rows: existingRows } = await c.query<{
     id: string; status: string; evidence_hash: string | null; times_seen: number;
+    dismissed_by: string | null; dismissed_reason: string | null;
   }>(
-    `SELECT id, status, evidence_hash, times_seen FROM ads_findings
+    `SELECT id, status, evidence_hash, times_seen, dismissed_by, dismissed_reason FROM ads_findings
       WHERE client_id = $1 AND platform = $2 AND account_id = $3 AND entity_id = $4 AND finding_type = $5`,
     [clientId, platform, accountId, f.entityId, f.findingType],
   );
@@ -124,7 +130,12 @@ export async function upsertFinding(
   // genuinely moving — and when it does, the event log says so, so nobody
   // wonders why a dismissed finding reappeared.
   if (SETTLED.includes(existing.status)) {
-    if (!materiallyChanged(existing.evidence_hash, hash)) {
+    // A row the AUDIT closed for a reason that has since gone (the rules moved,
+    // or its account was not being read) was never decided by anybody, so it
+    // comes back whatever the evidence hash says. A person's dismissal never
+    // matches this and stays sticky.
+    const machineClosed = isMachineClosure(existing.dismissed_by, existing.dismissed_reason, actor);
+    if (!machineClosed && !materiallyChanged(existing.evidence_hash, hash)) {
       await c.query(`UPDATE ads_findings SET last_seen_at = now() WHERE id = $1`, [existing.id]);
       return { id: existing.id, outcome: "left_dismissed" };
     }
@@ -150,7 +161,9 @@ export async function upsertFinding(
     );
     await logEvent(
       c, existing.id, "reopened", actor,
-      `Evidence moved since it was dismissed — re-raised for another look.`,
+      machineClosed
+        ? "Raised again — the audit had closed it and it applies again."
+        : `Evidence moved since it was dismissed — re-raised for another look.`,
       JSON.stringify({ previousHash: existing.evidence_hash, hash, estImpactCents: f.estImpactCents }),
     );
     return { id: existing.id, outcome: "reopened" };
@@ -199,28 +212,208 @@ export async function sweepResolved(
   clientId: string,
   platform: string,
   accountId: string,
-  stillPresentIds: string[],
+  /** The (finding type, entity) PAIRS this run produced — see `pairKey`. Entity
+   *  ids alone are not a key: three rules key a row on the bare campaign id. */
+  presentPairs: ReadonlySet<string>,
   actor: Actor,
-): Promise<number> {
-  const { rows } = await c.query<{ id: string; title: string }>(
-    `SELECT id, title FROM ads_findings
+  opts: { currentRuleset?: number; unrecheckable?: ReadonlyMap<string, string> } = {},
+): Promise<{ closed: ClosedRecord[]; notRechecked: NotRechecked[] }> {
+  const { rows } = await c.query<{
+    id: string; title: string; entity_id: string; finding_type: string; ruleset_version: number; entity_name: string | null;
+  }>(
+    `SELECT id, title, entity_id, finding_type, ruleset_version, entity_name FROM ads_findings
       WHERE client_id = $1 AND platform = $2 AND account_id = $3
-        AND status IN ('open','proposed')
-        AND NOT (entity_id = ANY($4::text[]))`,
-    [clientId, platform, accountId, stillPresentIds],
+        AND status IN ('open','proposed')`,
+    [clientId, platform, accountId],
   );
-  for (const r of rows) {
+  const plan = planSweep(
+    rows.map((r) => ({
+      id: r.id, title: r.title, entityId: r.entity_id, findingType: r.finding_type,
+      rulesetVersion: r.ruleset_version, entityName: r.entity_name,
+    })),
+    presentPairs,
+    opts.currentRuleset ?? ADS_RULESET_VERSION,
+    opts.unrecheckable ?? new Map(),
+  );
+  const closed: ClosedRecord[] = [];
+  for (const k of plan.close) {
     await c.query(
       `UPDATE ads_findings
-          SET status = 'dismissed', dismissed_by = $2, dismissed_at = now(),
-              dismissed_reason = 'No longer present in the account — the condition cleared on its own.'
-        WHERE id = $1`,
-      [r.id, actor],
+          SET status = 'dismissed', dismissed_by = $2, dismissed_at = now(), dismissed_reason = $3
+        WHERE id = $1 AND status IN ('open','proposed')`,
+      [k.row.id, actor, k.reason],
     );
-    await logEvent(c, r.id, "dismissed", actor, "Condition cleared — not seen in the latest audit.", null);
+    await logEvent(c, k.row.id, "dismissed", actor, k.eventNote, null);
+    closed.push({ id: k.row.id, title: k.row.title, why: k.kind === "rule_update" ? "rule_update" : "cleared" });
   }
-  return rows.length;
+  return { closed, notRechecked: plan.leftBecauseUnreadable };
 }
+
+// ── Accounts the audit no longer reads ───────────────────────────────────────
+
+/**
+ * Digits only for a Google account number, as the run normalises it; Meta
+ * numbers keep their `act_` prefix. One function so the audit's targets and the
+ * orphan comparison cannot disagree about what "the same account" means.
+ */
+export function normaliseAccountId(v: string): string {
+  const t = (v ?? "").trim();
+  return t.startsWith("act_") ? t : t.replace(/\D/g, "");
+}
+
+/** Every (client, platform, account) holding open rows, with what the mapping now says. */
+export async function listOpenAccountGroups(c: pg.Client): Promise<{ groups: OrphanGroup[]; totalOpen: number }> {
+  const { rows } = await c.query<{
+    client_id: string; platform: string; account_id: string; n: string; last_seen: Date | string | null;
+    client_status: string | null; mapping_id: string | null; mapping_enabled: boolean | null; mapping_external: string | null;
+  }>(
+    `WITH g AS (
+       SELECT client_id, platform, account_id, count(*) AS n, max(last_seen_at) AS last_seen
+         FROM ads_findings WHERE status IN ('open','proposed')
+        GROUP BY client_id, platform, account_id)
+     SELECT g.client_id, g.platform, g.account_id, g.n::text AS n, g.last_seen,
+            cl.status AS client_status,
+            cm.id AS mapping_id, cm.enabled AS mapping_enabled, cm.external_id AS mapping_external
+       FROM g
+       LEFT JOIN clients cl ON cl.id = g.client_id
+       LEFT JOIN connector_mappings cm ON cm.client_id = g.client_id AND cm.source = g.platform`,
+  );
+  type Row = (typeof rows)[number];
+  const byKey = new Map<string, Row[]>();
+  for (const r of rows) {
+    const k = `${r.platform}\u0000${r.client_id}\u0000${r.account_id}`;
+    byKey.set(k, [...(byKey.get(k) ?? []), r]);
+  }
+  const groups: OrphanGroup[] = [];
+  for (const list of Array.from(byKey.values())) {
+    const first = list[0]!;
+    // More than one mapping row for a client and platform is possible. The one
+    // that names THIS account decides; failing that, one that is switched on.
+    const same = list.find((r) => r.mapping_external && normaliseAccountId(r.mapping_external) === normaliseAccountId(first.account_id));
+    const pick = same ?? list.find((r) => r.mapping_enabled === true && r.mapping_id != null) ?? first;
+    const last = first.last_seen ? new Date(first.last_seen as string | Date) : null;
+    groups.push({
+      clientId: first.client_id, platform: first.platform, accountId: first.account_id,
+      openRows: Number(first.n),
+      lastCheckedOn: last && !Number.isNaN(last.getTime()) ? last.toISOString().slice(0, 10) : null,
+      state: {
+        clientStatus: first.client_status,
+        mappingExists: pick.mapping_id != null,
+        mappingEnabled: pick.mapping_enabled === true,
+        mappingAccountId: pick.mapping_external,
+      },
+    });
+  }
+  return { groups, totalOpen: groups.reduce((n, g) => n + g.openRows, 0) };
+}
+
+/** Close the open rows of every account this run did not read, behind the breaker. */
+export async function sweepUnauditedAccounts(
+  c: pg.Client,
+  audited: ReadonlySet<string>,
+  actor: Actor,
+): Promise<{ plan: OrphanPlan; closedByGroup: { group: OrphanGroup; closed: ClosedRecord[]; reason: string }[] }> {
+  const { groups, totalOpen } = await listOpenAccountGroups(c);
+  const plan = planOrphanClosures(groups, audited, totalOpen, normaliseAccountId);
+  const closedByGroup: { group: OrphanGroup; closed: ClosedRecord[]; reason: string }[] = [];
+  for (const k of plan.close) {
+    const { rows } = await c.query<{ id: string; title: string }>(
+      `SELECT id, title FROM ads_findings
+        WHERE client_id = $1 AND platform = $2 AND account_id = $3 AND status IN ('open','proposed')`,
+      [k.group.clientId, k.group.platform, k.group.accountId],
+    );
+    const closed: ClosedRecord[] = [];
+    for (const r of rows) {
+      await c.query(
+        `UPDATE ads_findings
+            SET status = 'dismissed', dismissed_by = $2, dismissed_at = now(), dismissed_reason = $3
+          WHERE id = $1 AND status IN ('open','proposed')`,
+        [r.id, actor, k.reason],
+      );
+      await logEvent(c, r.id, "dismissed", actor, "Closed — this ad account is no longer audited.", null);
+      closed.push({ id: r.id, title: r.title, why: "not_audited" });
+    }
+    closedByGroup.push({ group: k.group, closed, reason: k.reason });
+  }
+  return { plan, closedByGroup };
+}
+
+/**
+ * Mapped accounts the audit did NOT read, for the run record: a connector row
+ * with an account number on a client who is not launch/active, or that is
+ * switched off. Churned clients are left out — nobody is optimising them.
+ */
+export async function unauditedMappings(
+  c: pg.Client,
+  source: string,
+  onlyClient?: string,
+): Promise<{ clientId: string; clientName: string; accountId: string; why: string }[]> {
+  const { rows } = await c.query<{ id: string; name: string; status: string | null; external_id: string; enabled: boolean }>(
+    `SELECT c.id, c.name, c.status, cm.external_id, cm.enabled
+       FROM clients c
+       JOIN connector_mappings cm ON cm.client_id = c.id AND cm.source = $1
+      WHERE cm.external_id IS NOT NULL AND btrim(cm.external_id) <> ''
+        AND c.status <> 'churned'
+        AND (cm.enabled = false OR c.status NOT IN ('launch','active'))
+      ORDER BY c.name`,
+    [source],
+  );
+  const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const want = slugify(onlyClient ?? "");
+  return rows
+    .filter((r) => !onlyClient || slugify(r.name).startsWith(want) || r.external_id.replace(/\D/g, "") === onlyClient.replace(/\D/g, ""))
+    .map((r) => ({
+      clientId: r.id, clientName: r.name, accountId: r.external_id.trim(),
+      why: !r.enabled ? "the connector is switched off" : `the client is marked ${r.status ?? "inactive"}`,
+    }));
+}
+
+// ── The run record ───────────────────────────────────────────────────────────
+
+const RUN_KEEP = 8;
+
+/**
+ * Write one account's run record, then keep only the last few for that account.
+ *
+ * NEVER FAILS THE RUN. This is bookkeeping about the audit, and an audit that
+ * died because its own receipt could not be written would be the worst of both:
+ * a run that did its work and reports that it did not. A missing table (the
+ * dashboard has not deployed the schema yet) or any other error is returned as
+ * a sentence for the log and nothing else.
+ */
+export async function writeRunRecord(
+  c: pg.Client,
+  r: {
+    clientId: string; platform: string; accountId: string; startedAt: Date;
+    outcome: RunOutcome; reason: string | null; scoped: boolean; ruleset: number;
+    summary: AdsRunSummary | null;
+  },
+): Promise<string | null> {
+  try {
+    await c.query(
+      `INSERT INTO ads_audit_runs (id, client_id, platform, account_id, started_at, ran_at, ruleset_version, scoped, outcome, reason, summary_json)
+       VALUES ($1,$2,$3,$4,$5, now(), $6,$7,$8,$9,$10)`,
+      [
+        randomUUID(), r.clientId, r.platform, r.accountId, r.startedAt.toISOString(), r.ruleset, r.scoped, r.outcome,
+        r.reason ? r.reason.slice(0, 240) : null,
+        r.summary ? JSON.stringify(r.summary) : null,
+      ],
+    );
+    await c.query(
+      `DELETE FROM ads_audit_runs
+        WHERE client_id = $1 AND platform = $2 AND account_id = $3
+          AND id NOT IN (
+            SELECT id FROM ads_audit_runs
+             WHERE client_id = $1 AND platform = $2 AND account_id = $3
+             ORDER BY ran_at DESC LIMIT ${RUN_KEEP})`,
+      [r.clientId, r.platform, r.accountId],
+    );
+    return null;
+  } catch (e) {
+    return `run record not written: ${failureReason(e)}`;
+  }
+}
+
 
 /**
  * Close the rows a sharper finding replaced.
@@ -245,21 +438,21 @@ export async function supersedeFindings(
   accountId: string,
   items: { entityId: string; findingType: string; reason: string }[],
   actor: Actor,
-): Promise<number> {
-  let closed = 0;
+): Promise<ClosedRecord[]> {
+  const closed: ClosedRecord[] = [];
   for (const it of items) {
-    const { rows } = await c.query<{ id: string }>(
+    const { rows } = await c.query<{ id: string; title: string }>(
       `UPDATE ads_findings
           SET status = 'dismissed', dismissed_by = $5, dismissed_at = now(), dismissed_reason = $6
         WHERE client_id = $1 AND platform = $2 AND account_id = $3
           AND entity_id = $4 AND finding_type = $7
           AND status IN ('open','proposed')
-        RETURNING id`,
+        RETURNING id, title`,
       [clientId, platform, accountId, it.entityId, actor, it.reason, it.findingType],
     );
     for (const r of rows) {
       await logEvent(c, r.id, "dismissed", actor, it.reason, null);
-      closed += 1;
+      closed.push({ id: r.id, title: r.title, why: "replaced" });
     }
   }
   return closed;

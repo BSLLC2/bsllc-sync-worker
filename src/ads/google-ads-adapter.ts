@@ -147,6 +147,9 @@ export function enumName(map: Record<string, string>, v: unknown): string | null
  * the account HOLDS is always read whole and only what it SPENT is cut.
  */
 export const KEYWORD_PERFORMANCE_LIMIT = 300;
+/** Rows the search-terms report takes, dearest first. A page this long means
+ *  there were probably more behind it. */
+export const SEARCH_TERM_ROW_LIMIT = 500;
 /** Keywords asked about in the last-spend pull: the dearest that converted
  *  nothing, which are the ones `dead_keyword` can raise a row for. */
 export const LAST_SPEND_CANDIDATE_LIMIT = 120;
@@ -623,7 +626,8 @@ export class GoogleAdsAdapter implements PlatformAdapter {
         FROM search_term_view
        WHERE segments.date BETWEEN '${ctx.windowStart}' AND '${ctx.windowEnd}' AND metrics.cost_micros > 0
        ORDER BY metrics.cost_micros DESC
-       LIMIT 500`, log);
+       LIMIT ${SEARCH_TERM_ROW_LIMIT}`, log);
+    const searchTermsTruncated = termRows.length >= SEARCH_TERM_ROW_LIMIT;
 
     // The same query row can appear under several ad groups; the rules care
     // about the term's TOTAL cost in a campaign, so fold before evaluating —
@@ -840,6 +844,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       searchTermSpendByCampaign,
       existingKeywords,
       keywordsTruncated,
+      searchTermsTruncated,
       // The client's own economics are not the platform's to know. They are
       // read from Postgres by the caller (src/ads-findings-run.ts) and merged
       // onto the input, which keeps this adapter what it is: one vendor's API.

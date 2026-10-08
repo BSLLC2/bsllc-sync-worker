@@ -6,11 +6,13 @@ import { GoogleAdsApi } from "google-ads-api";
 import { loadConfig, digitsOnly } from "./config.js";
 import { evaluateAudit, platformSignals, ADS_RULESET_VERSION, type DerivedFinding } from "./ads/rules.js";
 import { accountingLines } from "./ads/run-accounting.js";
+import { pairKey, unrecheckableTypes, NOT_AUDITED_PREFIX, type NotRechecked } from "./ads/sweep-plan.js";
+import { buildRunSummary, failureReason, type AdsRunSummary, type ClosedRecord, type RunOutcome } from "./ads/run-summary.js";
 import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import {
-  upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, protectedPatternsFor, brandPatternsFor, competitorNamesFor, clientEconomicsFor,
+  upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, writeRunRecord, sweepUnauditedAccounts, unauditedMappings, normaliseAccountId, protectedPatternsFor, brandPatternsFor, competitorNamesFor, clientEconomicsFor,
   outcomeFeedFactsFor, clientServicesFor, researchFactsFor, phoneDemandFor, seoTargetsFor,
 } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
@@ -49,6 +51,18 @@ function ninetyDayWindow(): { start: string; end: string } {
   return { start: d(90), end: d(1) };
 }
 
+/** What one account's audit did, kept so the run can write its receipt. */
+interface AuditedAccount {
+  findings: DerivedFinding[];
+  created: number;
+  reopened: number;
+  startedAt: Date;
+  /** read | read_nothing. A failure never gets this far: it throws. */
+  outcome: Extract<RunOutcome, "read" | "read_nothing">;
+  reason: string | null;
+  summary: AdsRunSummary;
+}
+
 async function auditOne(
   c: pg.Client,
   adapter: PlatformAdapter,
@@ -57,7 +71,8 @@ async function auditOne(
   clientName: string,
   accountId: string,
   dryRun: boolean,
-): Promise<{ findings: DerivedFinding[]; created: number; reopened: number; ids: string[] }> {
+): Promise<AuditedAccount> {
+  const startedAt = new Date();
   const { start, end } = ninetyDayWindow();
   const protectedPatterns = await protectedPatternsFor(c, clientId);
   console.log(`\n${"═".repeat(72)}\n${clientName} · ${platform} [${accountId}]\n${"═".repeat(72)}`);
@@ -215,7 +230,8 @@ async function auditOne(
   const { findings, engine } = refineNarrative(rulesFindings);
   console.log(`  rules v${ADS_RULESET_VERSION} produced ${findings.length} finding(s) · narrative engine: ${engine}`);
 
-  const ids: string[] = [];
+  const present = new Set<string>();
+  const upserts: { id: string; title: string; outcome: "created" | "refreshed" | "reopened" | "left_dismissed" | "left_in_flight" }[] = [];
   let created = 0, reopened = 0;
   for (const f of findings) {
     const impact = f.estImpactCents ? ` (${usd(f.estImpactCents)}/mo)` : "";
@@ -224,7 +240,10 @@ async function auditOne(
       continue;
     }
     const r = await upsertFinding(c, clientId, platform, accountId, f, ACTOR);
-    ids.push(f.entityId);
+    // The PAIR is the key a finding lives under. The sweep used to compare the
+    // entity id alone, and three rules share the bare campaign id.
+    present.add(pairKey(f.entityId, f.findingType));
+    upserts.push({ id: r.id, title: f.title, outcome: r.outcome });
     if (r.outcome === "created") created++;
     if (r.outcome === "reopened") reopened++;
     console.log(`    · ${r.outcome.padEnd(16)} [${f.findingType}] ${f.title}${impact}`);
@@ -233,33 +252,58 @@ async function auditOne(
     }
   }
 
+  const closed: ClosedRecord[] = [];
+  let notRechecked: NotRechecked[] = [];
+
   // A sharper reading of a fact closes the weaker row it replaced, BY NAME and
   // BEFORE the sweep. The sweep's own sentence is "the condition cleared on its
-  // own", which is false here — the condition did not clear, it got a better
-  // explanation — and a row somebody is working must never disappear under a
+  // own", which is false here: the condition did not clear, it got a better
+  // explanation, and a row somebody is working must never disappear under a
   // reason that is not true. Going first means the sweep finds it already
   // closed and leaves it alone.
   if (!dryRun) {
     const items = findings.flatMap((f) => f.supersedes ?? []);
     if (items.length) {
-      const closed = await supersedeFindings(c, clientId, platform, accountId, items, ACTOR);
-      if (closed) console.log(`    · ${closed} finding(s) replaced by a sharper reading of the same campaign`);
+      const replaced = await supersedeFindings(c, clientId, platform, accountId, items, ACTOR);
+      closed.push(...replaced);
+      if (replaced.length) console.log(`    · ${replaced.length} finding(s) replaced by a sharper reading of the same campaign`);
     }
   }
 
-  // Only sweep when we actually SAW the account. A read that returns nothing —
-  // a dormant adapter, an expired token, a permissions change — is
+  // Only sweep when we actually SAW the account. A read that returns nothing,
+  // from a dormant adapter, an expired token or a permissions change, is
   // indistinguishable from an account with no problems, and sweeping on it
   // would close every open finding the client has. Requiring at least one
   // campaign makes "we looked and it's clean" the only case that sweeps.
+  let outcome: AuditedAccount["outcome"] = "read";
+  let reason: string | null = null;
   if (!dryRun && input.campaigns.length > 0) {
-    const swept = await sweepResolved(c, clientId, platform, accountId, ids, ACTOR);
-    if (swept) console.log(`    · ${swept} finding(s) closed — the condition cleared on its own`);
+    // A rule that could not run is not a rule that found nothing: rows of a type
+    // whose input was unread or cut short are left, and said to be.
+    const unrecheckable = unrecheckableTypes({
+      negativesRead: accounting.negativesRead,
+      keywordsTruncated: platformInput.keywordsTruncated,
+      searchTermsTruncated: platformInput.searchTermsTruncated,
+    });
+    const swept = await sweepResolved(c, clientId, platform, accountId, present, ACTOR, { currentRuleset: ADS_RULESET_VERSION, unrecheckable });
+    closed.push(...swept.closed);
+    notRechecked = swept.notRechecked;
+    const byKind = (w: string) => swept.closed.filter((x) => x.why === w).length;
+    if (swept.closed.length) {
+      console.log(`    · ${swept.closed.length} finding(s) closed: ${byKind("cleared")} the condition cleared on its own`
+        + `${byKind("rule_update") ? `, ${byKind("rule_update")} after a rule update (ruleset ${ADS_RULESET_VERSION})` : ""}`);
+    }
+    for (const n of notRechecked) {
+      console.log(`    · ${n.count} ${n.findingType} row(s) left open and NOT re-checked this run: ${n.why}`);
+    }
   } else if (!dryRun) {
-    console.log(`    · read returned no campaigns — not sweeping, since that is indistinguishable from a failed read`);
+    outcome = "read_nothing";
+    reason = "The read came back with no campaigns, so nothing was closed. Rows from earlier runs stay as they were.";
+    console.log(`    · read returned no campaigns, so not sweeping: that is indistinguishable from a failed read`);
   }
 
-  return { findings, created, reopened, ids };
+  const summary = buildRunSummary({ upserts, closed, accounting, notRechecked });
+  return { findings, created, reopened, startedAt, outcome, reason, summary };
 }
 
 /**
@@ -361,6 +405,7 @@ async function main() {
   const onlyClient = (argv.find((a) => a.startsWith("--client="))?.slice(9) || "").trim();
   const dryRun = argv.includes("--dry-run");
   const cfg = loadConfig();
+  const runStartedAt = new Date();
 
   const api = new GoogleAdsApi({ client_id: cfg.clientId, client_secret: cfg.clientSecret, developer_token: cfg.developerToken });
   const google = new GoogleAdsAdapter(api, cfg);
@@ -380,23 +425,38 @@ async function main() {
     // that succeeded across ZERO accounts produces the same empty screen as a
     // clean week and means nothing at all — `accounts` and `read` are what let
     // the morning audit tell those apart (src/ads-operability.ts).
-    let accounts = 0, accountsRead = 0, totalFindings = 0;
+    let accounts = 0, accountsRead = 0, totalFindings = 0, totalClosed = 0, accountsFailed = 0;
+    /** Every account this run ATTEMPTED, whether or not the read worked. A
+     *  failed account is still an audited one: its rows are not orphans. */
+    const audited = new Set<string>();
+    /** Accounts the run did not audit, and why, so each gets a receipt. */
+    const skipped = new Map<string, { clientId: string; platform: string; accountId: string; reason: string; closed: ClosedRecord[] }>();
+    const skipKey = (platform: string, clientId: string, accountId: string) => `${platform}\u0000${clientId}\u0000${normaliseAccountId(accountId)}`;
 
     for (const [platform, adapter, source] of [
       ["google_ads", google as PlatformAdapter, "google_ads"],
       ["meta", meta as PlatformAdapter, "meta"],
     ] as const) {
+      const credentialed = adapter.capabilities().credentialed;
+      for (const u of await unauditedMappings(c, source, onlyClient || undefined)) {
+        skipped.set(skipKey(platform, u.clientId, u.accountId), {
+          clientId: u.clientId, platform, accountId: u.accountId, reason: `Not audited this run: ${u.why}.`, closed: [],
+        });
+      }
       const targets = await mappedAccounts(c, source, onlyClient || undefined);
       if (!targets.length) { console.log(`\nNo mapped ${platform} accounts${onlyClient ? ` for ${onlyClient}` : ""}.`); continue; }
       accounts += targets.length;
 
       for (const t of targets) {
         const accountId = platform === "google_ads" ? digitsOnly(t.accountId) : t.accountId;
+        audited.add(skipKey(platform, t.clientId, accountId));
+        const accountStart = new Date();
         try {
           const r = await auditOne(c, adapter, platform, t.clientId, t.clientName, accountId, dryRun);
           accountsRead++;
           totalCreated += r.created; totalReopened += r.reopened;
           totalFindings += r.findings.length;
+          totalClosed += r.summary.counts.closedCleared + r.summary.counts.closedRuleUpdate + r.summary.counts.closedReplaced;
           for (const f of r.findings) {
             if (f.estImpactCents >= DIGEST_FLOOR_CENTS) {
               digest.push(`${t.clientName} · ${usd(f.estImpactCents)}/mo · ${f.title}`);
@@ -405,21 +465,79 @@ async function main() {
           if (!dryRun) {
             const filed = await fileUrgentTasks(c, t.clientId, t.clientName);
             if (filed) console.log(`    · ${filed} urgent finding(s) filed as P1 tasks`);
+            // A platform with no credential reads nothing by design: that is a
+            // skip with a reason, not a quiet account.
+            const dormant = !credentialed && r.outcome === "read_nothing";
+            const failed = await writeRunRecord(c, {
+              clientId: t.clientId, platform, accountId, startedAt: r.startedAt, scoped: Boolean(onlyClient),
+              ruleset: ADS_RULESET_VERSION,
+              outcome: dormant ? "skipped" : r.outcome,
+              reason: dormant ? `Not audited this run: no ${platform === "meta" ? "Meta" : platform} access token on the worker.` : r.reason,
+              summary: r.summary,
+            });
+            if (failed) console.log(`    ⚠ ${failed}`);
           }
         } catch (e) {
           // One account's credentials or API hiccup must not take the whole
           // weekly run down for every other client.
+          accountsFailed++;
           console.log(`  ⚠ ${t.clientName} [${accountId}] failed: ${e instanceof Error ? e.message : e}`);
+          if (!dryRun) {
+            const failed = await writeRunRecord(c, {
+              clientId: t.clientId, platform, accountId, startedAt: accountStart, scoped: Boolean(onlyClient),
+              ruleset: ADS_RULESET_VERSION, outcome: "failed", reason: failureReason(e), summary: null,
+            });
+            if (failed) console.log(`    ⚠ ${failed}`);
+          }
         }
+      }
+    }
+
+    // Accounts the audit no longer reads keep whatever they had open, and
+    // nothing ever looks at those rows again. Closed here, by name, behind a
+    // breaker. Only on a full run that read at least one account: a scoped run
+    // proves nothing about the rest of the book, and a run that read nothing
+    // proves nothing about the mappings.
+    if (!dryRun && !onlyClient && accountsRead > 0) {
+      const { plan, closedByGroup } = await sweepUnauditedAccounts(c, audited, ACTOR);
+      if (plan.refused) console.log(`\n⚠ ${plan.refusal}`);
+      for (const g of closedByGroup) {
+        totalClosed += g.closed.length;
+        console.log(`\n${g.closed.length} row(s) closed on ${g.group.platform} account ${g.group.accountId} (${g.group.clientId}): ${g.reason}`);
+        const k = skipKey(g.group.platform, g.group.clientId, g.group.accountId);
+        const prev = skipped.get(k);
+        skipped.set(k, {
+          clientId: g.group.clientId, platform: g.group.platform, accountId: g.group.accountId,
+          reason: prev?.reason ?? g.reason.split(". ")[0]!.replace(NOT_AUDITED_PREFIX, "Not audited") + ".",
+          closed: g.closed,
+        });
+      }
+    }
+    if (!dryRun) {
+      for (const sk of Array.from(skipped.values())) {
+        if (audited.has(skipKey(sk.platform, sk.clientId, sk.accountId))) continue;
+        const summary = buildRunSummary({
+          upserts: [], closed: sk.closed,
+          accounting: {
+            promotionsBlocked: [], negativesRead: false, negativeSourcesUnread: [], landing: [], coreSearchesNotBlocked: [],
+            wasteRowsNotRaised: [], budgetRoutedToClient: [], targetHeld: [], competitorKeywords: [], keywordsStopped: [],
+          },
+          notRechecked: [],
+        });
+        const failed = await writeRunRecord(c, {
+          clientId: sk.clientId, platform: sk.platform, accountId: sk.accountId, startedAt: runStartedAt,
+          scoped: Boolean(onlyClient), ruleset: ADS_RULESET_VERSION, outcome: "skipped", reason: sk.reason, summary,
+        });
+        if (failed) console.log(`    ⚠ ${failed}`);
       }
     }
 
     if (!dryRun) {
       const sent = await queueDigest(c, digest);
       console.log(`\n${"─".repeat(72)}`);
-      console.log(`${totalCreated} new · ${totalReopened} re-opened on changed evidence · ${digest.length} above ${usd(DIGEST_FLOOR_CENTS)}/mo · digest queued for ${sent} teammate(s)`);
+      console.log(`${totalCreated} new · ${totalReopened} re-opened on changed evidence · ${totalClosed} closed · ${digest.length} above ${usd(DIGEST_FLOOR_CENTS)}/mo · digest queued for ${sent} teammate(s)`);
       emitJobSummary(formatJobSummary(
-        { accounts, read: accountsRead, findings: totalFindings, new: totalCreated, reopened: totalReopened },
+        { accounts, read: accountsRead, findings: totalFindings, new: totalCreated, reopened: totalReopened, closed: totalClosed, failed: accountsFailed, skipped: skipped.size },
         accounts === 0
           ? "no mapped ad account to read — \"no findings\" says nothing about anyone's spend"
           : `${accountsRead}/${accounts} account(s) read, ${totalFindings} finding(s)${totalFindings === 0 && accountsRead > 0 ? " — looked and found nothing" : ""}`,
