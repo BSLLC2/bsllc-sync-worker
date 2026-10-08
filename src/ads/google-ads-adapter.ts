@@ -147,6 +147,13 @@ export function enumName(map: Record<string, string>, v: unknown): string | null
  * the account HOLDS is always read whole and only what it SPENT is cut.
  */
 export const KEYWORD_PERFORMANCE_LIMIT = 300;
+/** Keywords asked about in the last-spend pull: the dearest that converted
+ *  nothing, which are the ones `dead_keyword` can raise a row for. */
+export const LAST_SPEND_CANDIDATE_LIMIT = 120;
+/** A dated pull this size or larger is treated as cut short and not used,
+ *  because a missing day would read as an earlier stop. 120 keywords x 90 days
+ *  is 10,800 at the very most. */
+export const LAST_SPEND_ROW_LIMIT = 12_000;
 
 /**
  * The negative keywords an account already holds, in the two shapes the rules
@@ -356,6 +363,22 @@ export class GoogleAdsAdapter implements PlatformAdapter {
           ].some((v) => v != null && Number(v) > 0),
         ]))
       : null;
+    /** A COST target's figure in micros: target CPA on the strategy, or the
+     *  target CPA a Maximize Conversions strategy carries. A return-on-spend
+     *  target is a ratio and is deliberately not a price, so it is not here. */
+    const costTargetMicros = (...vals: unknown[]): number | null => {
+      for (const v of vals) if (v != null && Number(v) > 0) return Number(v);
+      return null;
+    };
+    const portfolioTargetMicros: Map<string, number | null> | null = strategyRows
+      ? new Map(strategyRows.map((r: any) => [
+          String(r.bidding_strategy?.id ?? ""),
+          costTargetMicros(
+            r.bidding_strategy?.target_cpa?.target_cpa_micros,
+            r.bidding_strategy?.maximize_conversions?.target_cpa_micros,
+          ),
+        ]))
+      : null;
     /** The digits at the tail of a resource name, or null. */
     const strategyIdOf = (rn: unknown): string | null => {
       const last = String(rn ?? "").trim().split("/").pop() ?? "";
@@ -420,6 +443,14 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       // false here is what makes the bid-target reading stay silent instead of
       // reporting a target that may well be set.
       bidTargetRead: portfolioCarriesTarget(r) !== null,
+      // The cost target's figure itself, so a target set ABOVE the recorded
+      // ceiling can be told apart from no target. The campaign's own wins over
+      // a portfolio's; null where neither carries a cost target.
+      bidTargetMicros: costTargetMicros(
+        r.campaign?.target_cpa?.target_cpa_micros,
+        r.campaign?.maximize_conversions?.target_cpa_micros,
+        portfolioTargetMicros?.get(strategyIdOf(r.campaign?.bidding_strategy) ?? "") ?? null,
+      ),
     }));
 
     // ── Existing negatives, so we never propose a duplicate ───────────────
@@ -660,6 +691,35 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       conversions: Number(r.metrics?.conversions ?? 0),
       finalUrls: Array.isArray(r.ad_group_criterion?.final_urls) ? r.ad_group_criterion.final_urls.map(String) : [],
     }));
+
+    // THE LAST DAY EACH CANDIDATE TOOK SPEND. The 90-day pull above sums the
+    // window, so a keyword that stopped spending weeks ago kept the same total
+    // on every run until the window rolled past it. Only the keywords the
+    // dead-keyword rule can read are asked about (spent, converted nothing),
+    // capped, in one dated query. A failed or capped read leaves the date null,
+    // which the rule reads as "not read" and never as "still spending".
+    const lastSpendCandidates = keywords
+      .filter((k) => k.conversions === 0 && k.costMicros > 0 && k.criterionResourceName)
+      .slice(0, LAST_SPEND_CANDIDATE_LIMIT);
+    if (lastSpendCandidates.length > 0) {
+      const names = lastSpendCandidates.map((k) => `'${k.criterionResourceName.replace(/'/g, "\\'")}'`).join(", ");
+      const dated = await tryQuery(customer, "keyword last spend", `
+        SELECT ad_group_criterion.resource_name, segments.date, metrics.cost_micros
+          FROM keyword_view
+         WHERE segments.date BETWEEN '${ctx.windowStart}' AND '${ctx.windowEnd}' AND metrics.cost_micros > 0
+           AND ad_group_criterion.resource_name IN (${names})`, log);
+      if (dated && dated.length < LAST_SPEND_ROW_LIMIT) {
+        const last = new Map<string, string>();
+        for (const r of dated) {
+          const rn = String(r.ad_group_criterion?.resource_name ?? "");
+          const d = String(r.segments?.date ?? "");
+          if (rn && /^\d{4}-\d{2}-\d{2}$/.test(d) && (last.get(rn) ?? "") < d) last.set(rn, d);
+        }
+        for (const k of keywords) k.lastSpendOn = last.get(k.criterionResourceName) ?? null;
+      } else if (dated) {
+        log?.(`keyword last spend: ${dated.length} dated rows came back, at or over the ${LAST_SPEND_ROW_LIMIT} this run reads, so no last-spend date is used this run.`);
+      }
+    }
 
     // Scope to live ad groups in live campaigns. Filtering on ad_group_ad.status
     // alone still counts enabled ads sitting inside paused ad groups or paused

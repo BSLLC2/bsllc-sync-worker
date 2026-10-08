@@ -44,6 +44,7 @@
  * against, and none of them is mechanical. `applicability: "vendor"`.
  */
 
+import { recordLines } from "./evidence-list.js";
 import { firstBlockingNegative, rulesForCampaign, type NegativeRule, type NegativeRuleFacts } from "./negative-match.js";
 
 /** One query as the search-terms report gave it, over the long window. */
@@ -512,10 +513,10 @@ export function queryPromotions(i: PromotionInput): PromotionReading {
       queries: sorted,
       totalCostMicros,
       totalConversions,
-      lines: sorted.slice(0, 12).map((q) =>
+      // Every query, so a vendor handed this row can see all of them.
+      lines: recordLines(sorted, (q) =>
         `${q.conversions.toFixed(1)} conversion(s) · ${usd(q.costMicros)} · ${q.clicks} clicks · $${(q.costPerConversionCents / 100).toFixed(2)} each · "${q.term}"`
-        + (q.adGroupName ? ` (matched in "${q.adGroupName}")` : ""))
-        .concat(sorted.length > 12 ? [`…and ${sorted.length - 12} more`] : []),
+        + (q.adGroupName ? ` (matched in "${q.adGroupName}")` : "")),
       metrics: {
         queryCount: sorted.length,
         costMicros: totalCostMicros,

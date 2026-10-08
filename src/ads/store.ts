@@ -23,11 +23,12 @@
 
 import type pg from "pg";
 import { randomUUID } from "node:crypto";
-import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics, type OutcomeFeedFacts } from "./rules.js";
+import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics, type OutcomeFeedFacts, type MissingFigureWhy } from "./rules.js";
 import type { ClientServiceFacts } from "./service-relevance.js";
 import type { ResearchFacts, ResearchKeyword } from "./keyword-gap.js";
 import type { RecordedTarget } from "./keyword-sourcing.js";
 import type { PhoneDemandFacts } from "./traffic-readiness.js";
+import { parseCompetitorNames } from "./competitor-names.js";
 
 export type Actor = string;
 
@@ -327,6 +328,25 @@ export async function brandPatternsFor(c: pg.Client, clientId: string): Promise<
   }
 }
 
+/**
+ * Other providers' names somebody typed for this client
+ * (`clients.ads_competitor_terms`, dashboard schema v231, typed on the client's
+ * Ads tab). NULL covers every way of not having an answer: the column is not
+ * deployed yet, the read failed, nobody typed anything. It is never an empty
+ * list, because an empty list would say somebody looked and the client has no
+ * rivals.
+ */
+export async function competitorNamesFor(c: pg.Client, clientId: string): Promise<string[] | null> {
+  try {
+    const { rows } = await c.query<{ ads_competitor_terms: string | null }>(
+      `SELECT ads_competitor_terms FROM clients WHERE id = $1`, [clientId],
+    );
+    return parseCompetitorNames(rows[0]?.ads_competitor_terms ?? null);
+  } catch {
+    return null;
+  }
+}
+
 /** THROWS on a failed read, unlike `brandPatternsFor`. The protected-term guard
  *  must never lose the client's own name to a swallowed error: a protected list
  *  that silently comes back empty is a guard that is off. */
@@ -448,6 +468,26 @@ export async function adsWriteAuthorityFor(
  * monthly, so the effective record is whatever was last typed. The month comes
  * back with the figure so a finding can say how old the number it used is.
  */
+/**
+ * Pure. Why a figure that reads as missing is missing, in the order of how sure
+ * the record is. A figure above nought is not missing and gets no reason.
+ * `stored` of null is the ordinary blank; a stored nought is "the shape of a
+ * blank", named; a person's recorded absence wins over both because it is the
+ * only one of the three that is an ANSWER.
+ */
+export function missingFigureWhy(i: {
+  stored: number | null; unknownAt: Date | string | null; unknownBy: string | null; notAsked: boolean;
+}): MissingFigureWhy | null {
+  if (i.stored != null && Number(i.stored) > 0) return null;
+  if (i.unknownAt != null) {
+    const at = i.unknownAt instanceof Date ? i.unknownAt.toISOString() : String(i.unknownAt);
+    return { kind: "recorded_absent", by: (i.unknownBy ?? "").trim() || null, at: at.slice(0, 10) };
+  }
+  if (i.stored != null) return { kind: "stored_as_nought" };
+  if (i.notAsked) return { kind: "not_asked" };
+  return null;
+}
+
 export async function clientEconomicsFor(
   c: pg.Client,
   clientId: string,
@@ -483,6 +523,35 @@ export async function clientEconomicsFor(
     }
   } catch {
     /* column not deployed → unanswered, which is the safe reading */
+  }
+
+  // WHY a figure that is missing is missing, read separately so a database
+  // without these columns still returns the figures above. See `MissingFigureWhy`.
+  try {
+    const { rows } = await c.query<{
+      close_rate_pct: number | null; customer_value_cents: number | null; revenue_model: string | null;
+      close_rate_unknown_at: Date | string | null; close_rate_unknown_by: string | null;
+      customer_value_unknown_at: Date | string | null; customer_value_unknown_by: string | null;
+    }>(
+      `SELECT close_rate_pct, customer_value_cents, revenue_model,
+              close_rate_unknown_at, close_rate_unknown_by,
+              customer_value_unknown_at, customer_value_unknown_by
+         FROM clients WHERE id = $1`,
+      [clientId],
+    );
+    const r = rows[0];
+    if (r) {
+      out.closeRateWhy = missingFigureWhy({
+        stored: r.close_rate_pct, unknownAt: r.close_rate_unknown_at, unknownBy: r.close_rate_unknown_by,
+        notAsked: r.revenue_model === "retainer",
+      });
+      out.customerValueWhy = missingFigureWhy({
+        stored: r.customer_value_cents, unknownAt: r.customer_value_unknown_at, unknownBy: r.customer_value_unknown_by,
+        notAsked: false,
+      });
+    }
+  } catch {
+    /* not deployed → the sentence says what it always said */
   }
 
   try {
@@ -545,6 +614,20 @@ export async function clientEconomicsFor(
  * Sample and suspected-sample rows are excluded on the same rule the
  * attribution chain uses: `is_sample` is confirmed demo data and never counts.
  */
+/** Pure. The three counts of the lead split from one query row; forms are
+ *  what is left after the calls and the unnamed are taken out, so the three
+ *  always add to the total. Exported so a guard can drive it. */
+export function splitOf(l: {
+  leads: string; gclid_leads: string; calls: string; blank: string; gclid_calls: string; gclid_blank: string;
+}): NonNullable<OutcomeFeedFacts["split"]> {
+  const total = Number(l.leads), calls = Number(l.calls), blank = Number(l.blank);
+  const gTotal = Number(l.gclid_leads), gCalls = Number(l.gclid_calls), gBlank = Number(l.gclid_blank);
+  return {
+    forms: total - calls - blank, calls, unclassified: blank,
+    gclidForms: gTotal - gCalls - gBlank, gclidCalls: gCalls, gclidUnclassified: gBlank,
+  };
+}
+
 export async function outcomeFeedFactsFor(
   c: pg.Client,
   clientId: string,
@@ -554,10 +637,24 @@ export async function outcomeFeedFactsFor(
 ): Promise<OutcomeFeedFacts | null> {
   const WON_WINDOW_MONTHS = 6;
   try {
-    const { rows: leadRows } = await c.query<{ leads: string; gclid_leads: string; newest: string | null }>(
+    // The split rests on ONE column: a tracked call's form name is the label
+    // `Phone: …`, matched the way the dashboard's `feedOf` matches it (case
+    // insensitive, tolerant of spaces around the colon), and a row with no form
+    // name is neither a form nor a call. Nothing else on the row is consulted.
+    const isCall = `coalesce(form_name, '') ~* '^\\s*phone\\s*:'`;
+    const isBlank = `nullif(btrim(coalesce(form_name, '')), '') IS NULL`;
+    const hasClick = `nullif(btrim(gclid), '') IS NOT NULL`;
+    const { rows: leadRows } = await c.query<{
+      leads: string; gclid_leads: string; newest: string | null;
+      calls: string; blank: string; gclid_calls: string; gclid_blank: string;
+    }>(
       `SELECT count(*)::text AS leads,
-              count(*) FILTER (WHERE nullif(btrim(gclid), '') IS NOT NULL)::text AS gclid_leads,
-              max(submitted_at) FILTER (WHERE nullif(btrim(gclid), '') IS NOT NULL)::date::text AS newest
+              count(*) FILTER (WHERE ${hasClick})::text AS gclid_leads,
+              max(submitted_at) FILTER (WHERE ${hasClick})::date::text AS newest,
+              count(*) FILTER (WHERE ${isCall})::text AS calls,
+              count(*) FILTER (WHERE NOT (${isCall}) AND ${isBlank})::text AS blank,
+              count(*) FILTER (WHERE ${isCall} AND ${hasClick})::text AS gclid_calls,
+              count(*) FILTER (WHERE NOT (${isCall}) AND ${isBlank} AND ${hasClick})::text AS gclid_blank
          FROM web_inquiries
         WHERE client_slug = $1
           AND submitted_at >= $2::date AND submitted_at < ($3::date + 1)
@@ -592,6 +689,8 @@ export async function outcomeFeedFactsFor(
       leadsInWindow: Number(l?.leads ?? 0),
       gclidLeadsInWindow: Number(l?.gclid_leads ?? 0),
       newestGclidLeadOn: l?.newest ?? null,
+      split: l ? splitOf(l) : null,
+      windowStart, windowEnd,
       crmRowsInWindow: Number(r?.matched ?? 0),
       wonInWindow: Number(r?.won ?? 0),
       wonWindowMonths: WON_WINDOW_MONTHS,

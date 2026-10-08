@@ -182,7 +182,7 @@ console.log("\n7. The wasted-search-term list leaves out one-click terms and cor
   ok("…and a one-click term is still absent", !/"one click wonder"/.test(ulines));
 }
 
-ok("the ruleset version is 9", ADS_RULESET_VERSION === 9);
+ok("the ruleset version is 10", ADS_RULESET_VERSION === 10);
 
 console.log(`\n${"─".repeat(72)}`);
 console.log(failures === 0 ? "All checks passed." : `${failures} check(s) FAILED.`);

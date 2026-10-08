@@ -68,5 +68,18 @@ export function accountingLines(a: AuditAccounting): string[] {
   for (const t of a.targetHeld) {
     out.push(`${t.campaignName}: no cost target proposed — ${t.conversions % 1 === 0 ? t.conversions : t.conversions.toFixed(1)} conversions a month${t.strategy ? ` on ${t.strategy.replace(/_/g, " ").toLowerCase()}` : ""}, so it stays as it is.`);
   }
+
+  // 6. Keywords on a recorded competitor name, set aside from the quality-score count.
+  for (const c of a.competitorKeywords) {
+    out.push(`${c.campaignName}: ${c.count} keyword${c.count === 1 ? "" : "s"} on a recorded competitor name left out of the quality-score count and judged on cost per conversion instead.`);
+  }
+
+  // 7. Keywords whose spend has stopped: the row stays, and claims no saving.
+  const stoppedBy = new Map<string, typeof a.keywordsStopped>();
+  for (const k of a.keywordsStopped) stoppedBy.set(k.campaignName, [...(stoppedBy.get(k.campaignName) ?? []), k]);
+  for (const [name, rows] of stoppedBy) {
+    const newest = rows.map((r) => r.lastSpendOn).sort().pop();
+    out.push(`${name}: ${rows.length} keyword${rows.length === 1 ? "" : "s"} with no spend for over two weeks, kept as a low row with no saving claimed (the newest took spend on ${newest}).`);
+  }
   return out;
 }

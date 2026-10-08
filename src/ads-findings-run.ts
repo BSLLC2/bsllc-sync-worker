@@ -10,7 +10,7 @@ import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import {
-  upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, protectedPatternsFor, brandPatternsFor, clientEconomicsFor,
+  upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, protectedPatternsFor, brandPatternsFor, competitorNamesFor, clientEconomicsFor,
   outcomeFeedFactsFor, clientServicesFor, researchFactsFor, phoneDemandFor, seoTargetsFor,
 } from "./ads/store.js";
 import type { PlatformAdapter } from "./ads/platform.js";
@@ -121,7 +121,10 @@ async function auditOne(
   // right for a search for the company. Null where unread, and then no keyword
   // is let through as a brand.
   const brandPatterns = await brandPatternsFor(c, clientId);
-  const input = { ...platformInput, economics, outcomes, services, research, seoTargets, phone, brandPatterns };
+  // Other providers' names somebody typed for this client; the quality-score
+  // row judges a keyword on one of them on its cost instead. Null = none typed.
+  const competitorNames = await competitorNamesFor(c, clientId);
+  const input = { ...platformInput, economics, outcomes, services, research, seoTargets, phone, brandPatterns, competitorNames };
   console.log(
     `  goal: ${economics.cplCeilingCents != null ? `$${(economics.cplCeilingCents / 100).toFixed(2)} cost-per-lead ceiling (${economics.cplCeilingMonth})` : "no cost-per-lead ceiling recorded"}`
     + ` · ${economics.customerValueCents != null ? `$${(economics.customerValueCents / 100).toFixed(2)} a customer` : "no customer value recorded"}`
