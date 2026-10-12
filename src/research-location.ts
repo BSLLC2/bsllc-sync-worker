@@ -348,4 +348,4 @@ export function willSearchLine(raw: string | null | undefined): string {
 }
 
 /** Said beside a billing address that is offered as a place to search. */
-export const BILLING_PLACE_NOTE = "This is the billing address, not a place anyone recorded they sell in.";
+export const BILLING_PLACE_NOTE = "This is the billing address. Nobody recorded that they sell there.";
