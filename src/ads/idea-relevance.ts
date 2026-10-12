@@ -237,8 +237,9 @@ export interface IdeaJudgement {
   anchors: AnchorSet;
   /** What was counted and what was used, in one sentence. */
   line: string;
-  /** What the ideas were judged against, in one sentence. */
-  basisLine: string;
+  /** What the counts line does not already say: a limit on what the ideas were judged
+   *  against, or a phrase that could not be used. Null when there is nothing to add. */
+  basisLine: string | null;
 }
 
 function plural(n: number, one: string, many = `${one}s`): string {
@@ -324,7 +325,7 @@ export function judgeIdeas(
 export function ideaFilterLine(c: IdeaCounts, basis: JudgingBasis): string {
   if (c.total === 0) return "No ideas were stored for this run.";
   if (basis === "nothing_to_judge_by" && c.byPerson === 0 && c.keptByPerson === 0) {
-    return `${plural(c.total, "idea")} read and none checked, because this run recorded no seeds and no services are signed off. All ${c.total.toLocaleString("en-US")} are kept.`;
+    return `${plural(c.total, "idea")} read and none checked, because there was no usable seed and no signed-off service. All ${c.total.toLocaleString("en-US")} are kept.`;
   }
   const head = `${plural(c.total, "idea")} read: ${c.kept.toLocaleString("en-US")} kept, ${c.setAside.toLocaleString("en-US")} set aside.`;
   const kept: string[] = [];
@@ -334,7 +335,8 @@ export function ideaFilterLine(c: IdeaCounts, basis: JudgingBasis): string {
   if (c.keptByPerson) kept.push(`${c.keptByPerson.toLocaleString("en-US")} ${c.keptByPerson === 1 ? "was" : "were"} kept by a person`);
   if (c.keptUnchecked) kept.push(`${c.keptUnchecked.toLocaleString("en-US")} could not be checked`);
   const aside: string[] = [];
-  if (c.noAnchor) aside.push(`${c.noAnchor.toLocaleString("en-US")} contain no seed or signed-off service term`);
+  const term = basis === "seeds_only" ? "seed" : basis === "services_only" ? "signed-off service term" : "seed or signed-off service term";
+  if (c.noAnchor) aside.push(`${c.noAnchor.toLocaleString("en-US")} contain no ${term}`);
   if (c.byPerson) aside.push(`${c.byPerson.toLocaleString("en-US")} ${c.byPerson === 1 ? "was" : "were"} set aside by a person`);
   if (c.blank) aside.push(`${c.blank.toLocaleString("en-US")} ${c.blank === 1 ? "was" : "were"} blank`);
   return [
@@ -344,23 +346,22 @@ export function ideaFilterLine(c: IdeaCounts, basis: JudgingBasis): string {
   ].filter(Boolean).join(" ");
 }
 
-/** What the ideas were judged against. */
-export function judgingBasisLine(a: AnchorSet, basis: JudgingBasis): string {
-  const seeds = a.anchors.filter((x) => x.source === "seed").length;
-  const services = a.anchors.filter((x) => x.source === "service").length;
+/**
+ * What the counts line does not say. It is quiet when the ideas were judged
+ * against both seeds and services and every phrase was usable: the counts name
+ * what was matched. It speaks when the test was narrower than usual (no
+ * services list, no seeds) and when a phrase could not be used.
+ */
+export function judgingBasisLine(a: AnchorSet, basis: JudgingBasis): string | null {
   const refused = a.unusable.length
-    ? ` ${plural(a.unusable.length, "phrase")} could not be used: ${a.unusable.slice(0, 3).map((u) => `"${u.phrase}" ${ANCHOR_FAULT_LINE[u.fault]}`).join("; ")}${a.unusable.length > 3 ? `; and ${a.unusable.length - 3} more` : ""}.`
+    ? `${plural(a.unusable.length, "phrase")} could not be used: ${a.unusable.slice(0, 3).map((u) => `"${u.phrase}" ${ANCHOR_FAULT_LINE[u.fault]}`).join("; ")}${a.unusable.length > 3 ? `; and ${a.unusable.length - 3} more` : ""}.`
     : "";
-  switch (basis) {
-    case "seeds_and_services":
-      return `Judged against ${plural(seeds, "seed")} and ${plural(services, "signed-off service")}.${refused}`;
-    case "seeds_only":
-      return `No signed-off services list, so only the ${plural(seeds, "seed")} ${seeds === 1 ? "was" : "were"} used.${refused}`;
-    case "services_only":
-      return `This run recorded no seeds, so only the ${plural(services, "signed-off service")} ${services === 1 ? "was" : "were"} used.${refused}`;
-    case "nothing_to_judge_by":
-      return `Nothing to judge by: no usable seeds and no signed-off services.${refused}`;
-  }
+  const lead =
+    basis === "seeds_only" ? "No services list is signed off, so the seeds were the only test."
+    : basis === "services_only" ? "This run recorded no seeds, so the services were the only test."
+    : "";
+  const out = [lead, refused].filter(Boolean).join(" ");
+  return out || null;
 }
 
 /** The one-line reason a set-aside idea carries in a list. */
@@ -390,3 +391,7 @@ export function ideaUseLine(read: number, kept: number, checked = true): string 
   if (kept === read) return `All ${plural(read, "stored idea")} contain a seed or signed-off service term.`;
   return `Used ${kept.toLocaleString("en-US")} of ${plural(read, "stored idea")}. ${(read - kept).toLocaleString("en-US")} contain no seed or signed-off service term and were set aside.`;
 }
+
+/** Said under a run when every idea in it was set aside. */
+export const NONE_KEPT_LINE =
+  "None of these ideas contains a seed or a signed-off service, so none is shown as demand this client sells into. Keep any you want from the list above.";

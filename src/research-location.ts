@@ -339,3 +339,13 @@ export function otherMarketLine(count: number, place: string | null | undefined)
   const where = placeLabel(place) ?? "the newest run's place";
   return `${count} older ${count === 1 ? "run was" : "runs were"} searched somewhere other than ${where} and ${count === 1 ? "was" : "were"} left out, because volumes from different places are not comparable.`;
 }
+
+/** What the panel says before a run starts: where it will search. */
+export function willSearchLine(raw: string | null | undefined): string {
+  const label = placeLabel(raw);
+  if (!label) return NO_LOCATION_MESSAGE;
+  return isNational(raw) ? `Will search across the United States. ${NATIONAL_NOTE}` : `Will search in ${label}.`;
+}
+
+/** Said beside a billing address that is offered as a place to search. */
+export const BILLING_PLACE_NOTE = "This is the billing address, not a place anyone recorded they sell in.";

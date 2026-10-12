@@ -127,7 +127,7 @@ hr("1. An idea is kept only if it contains a seed or a signed-off service");
   ok("every set-aside idea is counted under a reason", j.counts.noAnchor === j.counts.setAside);
   ok("the line says how many were kept and how many set aside",
     /\d+ ideas read: 12 kept, 16 set aside/.test(j.line), j.line);
-  ok("the basis names the seeds and the services it used", /10 seeds and 3 signed-off services/.test(j.basisLine), j.basisLine);
+  ok("the basis line adds nothing when seeds and services both judged and every phrase was usable", j.basis === "seeds_and_services" && j.basisLine === null, String(j.basisLine));
 }
 
 hr("2. The refusals");
@@ -153,7 +153,7 @@ hr("2. The refusals");
   ok('"medicaid" alone is set aside, "medicaid drug rehab" is kept', !judgeIdeas(["medicaid"], { seeds: ["drug rehab"], services: null }).verdicts[0]!.kept && judgeIdeas(["medicaid drug rehab"], { seeds: ["drug rehab"], services: null }).verdicts[0]!.kept);
   // A null is unanswered.
   const noServices = judgeIdeas(["drug rehab near me", "sutter health"], { seeds: ["drug rehab"], services: null });
-  ok("with no signed-off services the seeds alone are used, and the line says so", noServices.basis === "seeds_only" && /only the 1 seed was used/.test(noServices.basisLine) && noServices.counts.kept === 1);
+  ok("with no signed-off services the seeds alone are used, and the line says so", noServices.basis === "seeds_only" && /No services list is signed off, so the seeds were the only test/.test(noServices.basisLine ?? "") && noServices.counts.kept === 1);
   const nothing = judgeIdeas(["sutter health", "drug rehab near me"], { seeds: [], services: null });
   ok("with neither, nothing is dropped and nothing is called checked", nothing.basis === "nothing_to_judge_by" && nothing.counts.kept === 2 && nothing.counts.keptUnchecked === 2 && /none checked/.test(nothing.line), nothing.line);
   ok("an empty services list is not read as no seeds either", judgeIdeas(["drug rehab"], { seeds: ["drug rehab"], services: [] }).counts.kept === 1);
@@ -301,6 +301,15 @@ hr("7. The growth reading counts the ideas it used and never prices a set-aside 
     provenQueries: [], protectedPatterns: [], accountTermCoverage: 0.8, targets: [],
   } as any);
   ok("a person's keep lets one idea through the gate, and the services still decide the rest", kept.ideasUsed === REAL.length + 1);
+  // The other direction: a person set aside an idea that DOES match a service.
+  // The service rule alone would offer it; only the gate holds it back.
+  const aside = keywordGaps({
+    research: { ...research, reviews: { [ideaKey("drug rehab near me")]: { decision: "set_aside", by: "Ana" } } },
+    services: confirmed, existingKeywords: [], seenTerms: [], existingNegatives: new Set<string>(),
+    provenQueries: [], protectedPatterns: [], accountTermCoverage: 0.8, targets: [],
+  } as any);
+  const pricedAside = aside.services.flatMap((s) => s.terms.map((t) => t.keyword));
+  ok("an idea a person set aside is not offered, though it matches a service", !pricedAside.includes("drug rehab near me") && pricedAside.includes("sober living homes") && aside.ideasUsed === REAL.length - 1, pricedAside.join(", "));
 }
 
 // ── 8. WHAT THE CODE DOES, READ OUT OF THE SOURCE ───────────────────────────
