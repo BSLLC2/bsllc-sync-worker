@@ -20,6 +20,7 @@ import {
   MAX_DATA_EXCLUSION_DAYS, type DailyConversionRow, type ExclusionCampaign,
 } from "./tracking-outage.js";
 import { proxyConversionValue, type ValuedAction } from "./proxy-value.js";
+import { repeatCallReading } from "./repeat-call.js";
 import { onTargetStrategy } from "./bidding-readiness.js";
 
 const usd = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
@@ -142,6 +143,9 @@ export function readinessFindings(i: ReadinessFindingInput): DerivedFinding[] {
     const lagLine = null;
     const proposal = dataExclusionProposal(outage, scoped, { accountLabel: `this ${i.platformLabel} account`, lagLine });
     const smartBiddingCampaigns = scoped.filter((c) => c.smartBidding);
+    // Only a campaign list that was actually READ can say nothing bids on it:
+    // an account whose campaigns could not be listed is unanswered, not idle.
+    const nothingLearns = i.campaigns.length > 0 && smartBiddingCampaigns.length === 0;
     const manual = manualExclusionInstruction(outage);
 
     const whyNoProposal = outage.verdict === "no_baseline"
@@ -161,18 +165,32 @@ export function readinessFindings(i: ReadinessFindingInput): DerivedFinding[] {
       entityId: `${i.accountId}:data_exclusion:${outage.startDate ?? "unbounded"}`,
       entityName: "Conversion tracking outage",
       findingType: "bidding_data_exclusion",
-      severity: "high",
+      // A ROW WHOSE PROPOSED ACTION CANNOT DO ANYTHING DOES NOT RANK FIRST
+      // (2026-10-12). With no campaign bidding on the conversion column nothing
+      // is learning from the gap and an exclusion changes nothing, so this is a
+      // note about reporting: a tag worth checking, at low severity, saying so.
+      // Taken from `smartBiddingCampaigns`, the same count the evidence line
+      // and the change payload read, so the three can never disagree.
+      severity: nothingLearns ? "low" : "high",
       riskLevel: "medium",
       applicability: proposal ? "api" : "vendor",
-      title: outage.verdict === "no_baseline"
+      title: nothingLearns
+        ? (outage.verdict === "no_baseline"
+          ? "The conversion column has been quiet for the whole window, and no campaign bids on it"
+          : `The conversion column recorded nothing ${outage.ongoing ? `since ${outage.startDate}` : `from ${outage.startDate} to ${outage.endDate}`}, and no campaign bids on it`)
+        : outage.verdict === "no_baseline"
         ? "The conversion column has been quiet for the whole window, and bidding has been learning from that"
         : outage.ongoing
           ? `The conversion column has recorded nothing since ${outage.startDate}, and the bidding is still learning from it`
           : `The conversion column recorded nothing from ${outage.startDate} to ${outage.endDate}`,
-      summary: (outage.verdict === "no_baseline"
+      summary: nothingLearns
+        ? `No campaign on this account bids on the conversion column, so no bidding is learning from the gap and a data exclusion would change nothing. What the gap does cost is the report: `
+          + `${outage.verdict === "no_baseline" ? "every cost per conversion read from this column is wrong" : `the ${outage.days} day(s) from ${outage.startDate} to ${outage.endDate} read as no conversions`}. `
+          + `Check that the tag still fires; if it does not, that is the work.`
+        : (outage.verdict === "no_baseline"
         ? `A broken conversion tag does not make bidding stop. It makes bidding carry on, learning that every click on those days was worthless, which is worse than no optimisation at all — the model does not become neutral, it becomes confidently wrong.`
-        : `A broken conversion tag does not make bidding stop. Over those ${outage.days} day(s) the account took ${outage.clicksInRun} clicks and recorded nothing, about ${one(outage.expectedConversions)} conversions short of its own rate beforehand, and the bidding model learned that every one of those clicks was worthless. The platform has a control for exactly this: a data exclusion tells it to ignore the affected dates.`)
-        + (whyNoProposal ? ` ${whyNoProposal}` : ""),
+        : `A broken conversion tag does not make bidding stop. Over those ${outage.days} day(s) the account took ${outage.clicksInRun} clicks and recorded nothing, about ${one(outage.expectedConversions)} conversions short of its own rate on the same kind of day beforehand, and the bidding model learned that every one of those clicks was worthless. The platform has a control for exactly this: a data exclusion tells it to ignore the affected dates.`)
+        + (whyNoProposal && !nothingLearns ? ` ${whyNoProposal}` : ""),
       evidence: {
         metrics: {
           ...outage.metrics,
@@ -185,7 +203,7 @@ export function readinessFindings(i: ReadinessFindingInput): DerivedFinding[] {
           smartBiddingCampaigns.length
             ? `${smartBiddingCampaigns.length} campaign(s) on this account bid on the conversion column and are what an exclusion would cover: ${smartBiddingCampaigns.map((c) => c.name).join(", ")}`
             : "No campaign on this account bids on the conversion column, so an exclusion would change nothing here.",
-          ...(proposal ? [] : manual),
+          ...(proposal || nothingLearns ? [] : manual),
         ],
       },
       // No dollar figure, and the reason is the same one the tracking row
@@ -270,6 +288,37 @@ export function readinessFindings(i: ReadinessFindingInput): DerivedFinding[] {
         guardNote: "Nothing to apply. Putting a value on a conversion action changes what the account bids toward, which is outside the guarded path on purpose — a person makes this change in the account.",
       });
     }
+  }
+
+  // ── 4. A repeat-call action that counts as a conversion ───────────────────
+  // Counting a repeat caller beside their first call counts one person twice.
+  // Silent unless one counts: an unread action list is the tracking row's job.
+  const repeat = repeatCallReading(i.conversionActions);
+  if (accountWorthARow && repeat.state === "open") {
+    const names = repeat.counting.map((a) => `"${a.name}"`).join(", ");
+    out.push({
+      entityType: "account", entityId: `${i.accountId}:repeat_call_primary`, entityName: "Repeat calls counted as conversions",
+      findingType: "repeat_call_primary",
+      severity: "medium",
+      riskLevel: "low",
+      // Which actions count toward the column is what the account bids toward,
+      // so a person changes it in the account.
+      applicability: "vendor",
+      title: `${names} counts toward conversions, and can count a caller twice`,
+      summary: `A repeat call is a call from somebody who has already called. Counted beside their first call, one person is two conversions: `
+        + `conversions rise and cost per conversion falls with no new customer behind either, and the bidding learns from the inflated column. `
+        + `Every cost per conversion on this account is read from it.`,
+      evidence: {
+        metrics: { repeatCallActions: repeat.counting.length, otherCountingCallActions: repeat.otherCounting.length },
+        ...win,
+        lines: repeat.lines,
+      },
+      estImpactCents: 0,
+      impactUnit: "usd_month",
+      impactAssumption: "No figure claimed. How many of the counted calls are the same person twice is not on the record, so any saving or loss would be invented.",
+      changePayload: null,
+      guardNote: "Nothing to apply. Which actions count toward conversions changes what the account bids toward, which is outside the guarded path on purpose.",
+    });
   }
 
   return out;

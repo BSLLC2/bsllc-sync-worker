@@ -23,6 +23,7 @@
 
 import type pg from "pg";
 import { randomUUID } from "node:crypto";
+import { COUNTED_LEAD_SQL } from "./lead-filter.js";
 import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics, type OutcomeFeedFacts, type MissingFigureWhy } from "./rules.js";
 import type { ClientServiceFacts } from "./service-relevance.js";
 import type { ResearchFacts, ResearchKeyword } from "./keyword-gap.js";
@@ -822,6 +823,27 @@ export function splitOf(l: {
   };
 }
 
+/**
+ * The counted wins out of the closed-sales tracker's own summary row, or null.
+ *
+ * The importer writes a JSON string with `v: 1`. A version this build does not
+ * know, a missing figure or a count that is not a number is NO tracker and not
+ * an empty one: null is unanswered, and a nought here would say the client has
+ * made no sales. Only the counted deals are read, never the pending rows or the
+ * fee, and never a name or a phone number (the summary carries labels, and none
+ * of them is touched here).
+ */
+export function parseTrackerWins(raw: string | null | undefined): OutcomeFeedFacts["tracker"] {
+  if (!raw) return null;
+  let j: any;
+  try { j = JSON.parse(raw); } catch { return null; }
+  if (!j || j.v !== 1) return null;
+  const deals = Number(j.countedDeals), cents = Number(j.countedCents);
+  if (!Number.isFinite(deals) || !Number.isFinite(cents) || deals < 0 || cents < 0) return null;
+  const day = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null);
+  return { deals, cents, newestClosed: day(j.newestClosed), windowStart: day(j.windowStart) };
+}
+
 export async function outcomeFeedFactsFor(
   c: pg.Client,
   clientId: string,
@@ -852,10 +874,38 @@ export async function outcomeFeedFactsFor(
          FROM web_inquiries
         WHERE client_slug = $1
           AND submitted_at >= $2::date AND submitted_at < ($3::date + 1)
-          AND status NOT IN ('junk', 'internal_test')`,
+          AND ${COUNTED_LEAD_SQL}`,
       [clientSlug, windowStart, windowEnd],
     );
     const l = leadRows[0];
+    // How many the same window HELD that the rule above left out, so the count
+    // can be read against the Website Leads page. A failed read is null, which
+    // says nothing, and never nought.
+    let leftOut: number | null = null;
+    try {
+      const { rows: lo } = await c.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM web_inquiries
+          WHERE client_slug = $1
+            AND submitted_at >= $2::date AND submitted_at < ($3::date + 1)
+            AND NOT ${COUNTED_LEAD_SQL}`,
+        [clientSlug, windowStart, windowEnd],
+      );
+      leftOut = lo[0] ? Number(lo[0].n) : null;
+    } catch { leftOut = null; }
+
+    // BS LLC's own closed-sales tracker, for a client whose sales are not in a
+    // CRM this system reads. The importer's summary row, parsed defensively: a
+    // row this build cannot read is no tracker, never an empty one.
+    let tracker: OutcomeFeedFacts["tracker"] = null;
+    try {
+      const { rows: tr } = await c.query<{ value_text: string | null }>(
+        `SELECT value_text FROM metric_snapshots
+          WHERE client_id = $1 AND source = 'manual' AND metric_key = 'manual.tracker_summary' AND data_state = 'live'
+          ORDER BY synced_at DESC LIMIT 1`,
+        [clientId],
+      );
+      tracker = parseTrackerWins(tr[0]?.value_text);
+    } catch { tracker = null; }
 
     const { rows: crmRows } = await c.query<{ matched: string; won: string; avg_value: string | null }>(
       `SELECT count(*) FILTER (WHERE web_inquiry_at >= $2)::text AS matched,
@@ -891,6 +941,8 @@ export async function outcomeFeedFactsFor(
       measuredWonValueCents: Number.isFinite(avg as number) ? avg : null,
       uploadsEver: Number(u?.n ?? 0),
       newestUploadOn: u?.newest ?? null,
+      leftOut,
+      tracker,
     };
   } catch {
     // A table this deploy does not have yet reads as "not gathered", which the
@@ -1124,7 +1176,7 @@ export async function phoneDemandFor(
          FROM web_inquiries
         WHERE client_slug = $1
           AND submitted_at >= $2::date AND submitted_at < ($3::date + 1)
-          AND status NOT IN ('junk', 'internal_test')`,
+          AND ${COUNTED_LEAD_SQL}`,
       [clientSlug, windowStart, windowEnd],
     );
     const r = rows[0];

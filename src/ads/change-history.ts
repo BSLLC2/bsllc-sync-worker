@@ -137,6 +137,15 @@ export interface CapturedChange {
   adGroupId: string | null;
   oldResourceJson: string | null;
   newResourceJson: string | null;
+  /**
+   * The resource this event is ABOUT, as the platform names it:
+   * `customers/1/campaignBudgets/12345` for a budget change. This is where a
+   * budget's id lives; the event's `campaign` field is empty on a budget change
+   * and the changed resource's body does not reliably carry its own name, so a
+   * budget raise reached the audit as a change nobody could tie to any campaign
+   * (2026-10-12). NULL = the event did not say, never "none".
+   */
+  changeResourceName: string | null;
 }
 
 /**
@@ -182,6 +191,7 @@ export function normalizeChangeEvent(row: any): CapturedChange | null {
     adGroupId: tailId(e.ad_group ?? e.adGroup),
     oldResourceJson: oldResource ? JSON.stringify(oldResource) : null,
     newResourceJson: newResource ? JSON.stringify(newResource) : null,
+    changeResourceName: (String(e.change_resource_name ?? e.changeResourceName ?? "").trim() || null),
   };
   if (!platformKey) {
     // The digest is over the event's own identity, never over a counter. The
@@ -223,7 +233,96 @@ export const CHANGE_GAQL_FIELDS = [
   "change_event.client_type",
   "change_event.campaign",
   "change_event.ad_group",
+  "change_event.change_resource_name",
 ].join(", ");
+
+/**
+ * The digits of the budget an event is about, or null.
+ *
+ * From the event's own `change_resource_name` first, which is the platform
+ * saying what changed. Failing that, any `campaignBudgets/<id>` inside the
+ * resource body, which is what the dashboard reads for events captured before
+ * the name was kept. Null when neither names one: unanswered, never a guess.
+ */
+export function budgetIdOfEvent(e: Pick<CapturedChange, "changeResourceName" | "newResourceJson" | "oldResourceJson">): string | null {
+  const m = /campaignBudgets\/(\d+)/;
+  return m.exec(e.changeResourceName ?? "")?.[1]
+    ?? m.exec(e.newResourceJson ?? "")?.[1]
+    ?? m.exec(e.oldResourceJson ?? "")?.[1]
+    ?? null;
+}
+
+/** Which campaigns use each budget: `budget id → campaign ids`. */
+export const CAMPAIGN_BUDGET_GAQL = `SELECT campaign.id, campaign.campaign_budget FROM campaign WHERE campaign.status != 'REMOVED'`;
+export function budgetCampaignMap(rows: readonly any[] | null | undefined): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const r of rows ?? []) {
+    const budget = tailId(r?.campaign?.campaign_budget ?? r?.campaign?.campaignBudget);
+    const campaign = r?.campaign?.id != null ? String(r.campaign.id) : null;
+    if (!budget || !campaign) continue;
+    const list = out.get(budget) ?? [];
+    if (!list.includes(campaign)) list.push(campaign);
+    out.set(budget, list);
+  }
+  return out;
+}
+
+/**
+ * Put a campaign on a budget change that names none.
+ *
+ * Google's event leaves `campaign` empty on a CAMPAIGN_BUDGET change, so a
+ * budget raise on a campaign was invisible to every reading that asks "what
+ * changed on this campaign" — the settle window on Approve, the window-against-
+ * change sentence, the weekly timeline. When exactly ONE live campaign uses the
+ * budget the event is that campaign's and is stamped with it. A budget SHARED by
+ * several campaigns is left unstamped, because naming one of them would be a
+ * guess; the dashboard matches those on the budget id. Nothing already named is
+ * touched. Returns what it did, so the run can say.
+ */
+export function attachBudgetCampaigns(
+  events: CapturedChange[],
+  budgets: ReadonlyMap<string, readonly string[]>,
+): { resolved: number; shared: number; unresolved: number } {
+  let resolved = 0, shared = 0, unresolved = 0;
+  for (const e of events) {
+    if (e.resourceType !== "CAMPAIGN_BUDGET" || e.campaignId) continue;
+    const id = budgetIdOfEvent(e);
+    const campaigns = id ? budgets.get(id) : undefined;
+    if (campaigns && campaigns.length === 1) { e.campaignId = campaigns[0]!; resolved += 1; }
+    else if (campaigns && campaigns.length > 1) shared += 1;
+    else unresolved += 1;
+  }
+  return { resolved, shared, unresolved };
+}
+
+/**
+ * Read one window, and split it when it comes back full.
+ *
+ * `change_event` returns at most 10,000 rows and is read OLDEST FIRST, so a full
+ * page loses the NEWEST changes — exactly the ones that matter. Before this a
+ * full window was only named in the run's output and stored as though it were
+ * whole. A window at the cap is now halved by date and each half read again, down
+ * to a single day; a single day still at the cap is the one thing that stays
+ * reported, and it is returned so the caller can say so.
+ */
+export async function readChangeWindow(
+  read: (from: string, to: string) => Promise<any[] | null | undefined>,
+  from: string,
+  to: string,
+  limit = CHANGE_ROW_LIMIT,
+): Promise<{ rows: any[]; capped: string[] }> {
+  const rows = (await read(from, to)) ?? [];
+  if (!Array.isArray(rows) || rows.length < limit) return { rows: Array.isArray(rows) ? rows : [], capped: [] };
+  if (from >= to) return { rows, capped: [`${from}..${to}`] };
+  const a = Date.parse(`${from}T00:00:00Z`);
+  const b = Date.parse(`${to}T00:00:00Z`);
+  const midMs = a + Math.floor((b - a) / 2 / 86_400_000) * 86_400_000;
+  const mid = new Date(midMs).toISOString().slice(0, 10);
+  const next = new Date(midMs + 86_400_000).toISOString().slice(0, 10);
+  const left = await readChangeWindow(read, from, mid, limit);
+  const right = await readChangeWindow(read, next, to, limit);
+  return { rows: [...left.rows, ...right.rows], capped: [...left.capped, ...right.capped] };
+}
 
 export function changeGaql(from: string, to: string, limit = CHANGE_ROW_LIMIT): string {
   return `SELECT ${CHANGE_GAQL_FIELDS}
@@ -237,10 +336,11 @@ export function changeGaql(from: string, to: string, limit = CHANGE_ROW_LIMIT): 
 /**
  * Store what was captured.
  *
- * ON CONFLICT DO NOTHING on (platform, account_id, event_key). A change event
- * is immutable once it has happened, so the second read of the same event has
- * nothing new to say, and DO NOTHING means a re-run costs nothing and changes
- * nothing. `inserted` is what the run reports: on an ordinary second run it is
+ * Keyed on (platform, account_id, event_key). A change event is immutable once
+ * it has happened, so the second read of the same event has nothing new to say
+ * EXCEPT the campaign a budget event could not name and the resource name an
+ * earlier build did not read; those two are filled in when blank and nothing
+ * else is ever rewritten. A re-run costs nothing and changes nothing. `inserted` is what the run reports: on an ordinary second run it is
  * nought, and that is the idempotence being demonstrated rather than asserted.
  */
 export async function storeChangeEvents(
@@ -251,21 +351,35 @@ export async function storeChangeEvents(
   events: CapturedChange[],
 ): Promise<{ inserted: number }> {
   let inserted = 0;
+  // The column is the app's (schema v241) but a capture run can land before the
+  // app deploys, so the worker provisions it the way every other worker-side
+  // addition does. Idempotent.
+  await c.query(`ALTER TABLE ads_change_events ADD COLUMN IF NOT EXISTS change_resource_name TEXT`);
   for (const e of events) {
-    const r = await c.query(
+    // An existing row is only ever FILLED, never rewritten: a change event is
+    // immutable once it happened, so the one thing a second read may add is the
+    // campaign a budget event could not name and the resource name an earlier
+    // build did not ask for. `xmax = 0` is true only for a row this statement
+    // inserted, so a back-fill is not counted as a new event.
+    const r = await c.query<{ inserted: boolean }>(
       `INSERT INTO ads_change_events (
          id, client_id, platform, account_id, event_key, changed_at, actor_email, actor_kind,
          actor_internal, client_type, resource_type, operation, changed_fields,
-         campaign_id, ad_group_id, old_resource_json, new_resource_json, captured_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
-       ON CONFLICT (platform, account_id, event_key) DO NOTHING`,
+         campaign_id, ad_group_id, old_resource_json, new_resource_json, change_resource_name, captured_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, now())
+       ON CONFLICT (platform, account_id, event_key) DO UPDATE SET
+         campaign_id = COALESCE(ads_change_events.campaign_id, EXCLUDED.campaign_id),
+         change_resource_name = COALESCE(ads_change_events.change_resource_name, EXCLUDED.change_resource_name)
+       WHERE (ads_change_events.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL)
+          OR (ads_change_events.change_resource_name IS NULL AND EXCLUDED.change_resource_name IS NOT NULL)
+       RETURNING (xmax = 0) AS inserted`,
       [
         randomUUID(), clientId, platform, accountId, e.eventKey, e.changedAt, e.actorEmail,
         e.actorKind, e.actorInternal, e.clientType, e.resourceType, e.operation, e.changedFields,
-        e.campaignId, e.adGroupId, e.oldResourceJson, e.newResourceJson,
+        e.campaignId, e.adGroupId, e.oldResourceJson, e.newResourceJson, e.changeResourceName,
       ],
     );
-    inserted += r.rowCount ?? 0;
+    if (r.rows[0]?.inserted) inserted += 1;
   }
   return { inserted };
 }

@@ -1194,7 +1194,9 @@ async function main() {
 
   const outage = findTrackingOutage(FIXTURE.dailyConversions);
   ok("a run of zero-conversion days behind a healthy stretch is found, with a start and an end",
-    outage.verdict === "found" && outage.startDate === "2026-09-05" && outage.days === 6,
+    // Five, not six: the newest day of the series is still reporting (a click's
+    // conversions arrive days later) and is left out of the run, 2026-10-12.
+    outage.verdict === "found" && outage.startDate === "2026-09-05" && outage.days === 5,
     `${outage.startDate} → ${outage.endDate}, ${outage.days} days, ${outage.clicksInRun} clicks`);
   ok("…and it says how many conversions the account's OWN rate says are missing",
     outage.expectedConversions > 3 && outage.baselineDays >= 7,
@@ -2054,7 +2056,7 @@ async function main() {
         "neither sunk nor floated — it keeps its group and its stage");
     }
 
-    ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 10);
+    ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 11);
   }
 
   console.log(`\n${"─".repeat(72)}`);

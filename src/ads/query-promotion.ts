@@ -117,6 +117,14 @@ export interface ExistingKeyword {
    * has measured.
    */
   qualityScore?: number | null;
+  /**
+   * The three parts of that score, each "below", "average" or "above" what
+   * Google expects, or NULL where Google did not report it. Null is
+   * unanswered: it is never "average" and never "below". See ./qs-components.ts.
+   */
+  qsLandingPage?: "below" | "average" | "above" | null;
+  qsExpectedCtr?: "below" | "average" | "above" | null;
+  qsAdRelevance?: "below" | "average" | "above" | null;
   /** The campaign it sits in, by id. Absent where the platform did not give one. */
   campaignId?: string | null;
   /**

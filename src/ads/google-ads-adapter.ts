@@ -28,6 +28,7 @@ import type {
 import type { ConversionLagRow } from "./bidding-readiness.js";
 import type { DailyConversionRow } from "./tracking-outage.js";
 import type { ExistingKeyword } from "./query-promotion.js";
+import { decodeQsBucket } from "./qs-components.js";
 import {
   shapeCampaignNegativeRules, shapeSharedNegativeRules, shapeAccountNegativeRules, combineNegativeRules,
   type NegativeRuleFacts,
@@ -580,6 +581,9 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       SELECT ad_group_criterion.resource_name,
              ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
              ad_group_criterion.status, ad_group_criterion.quality_info.quality_score,
+             ad_group_criterion.quality_info.post_click_quality_score,
+             ad_group_criterion.quality_info.search_predicted_ctr,
+             ad_group_criterion.quality_info.creative_quality_score,
              ad_group_criterion.final_urls,
              ad_group.name, ad_group.status, campaign.id, campaign.name, campaign.status
         FROM ad_group_criterion
@@ -614,6 +618,12 @@ export class GoogleAdsAdapter implements PlatformAdapter {
           // counted as the worst possible score by anything reading it.
           qualityScore: r.ad_group_criterion?.quality_info?.quality_score != null
             ? Number(r.ad_group_criterion.quality_info.quality_score) : null,
+          // The three parts of the score, decoded from Google's own bucket enum.
+          // Over REST they are integers; UNKNOWN and UNSPECIFIED are not an
+          // answer and read as null, never as "average".
+          qsLandingPage: decodeQsBucket(r.ad_group_criterion?.quality_info?.post_click_quality_score),
+          qsExpectedCtr: decodeQsBucket(r.ad_group_criterion?.quality_info?.search_predicted_ctr),
+          qsAdRelevance: decodeQsBucket(r.ad_group_criterion?.quality_info?.creative_quality_score),
         })).filter((k: ExistingKeyword) => k.text.length > 0)
       : null;
 

@@ -78,6 +78,7 @@ export const FINDING_STAGE: Record<string, FindingStage> = {
   bidding_data_exclusion: "measure",
   proxy_conversion_value: "measure",
   call_tracking_absent: "measure",
+  repeat_call_primary: "measure",
   outcome_feedback_gap: "measure",
 
   // Relevance and coverage.

@@ -7,8 +7,9 @@ import { openCustomer } from "./apply-ads-changes.js";
 import { mappedAccounts } from "./ads/store.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 import {
-  CHANGE_LOOKBACK_DAYS, CHANGE_ROW_LIMIT, captureWindows, changeGaql,
-  normalizeChangeEvent, recordScan, recordScanFailure, storeChangeEvents,
+  CAMPAIGN_BUDGET_GAQL, CHANGE_LOOKBACK_DAYS, CHANGE_ROW_LIMIT, attachBudgetCampaigns,
+  budgetCampaignMap, captureWindows, changeGaql, normalizeChangeEvent, readChangeWindow,
+  recordScan, recordScanFailure, storeChangeEvents,
   type CapturedChange,
 } from "./ads/change-history.js";
 
@@ -61,18 +62,22 @@ const hasFlag = (name: string) => process.argv.slice(2).includes(`--${name}`);
 async function captureAccount(
   customer: any,
   windows: Array<[string, string]>,
-): Promise<{ events: CapturedChange[]; undated: number; cappedWindows: string[] }> {
+): Promise<{
+  events: CapturedChange[]; undated: number; cappedWindows: string[];
+  budgets: { resolved: number; shared: number; unresolved: number } | null;
+}> {
   const byKey = new Map<string, CapturedChange>();
   let undated = 0;
   const cappedWindows: string[] = [];
 
   for (const [from, to] of windows) {
-    const rows = await customer.query(changeGaql(from, to));
-    // A window that comes back AT the row cap is a window we cannot claim to
-    // have read in full. It is NAMED rather than assumed complete — a silent
-    // truncation would store a hole and nothing would ever say so.
-    if (Array.isArray(rows) && rows.length >= CHANGE_ROW_LIMIT) cappedWindows.push(`${from}..${to}`);
-    for (const r of rows ?? []) {
+    // The read is OLDEST FIRST and capped, so a full window loses the NEWEST
+    // changes, the ones a reader most needs. A full window is halved by date
+    // and read again; only a single day still at the cap is reported.
+    const { rows, capped } = await readChangeWindow(
+      (f, t) => customer.query(changeGaql(f, t)), from, to, CHANGE_ROW_LIMIT);
+    cappedWindows.push(...capped);
+    for (const r of rows) {
       const e = normalizeChangeEvent(r);
       if (!e) { undated += 1; continue; }
       // Windows are inclusive at both ends, so the same event can land in two
@@ -80,7 +85,20 @@ async function captureAccount(
       byKey.set(e.eventKey, e);
     }
   }
-  return { events: Array.from(byKey.values()), undated, cappedWindows };
+  const events = Array.from(byKey.values());
+
+  // A budget change names no campaign. Look the budgets up once, only when there
+  // is one to place. A lookup that fails leaves them unplaced and says so.
+  let budgets: { resolved: number; shared: number; unresolved: number } | null = null;
+  if (events.some((e) => e.resourceType === "CAMPAIGN_BUDGET" && !e.campaignId)) {
+    try {
+      const map = budgetCampaignMap(await customer.query(CAMPAIGN_BUDGET_GAQL));
+      budgets = attachBudgetCampaigns(events, map);
+    } catch {
+      budgets = null;
+    }
+  }
+  return { events, undated, cappedWindows, budgets };
 }
 
 async function main() {
@@ -123,7 +141,7 @@ async function main() {
       const accountId = digitsOnly(t.accountId);
       try {
         const customer = await openCustomer(api, cfg, accountId);
-        const { events, undated, cappedWindows } = await captureAccount(customer, windows);
+        const { events, undated, cappedWindows, budgets } = await captureAccount(customer, windows);
         read += 1;
         totalEvents += events.length;
         digestKeys += events.filter((e) => !e.keyFromPlatform).length;
@@ -156,8 +174,11 @@ async function main() {
           + `${restarted ? " (coverage restarted — the previous scan was older than the platform's own cap, so the gap is gone)" : ""}`,
         );
         if (undated) problems.push(`${t.clientName}: ${undated} event(s) carried no date and were not stored`);
+        if (budgets && (budgets.resolved || budgets.shared || budgets.unresolved)) {
+          problems.push(`${t.clientName}: budget changes: ${budgets.resolved} placed on their campaign, ${budgets.shared} on a budget several campaigns share (matched by budget id), ${budgets.unresolved} placed on none`);
+        }
         for (const w of cappedWindows) {
-          problems.push(`${t.clientName}: window ${w} came back at the ${CHANGE_ROW_LIMIT}-row cap — read it again in narrower windows before trusting that stretch`);
+          problems.push(`${t.clientName}: ${w} came back at the ${CHANGE_ROW_LIMIT}-row cap even as a single day, so the newest changes that day may be missing`);
         }
       } catch (e) {
         // One account's credentials or API hiccup must not take the run down

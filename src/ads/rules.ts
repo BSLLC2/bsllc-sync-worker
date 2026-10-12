@@ -51,6 +51,10 @@ import {
 import type { BlockedPromotion } from "./query-promotion.js";
 import { rankImpact, leadValueCents, type RankReading } from "./impact-rank.js";
 import { recordLines } from "./evidence-list.js";
+import {
+  splitByComponent, QS_COMPONENT_LABEL, QS_COMPONENT_SUMMARY, QS_COMPONENT_GUARD, QS_COMPONENT_CODE, QS_COMPONENT_METRIC,
+  type QsKeywordFact,
+} from "./qs-components.js";
 import { matchesRecordedName, competitorKeywordNote, COMPETITOR_NAMES_NOT_RECORDED } from "./competitor-names.js";
 import { bidTargetEvidenceLine, bidTargetReading, supersedeReason, targetIsAbsent, stayPutLine, targetStep } from "./bid-target.js";
 import { keywordZeroReading, targetReadiness, gapAgainstNoise, termHasEnoughClicks, MIN_CLICKS_FOR_WASTED_TERM } from "./evidence-strength.js";
@@ -101,7 +105,7 @@ import {
  * dashboard (shared/ads-acted-on.ts), because it changes with the date and a
  * stored label would go stale between weekly runs.
  */
-export const ADS_RULESET_VERSION = 10;
+export const ADS_RULESET_VERSION = 11;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -992,6 +996,26 @@ export interface OutcomeFeedFacts {
   /** Have we ever sent an outcome back to a platform for this client? */
   uploadsEver: number;
   newestUploadOn: string | null;
+  /**
+   * Leads in the window that were LEFT OUT of every count above: marked Junk or
+   * Our test on the Website Leads page, or from one of our own addresses. The
+   * row says how many so the count can be read against that page. NULL = not
+   * read, never nought. See ./lead-filter.ts.
+   */
+  leftOut?: number | null;
+  /**
+   * Closed sales BS LLC keeps by hand for a client whose sales are not in a CRM
+   * this system reads (Diesel Power Group closes in Odoo, not D365). The
+   * tracker's own summary: counted wins and what they came to. NULL = the client
+   * has no tracker, or its summary could not be read.
+   *
+   * IT IS BS LLC'S OWN MATCH and the client has not confirmed it: the sheet is
+   * Odoo's sales matched to OUR lead exports by phone, email and company name,
+   * and a person here marks each row Won. It is never merged with `wonInWindow`
+   * (the CRM's) and it carries no click id, so it can say how many enquiries
+   * became customers and cannot say which click bought which.
+   */
+  tracker?: { deals: number; cents: number; newestClosed: string | null; windowStart: string | null } | null;
 }
 
 /**
@@ -1012,11 +1036,18 @@ export interface OutcomeFeedFacts {
  */
 export const MIN_MONTHLY_OUTCOMES_FOR_BIDDING = 30;
 
+/** Site forms a window must hold before their share carrying a click id is
+ *  read at all. Under it a share is an anecdote. Ours. */
+export const MIN_FORMS_FOR_CLICK_ID_VERDICT = 5;
+
 export type OutcomeReadinessVerdict =
   /** The click id is not being captured, so nothing can be tied back at all. */
   | "no_click_ids"
   /** No CRM outcome reaches this client's record, so there is nothing to send. */
   | "no_outcomes"
+  /** No CRM outcome reaches this client's record, but BS LLC's own tracker holds
+   *  closed sales matched by hand. Real, not tied to a click, not confirmed. */
+  | "tracker_only"
   /** Both exist, and there are far too few closed outcomes to bid on. */
   | "too_thin_to_bid"
   /** Both exist at volume. Still a decision, never a recommendation. */
@@ -1073,6 +1104,30 @@ export function outcomeReadiness(
   if (f.uploadsEver > 0) {
     lines.push(`${f.uploadsEver} outcome(s) have already been sent back to a platform for this client${f.newestUploadOn ? `, the newest on ${f.newestUploadOn}` : ""}`);
   }
+  // THE COUNT SAYS WHAT IT LEFT OUT. A lead marked Junk or Our test on the
+  // Website Leads page, or posted from one of our own addresses, is in none of
+  // the numbers above; saying how many lets them be read against that page, and
+  // is where somebody finds the bot that has not been marked yet. Null = the
+  // count was not read, which says nothing.
+  if (f.leftOut != null && f.leftOut > 0) {
+    lines.push(`${f.leftOut} more lead(s) in the window are left out of these counts: marked Junk or Our test on the Website Leads page, or posted from one of our own addresses. Mark any spam still counted there and it leaves these numbers too`);
+  }
+  const tracker = f.tracker && f.tracker.deals > 0 ? f.tracker : null;
+  if (tracker) {
+    lines.push(`BS LLC's own tracker holds ${tracker.deals} closed sale(s) worth $${Math.round(tracker.cents / 100).toLocaleString("en-US")}${tracker.windowStart ? ` since ${tracker.windowStart}` : ""}${tracker.newestClosed ? `, the newest closed ${tracker.newestClosed}` : ""}. `
+      + "They are the client's sales matched to our leads by hand, on phone, email and company name. The client has not confirmed them and they carry no click id");
+  }
+
+  // ── Click ids, forms and calls told apart (2026-10-12) ──
+  // A form can carry a click id in a hidden field and a call can only carry one
+  // where the call tracker passes it on. They are different fixes for different
+  // people, and one share over both nagged about calls the platform cannot tag.
+  // With the split, the blocker is about FORMS, where there is something to add.
+  const s = f.split ?? null;
+  const formsReadable = s != null && s.forms >= MIN_FORMS_FOR_CLICK_ID_VERDICT;
+  if (s && s.calls > 0 && f.gclidLeadsInWindow > 0) {
+    lines.push(`Calls carry a click id only where the call tracker passes it on (${s.gclidCalls} of ${s.calls} do). That is the tracker's setting, not something the forms can fix`);
+  }
 
   if (f.gclidLeadsInWindow === 0) {
     blockers.push("Auto-tagging or the form is not passing the Google click id through to the lead. Nothing can tie a customer back to a click until it does, and a click id not captured today cannot be recovered later.");
@@ -1082,8 +1137,26 @@ export function outcomeReadiness(
       metrics: { leads: f.leadsInWindow, gclidLeads: 0, crmRows: f.crmRowsInWindow, won: f.wonInWindow },
     };
   }
-  if (clickShare < 0.25) {
+  if (s) {
+    if (formsReadable && s.gclidForms === 0) {
+      blockers.push(`None of the ${s.forms} site forms carries a click id. Add a hidden Google click id field to the form so it is saved with the enquiry; a click id not captured today cannot be recovered later.`);
+    } else if (formsReadable && s.gclidForms / s.forms < 0.25) {
+      blockers.push(`Only ${Math.round((s.gclidForms / s.forms) * 100)}% of site forms carry a click id, so at best that share of their outcomes could ever be tied back. Check the hidden click id field on every form.`);
+    }
+  } else if (clickShare < 0.25) {
     blockers.push(`Only ${Math.round(clickShare * 100)}% of leads carry a click id, so at best that share of outcomes could ever be tied back.`);
+  }
+
+  if (tracker && (f.crmRowsInWindow === 0 || f.wonInWindow === 0)) {
+    blockers.push("The closed sales are BS LLC's own tracker, matched by hand and not by click, so they show how many enquiries became customers and cannot show which campaign bought which. They are not confirmed by the client.");
+    return {
+      verdict: "tracker_only", outcomesPerMonth: null, measuredValueCents: f.measuredWonValueCents,
+      blockers, lines,
+      metrics: {
+        leads: f.leadsInWindow, gclidLeads: f.gclidLeadsInWindow, crmRows: f.crmRowsInWindow, won: f.wonInWindow,
+        trackerWon: tracker.deals, trackerCents: tracker.cents,
+      },
+    };
   }
 
   if (f.crmRowsInWindow === 0 || f.wonInWindow === 0) {
@@ -1440,6 +1513,15 @@ export interface DerivedFinding {
      * search listed there would be counted as one. Absent where nothing was held.
      */
     notes?: string[];
+    /**
+     * The campaign's daily budget, by id, on a row whose subject is a campaign
+     * that has one. Beside the metrics rather than in them on purpose: the
+     * evidence hash buckets every metric, so putting an id there would change
+     * the hash of rows people have already dismissed. The dashboard matches a
+     * budget change on this id because Google's change event names no campaign
+     * on a budget change (2026-10-12).
+     */
+    budgetResourceId?: number;
   };
   /** Monthly impact in CENTS (or leads × 100 when impactUnit is leads_month). */
   estImpactCents: number;
@@ -2258,6 +2340,7 @@ export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; 
           metrics: dem.metrics,
           ...win,
           lines: [...dem.lines, ...dem.preconditions, ...targetLines],
+          ...(budgetIdOf(c.budgetResourceName) != null ? { budgetResourceId: budgetIdOf(c.budgetResourceName) as number } : {}),
         },
         // LEADS, never dollars, for `headroom`'s reason: the money tier is
         // already the leads figure multiplied by a recorded lead value, and
@@ -2714,11 +2797,74 @@ export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; 
   const competitorNames = (input.competitorNames ?? []).map((n) => n.trim()).filter(Boolean);
   const competitorsRecorded = competitorNames.length > 0;
   const qsCompetitor = competitorsRecorded ? qsAll.filter((k) => matchesRecordedName(k.text, competitorNames)) : [];
-  const qsRows = competitorsRecorded ? qsAll.filter((k) => !matchesRecordedName(k.text, competitorNames)) : qsAll;
+  const qsRowsAll = competitorsRecorded ? qsAll.filter((k) => !matchesRecordedName(k.text, competitorNames)) : qsAll;
   {
     const per = new Map<string, number>();
     for (const k of qsCompetitor) per.set(k.campaignName, (per.get(k.campaignName) ?? 0) + 1);
     for (const [campaignName, count] of per) accounting.competitorKeywords.push({ campaignName, count });
+  }
+
+  // ── SPLIT BY WHAT GOOGLE SAYS IS WRONG (2026-10-12) ────────────────────────
+  // Landing page experience, expected click-through and ad relevance are three
+  // jobs for two kinds of person, and one row sent all of them to whoever took
+  // it (`./qs-components.ts`). Taken over every scored keyword that can serve,
+  // not only those under the floor: a keyword at 6 with a below-average page is
+  // a page problem all the same. Needs the full keyword list; without it, or
+  // with no component reported, the single account row stands exactly as it was.
+  const qsScored: QsKeywordFact[] = qsFromInventory
+    ? inventory!
+        .filter((k) => keywordCanServe(k) === "yes" && k.qualityScore != null && (k.qualityScore as number) > 0)
+        .filter((k) => !(competitorsRecorded && matchesRecordedName(k.text, competitorNames)))
+        .map((k): QsKeywordFact => ({
+          text: k.text,
+          campaignName: k.campaignName ?? "a campaign this run could not name",
+          score: k.qualityScore as number,
+          costMicros: k.criterionResourceName ? (kwSpend.get(k.criterionResourceName)?.costMicros ?? null) : null,
+          conversions: k.criterionResourceName ? (kwSpend.get(k.criterionResourceName)?.conversions ?? null) : null,
+          landingPage: k.qsLandingPage ?? null,
+          expectedCtr: k.qsExpectedCtr ?? null,
+          adRelevance: k.qsAdRelevance ?? null,
+        }))
+        .sort((a, b) => (b.costMicros ?? -1) - (a.costMicros ?? -1) || a.text.localeCompare(b.text))
+    : [];
+  const qsSplit = qsFromInventory ? splitByComponent(qsScored, THRESHOLDS.qualityScoreFloor) : null;
+  // The rows the single account row counts: all of them where nothing could be
+  // split, otherwise only what no component row already covers.
+  const qsRows: { text: string; campaignName: string; score: number; costMicros: number | null; conversions: number | null }[] =
+    qsSplit && qsSplit.readable ? qsSplit.remainder : qsRowsAll;
+
+  if (accountWorthARow && qsSplit && qsSplit.readable) {
+    for (const g of qsSplit.groups) {
+      const spend = g.keywords.reduce((s, k) => s + (k.costMicros ?? 0), 0);
+      const label = QS_COMPONENT_LABEL[g.component];
+      out.push({
+        entityType: "account", entityId: `${input.accountId}:low_quality_score:${g.component}`, entityName: label,
+        findingType: "low_quality_score", severity: "medium", riskLevel: "low",
+        applicability: "vendor",
+        title: `${label} is below average on ${g.keywords.length} of ${qsSplit.scored} scored keyword(s)`,
+        summary: QS_COMPONENT_SUMMARY[g.component],
+        evidence: {
+          metrics: {
+            keywordCount: g.keywords.length, keywordsScored: qsSplit.scored, costMicros: spend,
+            [QS_COMPONENT_METRIC]: QS_COMPONENT_CODE[g.component],
+          },
+          ...win,
+          // The same line shape the account row used, so everything that reads
+          // a quality-score line (the page-copy brief, the vendor brief, the
+          // export) reads these without a second parser. Every keyword.
+          lines: [
+            ...g.keywords.map((k) =>
+              `QS ${k.score} · ${k.costMicros != null ? usd(k.costMicros) : "no spend recorded in this window"} · "${k.text}" (${k.campaignName})`),
+            `Counted over the ${qsSplit.scored} keyword(s) the account holds that can serve and carry a quality score. ${label} is one of the three parts Google reports for it; a keyword below average on more than one is listed under each.`,
+          ],
+        },
+        estImpactCents: 0,
+        impactUnit: "usd_month",
+        impactAssumption: "No dollar estimate: the premium Google charges for a below-average component isn't exposed by the API, so any figure would be invented.",
+        changePayload: null,
+        guardNote: QS_COMPONENT_GUARD[g.component],
+      });
+    }
   }
 
   if (accountWorthARow && qsRows.length) {
@@ -3043,6 +3189,8 @@ export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; 
         ? "No lead on this account carries a Google click id, so no customer can ever be traced back to a click"
         : readiness.verdict === "no_outcomes"
           ? "Clicks are being captured and nothing records which of them became a customer"
+          : readiness.verdict === "tracker_only"
+            ? "Closed sales are tracked by hand, and none is tied to a click"
           : thin
             ? `This account closes about ${(perMonth ?? 0).toFixed(1)} outcome(s) a month — too few for a platform to bid on`
             : `This account closes about ${(perMonth ?? 0).toFixed(1)} outcomes a month, which is enough volume to be a decision`,
@@ -3050,6 +3198,8 @@ export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; 
         ? "The platform can only ever learn from clicks it can identify. A click id that is not captured today cannot be recovered later, so every day this runs is a day of outcomes that can never be tied back to the campaign that bought them."
         : readiness.verdict === "no_outcomes"
           ? "The click ids are arriving and nothing on the other end closes the loop. Until a CRM outcome reaches a lead we captured, the only thing anyone here can say about a campaign is how many forms it filled in."
+          : readiness.verdict === "tracker_only"
+            ? "The client closes its sales outside a CRM this system reads, so BS LLC keeps a list of them by hand and matches each to a lead. That shows how many enquiries became customers. It cannot show which click bought which, and the client has not confirmed it, so it is context for decisions and not an outcome to send back to the platform."
           : thin
             ? "There is a real chain here from click to closed customer, and it is far too thin to be what a bidding strategy learns from: a strategy pointed at a signal this sparse retrains on almost nothing. "
               + `What it IS enough for is our own decisions — which campaigns to fund, which terms to cut — made weekly by a person, which needs no learning volume at all. The volume figure, not a recommendation, is the finding.`

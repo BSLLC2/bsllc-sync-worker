@@ -89,6 +89,45 @@ export const MIN_EXPECTED_MISSING = 3;
  */
 export const EXCLUSION_WORTH_IT_WITHIN_DAYS = 30;
 
+/**
+ * THE NEWEST DAY IS NOT FINAL (2026-10-12).
+ *
+ * A conversion is credited to the day of the CLICK and arrives afterwards: a
+ * call is logged when it ends, an imported lead when the import runs. So the
+ * last day in a daily series is always short, and a series read at 8 in the
+ * morning ends on a day that has barely begun counting. Reading that day as
+ * "recorded nothing" is how a Monday-morning audit calls the weekend a break.
+ * One day, ours: nothing published says how long this account's conversions
+ * take, and the lag reading beside this one (`bidding-readiness.ts`) is
+ * per-campaign rather than per-account.
+ */
+export const RECENT_DAYS_NOT_FINAL = 1;
+
+/**
+ * Settled days a quiet stretch must run before it is called a break at all.
+ *
+ * Three. Two quiet days is a weekend on any business that does not trade on
+ * one, and a weekend was exactly what raised the first false alarm on a
+ * Diesel Power Group account whose calls run Monday to Friday. Ours.
+ */
+export const MIN_QUIET_DAYS = 3;
+
+/**
+ * …and, of those, days on which this account NORMALLY converts. The baseline is
+ * read per kind of day (a weekday against a weekend day), so a run is counted
+ * against what the account does on those same days. A quiet Saturday and
+ * Sunday on an account that never converts on either are two days with
+ * nothing to compare them against, and they are not part of the evidence.
+ */
+export const MIN_CONVERTING_DAYS_IN_RUN = 2;
+
+/**
+ * Days of one kind (weekday or weekend) the baseline needs before a rate for
+ * that kind is read at all. Two, because one day is an anecdote; with fewer the
+ * kind is UNJUDGED, which adds nothing to what was missed and is said.
+ */
+export const MIN_BASELINE_DAYS_PER_KIND = 2;
+
 export interface DailyConversionRow {
   /** YYYY-MM-DD. */
   date: string;
@@ -121,6 +160,11 @@ export interface TrackingOutage {
   baselineDays: number;
   /** Is the run still open at the end of the series? */
   ongoing: boolean;
+  /** Days in the run on which the baseline says this account normally
+   *  converts, which is what a break is counted on. */
+  convertingDaysInRun: number;
+  /** Newest days left out as not final. Zero where the series was too short. */
+  recentDaysLeftOut: number;
   /** Can this be expressed as one data exclusion the platform would accept? */
   exclusionExpressible: boolean;
   /** Why not, where it cannot. Null where it can. */
@@ -132,11 +176,19 @@ export interface TrackingOutage {
 const EMPTY = {
   startDate: null, endDate: null, days: 0, clicksInRun: 0, costMicrosInRun: 0,
   expectedConversions: 0, baselineConvPerClick: 0, baselineDays: 0, ongoing: false,
-  exclusionExpressible: false,
+  exclusionExpressible: false, convertingDaysInRun: 0, recentDaysLeftOut: 0,
 };
 
 const dayDiff = (a: string, b: string) =>
   Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
+
+/** A calendar date is a weekday or a weekend day whatever the account's time
+ *  zone is, so this reads the date itself and never a clock. */
+export type DayKind = "weekday" | "weekend";
+export function dayKindOf(date: string): DayKind {
+  const dow = new Date(`${date}T00:00:00Z`).getUTCDay();
+  return dow === 0 || dow === 6 ? "weekend" : "weekday";
+}
 
 /**
  * Pure. Find the most recent stretch on which the conversion column went quiet
@@ -146,6 +198,26 @@ const dayDiff = (a: string, b: string) =>
  * find. A list of six historic quiet weekends is not something anybody acts
  * on, and each exclusion proposed is a slot spent and a range of real data
  * discarded if it is wrong.
+ *
+ * ── WHAT A BREAK HAS TO BE (2026-10-12) ───────────────────────────────────
+ *
+ * The first version compared a quiet run with the account's average day, so a
+ * Saturday and a Sunday on an account whose calls run Monday to Friday read as
+ * "143 clicks and nothing, about 3 conversions short" and went to the top of
+ * the queue as a high-severity outage. A break is now all of:
+ *
+ *  - SETTLED: the newest day is left out (`RECENT_DAYS_NOT_FINAL`), because
+ *    conversions arrive after the click.
+ *  - LONG ENOUGH: at least `MIN_QUIET_DAYS` settled days.
+ *  - ON DAYS THE ACCOUNT CONVERTS: the baseline is read per kind of day, a run
+ *    is counted against the rate of the SAME kind, and at least
+ *    `MIN_CONVERTING_DAYS_IN_RUN` of its days are of a kind that converted
+ *    before. A kind with too little baseline is unjudged and adds nothing.
+ *  - SHORT OF WHAT IT SHOULD HAVE HAD: the same-kind expectation still has to
+ *    reach `MIN_EXPECTED_MISSING`.
+ *
+ * Each refusal is a `none` that SAYS which test it failed, so a quiet run that
+ * is not called a break is never silent about why.
  */
 export function findTrackingOutage(series: DailyConversionRow[] | null | undefined): TrackingOutage {
   if (series == null) {
@@ -155,23 +227,27 @@ export function findTrackingOutage(series: DailyConversionRow[] | null | undefin
       metrics: {},
     };
   }
-  const rows = [...series].filter((r) => r && typeof r.date === "string" && r.date.length === 10)
+  const all = [...series].filter((r) => r && typeof r.date === "string" && r.date.length === 10)
     .sort((a, b) => a.date.localeCompare(b.date));
-  if (rows.length === 0) {
+  if (all.length === 0) {
     return { ...EMPTY, verdict: "unread", refusal: null, lines: ["The day-by-day conversion series came back empty."], metrics: {} };
   }
+  // The newest day(s) are not final. Only when there is more than that to read:
+  // a series of one day has nothing else to be judged on.
+  const left = all.length > RECENT_DAYS_NOT_FINAL ? RECENT_DAYS_NOT_FINAL : 0;
+  const rows = left ? all.slice(0, all.length - left) : all;
 
-  // Walk back from the newest day over the run of noughts, then keep walking
-  // back over the healthy days behind it to build the baseline.
+  // Walk back from the newest settled day over the run of noughts, then keep
+  // walking back over the healthy days behind it to build the baseline.
   let end = rows.length - 1;
   while (end >= 0 && rows[end]!.clicks === 0 && rows[end]!.conversions === 0) end--; // ignore trailing dead days
   if (end < 0) {
-    return { ...EMPTY, verdict: "no_baseline", refusal: null, lines: ["No day in the window took a click, so there is nothing to compare."], metrics: {} };
+    return { ...EMPTY, recentDaysLeftOut: left, verdict: "no_baseline", refusal: null, lines: ["No day in the window took a click, so there is nothing to compare."], metrics: {} };
   }
   if (rows[end]!.conversions > 0) {
     return {
-      ...EMPTY, verdict: "none", refusal: null,
-      lines: [`The conversion column recorded something on ${rows[end]!.date}, the most recent day with traffic.`],
+      ...EMPTY, recentDaysLeftOut: left, verdict: "none", refusal: null,
+      lines: [`The conversion column recorded something on ${rows[end]!.date}, the most recent settled day with traffic.`],
       metrics: {},
     };
   }
@@ -190,11 +266,24 @@ export function findTrackingOutage(series: DailyConversionRow[] | null | undefin
   const endDate = run[run.length - 1]!.date;
   const days = run.length;
   const ongoing = end === rows.length - 1;
+  const asOf = ongoing ? `still quiet as of ${endDate}, the last settled day` : "";
+  const where = { startDate, endDate, days, clicksInRun, costMicrosInRun, ongoing, recentDaysLeftOut: left };
+
+  // ── Long enough to be a break at all ──
+  if (days < MIN_QUIET_DAYS) {
+    return {
+      ...EMPTY, ...where, baselineDays, verdict: "none", refusal: null,
+      lines: [
+        `Quiet from ${startDate} to ${endDate} (${days} settled day${days === 1 ? "" : "s"}${asOf ? `, ${asOf}` : ""}): ${clicksInRun} clicks, no conversion recorded.`,
+        `That is under the ${MIN_QUIET_DAYS} settled days it takes to call a quiet stretch a break rather than an ordinary gap${left ? `, and the newest ${left === 1 ? "day is" : `${left} days are`} left out because conversions are still arriving for ${left === 1 ? "it" : "them"}` : ""}.`,
+      ],
+      metrics: { quietDays: days, clicksInRun, costMicrosInRun, baselineDays },
+    };
+  }
 
   if (baselineDays < MIN_BASELINE_DAYS || baselineConversions < MIN_BASELINE_CONVERSIONS) {
     return {
-      ...EMPTY, verdict: "no_baseline", refusal: null,
-      startDate, endDate, days, clicksInRun, costMicrosInRun, ongoing,
+      ...EMPTY, ...where, verdict: "no_baseline", refusal: null,
       baselineDays, baselineConvPerClick: 0, expectedConversions: 0,
       lines: [
         `The column has recorded nothing since ${startDate}, and the ${baselineDays} day(s) before that hold ${baselineConversions.toFixed(0)} conversion(s) between them.`,
@@ -204,23 +293,55 @@ export function findTrackingOutage(series: DailyConversionRow[] | null | undefin
     };
   }
 
+  // ── The baseline, per kind of day ──
+  const rate: Record<DayKind, number | null> = { weekday: null, weekend: null };
+  const baseDays: Record<DayKind, number> = { weekday: 0, weekend: 0 };
+  const baseClicks: Record<DayKind, number> = { weekday: 0, weekend: 0 };
+  const baseConv: Record<DayKind, number> = { weekday: 0, weekend: 0 };
+  for (const r of before) {
+    const k = dayKindOf(r.date);
+    baseDays[k] += 1; baseClicks[k] += r.clicks; baseConv[k] += r.conversions;
+  }
+  for (const k of ["weekday", "weekend"] as const) {
+    rate[k] = baseDays[k] >= MIN_BASELINE_DAYS_PER_KIND && baseClicks[k] > 0 ? baseConv[k] / baseClicks[k] : null;
+  }
+  let expectedConversions = 0;
+  let convertingDaysInRun = 0;
+  let unjudgedDays = 0;
+  for (const r of run) {
+    const rt = rate[dayKindOf(r.date)];
+    if (rt == null) { unjudgedDays += 1; continue; }
+    expectedConversions += rt * r.clicks;
+    if (rt > 0) convertingDaysInRun += 1;
+  }
   const baselineConvPerClick = baselineClicks > 0 ? baselineConversions / baselineClicks : 0;
-  const expectedConversions = baselineConvPerClick * clicksInRun;
+  const pctOf = (v: number | null) => v == null ? "not enough days to read" : `${(v * 100).toFixed(1)} per 100 clicks`;
+  const rateLine = `Before it, a weekday converted at ${pctOf(rate.weekday)} (${baseDays.weekday} days) and a weekend day at ${pctOf(rate.weekend)} (${baseDays.weekend} days), and the run is counted against the same kind of day.`;
   const lines = [
-    `Quiet from ${startDate} to ${endDate} (${days} day${days === 1 ? "" : "s"}${ongoing ? ", still quiet" : ""}): ${clicksInRun} clicks, no conversion recorded on any of them.`,
-    `The ${baselineDays} days before it recorded ${baselineConversions.toFixed(0)} conversion(s) on ${baselineClicks} clicks, so those ${clicksInRun} clicks should have produced about ${expectedConversions.toFixed(1)}.`,
+    `Quiet from ${startDate} to ${endDate} (${days} settled day${days === 1 ? "" : "s"}${asOf ? `, ${asOf}` : ""}): ${clicksInRun} clicks, no conversion recorded on any of them.`,
+    rateLine,
+    `On those days it should have produced about ${expectedConversions.toFixed(1)}.`,
   ];
   const metrics = {
     quietDays: days, clicksInRun, costMicrosInRun,
     expectedMissingConversions: expectedConversions,
     baselineDays, baselineConversions, baselineConvPerClick,
+    convertingDaysInRun, unjudgedDays,
+  };
+  const base = {
+    ...EMPTY, ...where, baselineDays, baselineConvPerClick, expectedConversions, convertingDaysInRun,
   };
 
+  if (convertingDaysInRun < MIN_CONVERTING_DAYS_IN_RUN) {
+    return {
+      ...base, verdict: "none", refusal: null,
+      lines: [...lines, `Only ${convertingDaysInRun} of those days are days this account normally converts on (a weekend, on an account whose calls run on weekdays, is not one), under the ${MIN_CONVERTING_DAYS_IN_RUN} it takes to call this a break.`],
+      metrics,
+    };
+  }
   if (expectedConversions < MIN_EXPECTED_MISSING) {
     return {
-      ...EMPTY, verdict: "none", refusal: null,
-      startDate, endDate, days, clicksInRun, costMicrosInRun, ongoing,
-      baselineConvPerClick, baselineDays, expectedConversions,
+      ...base, verdict: "none", refusal: null,
       lines: [...lines, `That is under the ${MIN_EXPECTED_MISSING} missing conversions this reading needs before calling a quiet stretch a break rather than a quiet stretch.`],
       metrics,
     };
@@ -235,9 +356,8 @@ export function findTrackingOutage(series: DailyConversionRow[] | null | undefin
   }
 
   return {
+    ...base,
     verdict: "found",
-    startDate, endDate, days, clicksInRun, costMicrosInRun,
-    expectedConversions, baselineConvPerClick, baselineDays, ongoing,
     exclusionExpressible: refusal == null,
     refusal,
     lines: refusal ? [...lines, refusal] : lines,
