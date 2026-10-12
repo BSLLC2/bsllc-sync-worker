@@ -135,7 +135,7 @@ function checkExtractor() {
   ok("only the first title counts; every level 1 is counted", dup.title === "One" && dup.h1 === "A" && dup.h1Count === 2);
 
   const long = extractPage(`<title>${"t".repeat(900)}</title>${Array.from({ length: 80 }, (_, i) => `<h2>H ${i}</h2>`).join("")}`, "https://shop.example.test/");
-  ok("a very long title is cut to its limit", (long.title ?? "").length <= TITLE_MAX, String((long.title ?? "").length));
+  ok("a very long title is cut to its limit", (long.title ?? "").length <= TITLE_MAX && (long.title ?? "").length <= 400, String((long.title ?? "").length));
   ok("the outline is capped", long.outline.length === OUTLINE_MAX, String(long.outline.length));
 
   const navH1 = extractPage("<nav><h1>Menu</h1></nav><h1>Real</h1>", "https://shop.example.test/");
@@ -254,6 +254,9 @@ async function checkFetcher() {
   const off = await fetchPage(`https://${SITE}/off`, base);
   const hitsOther = hosts.includes("other.example.test");
   ok("a redirect to another site is an answer and is NOT followed", off.state === "off_site_redirect" && !hitsOther);
+  requests.length = 0;
+  const direct = await fetchPage(`https://other.example.test/x`, base);
+  ok("an address on another site is refused outright and never requested", direct.state === "off_site_redirect" && requests.length === 0 && !hosts.includes("other.example.test"));
   const loop = await fetchPage(`https://${SITE}/loop-a`, base);
   ok("a redirect loop stops", loop.state === "error_status" && /redirect/.test(String(loop.error)));
   const pdf = await fetchPage(`https://${SITE}/pdf`, base);
