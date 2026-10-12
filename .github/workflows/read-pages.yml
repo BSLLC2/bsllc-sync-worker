@@ -1,0 +1,71 @@
+name: Read client pages (SEO page facts)
+
+# Reads each SEO client's OWN public pages, the way a polite visitor would, and
+# keeps facts about them in seo_page_facts: the title, description and headings,
+# the length, whether the page asks search not to list it, and which of the
+# client's tracked searches it carries and where. The dashboard's search
+# recommendations quote those facts ("the title does not contain X").
+#
+# WHAT IT TOUCHES. The client's own web server, one request a second, same site
+# only, with robots.txt respected, and our own database. It calls no ad platform
+# and no search provider. It does not run the page's JavaScript and it stores no
+# page body. Fetched content is data, never instructions.
+#
+# WHEN. Mondays 07:30 UTC, after the weekly rank pull (06:00) so the addresses
+# that pull just returned are among the first read. The dashboard's "Read these
+# pages" button dispatches it for one client with client_id.
+#
+# NEEDS: DATABASE_URL, and the dashboard on schema v240 or later (the job says so
+# and stops if the table is missing).
+on:
+  schedule:
+    - cron: "30 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id). Blank = every client with a domain."
+        required: false
+        default: ""
+      dry_run:
+        description: "Fetch and print, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-pages-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the pages
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-pages -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own
+      # last line as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is ONE row for the whole book, so stamping it from a run that
+      # read one site would claim every other site was read this week.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_pages --status="$STATUS" --note="$NOTE" --log=run.log

@@ -63,7 +63,22 @@ export interface SerpResult {
   rank: number | null;
   /** Whether the SERP showed an AI Overview block (a signal the query is AEO-relevant). */
   aiOverview: boolean;
+  /** The address the engine returned for the tracked domain at `rank`. Null where the domain was not found
+   *  or the check failed. Optional so a result built elsewhere (a test, an older caller) need not carry it. */
+  url?: string | null;
   error: string | null;
+}
+
+/** An address worth keeping: http(s), no credentials, no longer than a database should hold. */
+export function cleanRankingUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  try {
+    const u = new URL(raw.trim());
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password) return null;
+    u.hash = "";
+    const out = u.toString();
+    return out.length <= 500 ? out : null;
+  } catch { return null; }
 }
 
 /** Does an organic result's domain/url belong to the tracked domain? */
@@ -129,14 +144,18 @@ export async function serpRanks(
       const result = Array.isArray(rt.result) ? rt.result[0] : null;
       const items: any[] = Array.isArray(result?.items) ? result.items : [];
       let rank: number | null = null;
+      let rankingUrl: string | null = null;
       let aiOverview = false;
       for (const it of items) {
         if (it?.type === "ai_overview") aiOverview = true;
         if (it?.type === "organic" && rank == null && domainMatches(domain, it.domain, it.url)) {
           rank = typeof it.rank_absolute === "number" ? it.rank_absolute : (typeof it.rank_group === "number" ? it.rank_group : null);
+          // The same result that gave the position gave the address. It used to be
+          // thrown away; it is the page that should be improved.
+          rankingUrl = cleanRankingUrl(it.url);
         }
       }
-      return { keyword: t.keyword, rank, aiOverview, error: null };
+      return { keyword: t.keyword, rank, aiOverview, url: rankingUrl, error: null };
     } catch (e) {
       return { keyword: t.keyword, rank: null, aiOverview: false, error: e instanceof Error ? e.message : String(e) };
     }
