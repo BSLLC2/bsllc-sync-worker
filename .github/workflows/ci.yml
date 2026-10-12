@@ -32,6 +32,8 @@ jobs:
         run: npm run verify-ads-evidence-strength
       - name: Ads findings reflect what was done in the account
         run: npm run verify-ads-reflect-actions
+      - name: Ads audit gaps found on a Diesel Power Group account
+        run: npm run verify-ads-dpg
       - name: Ads audit run summary and sweep guard (pure sections)
         run: npm run verify-ads-run-summary
       - name: Zero-vs-nothing guard

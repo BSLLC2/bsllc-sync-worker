@@ -129,6 +129,17 @@ const weekdayAccount = (start: string, days: number, over: (d: string, kind: str
     return d >= "2026-10-05" && dow >= 1 && dow <= 4 ? { conversions: 0 } : {};
   });
   const b = findTrackingOutage(broken);
+  // A closed Monday after a weekend: three settled quiet days, but only ONE is a
+  // day this account converts on, so the run cannot be told from a holiday.
+  const holiday = Array.from({ length: 44 }, (_, i): DailyConversionRow => {
+    const date = addDays("2026-08-31", i);              // a Monday
+    const weekday = dayKindOf(date) === "weekday";
+    const closed = date === "2026-10-12" || date === "2026-10-10" || date === "2026-10-11";
+    return { date, clicks: weekday ? 100 : 5, conversions: weekday && !closed ? 10 : 0, costMicros: 8_000_000 };
+  }).filter((r) => r.date <= "2026-10-13");
+  const h = findTrackingOutage(holiday);
+  ok("a holiday weekend (two quiet weekend days and one quiet Monday) is not a break, though Monday alone expects ten",
+    h.verdict === "none" && h.convertingDaysInRun === 1, `${h.verdict} converting days ${h.convertingDaysInRun}, expected ${h.expectedConversions.toFixed(1)}`);
   ok("control: four quiet WEEKDAYS on that account are still found", b.verdict === "found" && b.startDate! <= "2026-10-05" && b.endDate === "2026-10-07", `${b.verdict} ${b.startDate} ${b.days}d`);
   ok("…counted on days the account converts", b.convertingDaysInRun >= 2);
 }
