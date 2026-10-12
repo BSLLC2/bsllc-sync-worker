@@ -36,6 +36,8 @@ jobs:
         run: npm run verify-ads-run-summary
       - name: Zero-vs-nothing guard
         run: npm run verify-zero-vs-nothing
+      - name: Keyword research relevance and location guard
+        run: npm run verify-research-relevance
       - name: Meta importer guard
         run: npm run verify-meta-import
       - name: HubSpot deal-outcome guard

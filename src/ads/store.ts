@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import { evidenceHash, materiallyChanged, ADS_RULESET_VERSION, type DerivedFinding, type ClientEconomics, type OutcomeFeedFacts, type MissingFigureWhy } from "./rules.js";
 import type { ClientServiceFacts } from "./service-relevance.js";
 import type { ResearchFacts, ResearchKeyword } from "./keyword-gap.js";
+import type { IdeaReview } from "./idea-relevance.js";
 import type { RecordedTarget } from "./keyword-sourcing.js";
 import type { PhoneDemandFacts } from "./traffic-readiness.js";
 import { parseCompetitorNames } from "./competitor-names.js";
@@ -1071,7 +1072,28 @@ export async function researchFactsFor(
       })
       .filter((k): k is ResearchKeyword => k != null);
 
-    return { keywords, ranAt: r.ran ?? null, location: r.location_name ?? null, seeds };
+    // What a person said about individual ideas. The app writes these and this
+    // only reads them, so a "keep" pressed on the research panel reaches the
+    // audit. A read that fails costs the answers and nothing else: the rule
+    // then judges every idea by itself.
+    const reviews: Record<string, IdeaReview> = {};
+    try {
+      const prefix = `idea_review:${clientId}:`;
+      const { rows: rv } = await c.query<{ key: string; value: string }>(
+        `SELECT key, value FROM app_settings WHERE left(key, $2) = $1`,
+        [prefix, prefix.length],
+      );
+      for (const row of rv) {
+        try {
+          const v = JSON.parse(row.value) as { decision?: unknown; by?: unknown; at?: unknown };
+          if (v.decision === "keep" || v.decision === "set_aside") {
+            reviews[row.key.slice(prefix.length)] = { decision: v.decision, by: typeof v.by === "string" ? v.by : null, at: typeof v.at === "string" ? v.at : null };
+          }
+        } catch { /* one unreadable answer is one idea judged by the rule */ }
+      }
+    } catch { /* see above */ }
+
+    return { keywords, ranAt: r.ran ?? null, location: r.location_name ?? null, seeds, reviews };
   } catch {
     return null;
   }

@@ -30,6 +30,13 @@ async function main() {
   const kind = (arg("kind") || "ideas").toLowerCase();
   const query = arg("query") || "";
   const target = arg("target") || null;
+  // A run FOR A CLIENT is never searched in the whole country by default: that
+  // priced a Cincinnati provider's research at national volumes. A smoke test
+  // with no client keeps its old default; a client needs a place, or the country
+  // chosen on purpose.
+  if (arg("client-id") && !(arg("location") || "").trim()) {
+    throw new Error('A run for a client needs --location="City, ST" (or --location="United States" to choose the whole country on purpose). It is not defaulted.');
+  }
   const location = arg("location") || "United States";
   const language = arg("language") || "English";
   if (!KINDS.has(kind)) throw new Error("Pass --kind=ideas | rankings | gap | discovery");
