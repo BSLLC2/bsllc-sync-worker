@@ -47,6 +47,13 @@ async function main() {
   await c.connect();
   const syncs: SyncEntry[] = [];
   try {
+    // The ranking address is kept only where the app's schema has the column
+    // (v240). The weekly rank pull must never fail because a deploy order was
+    // wrong, so the older INSERT is the fallback and the run says which it used.
+    const hasRankingUrl = (await c.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'seo_rank_history' AND column_name = 'ranking_url'`,
+    )).rowCount === 1;
+    if (!hasRankingUrl) console.log("· seo_rank_history has no ranking_url column yet; positions are kept without the address");
     const clients = (await c.query<ClientRow>(
       `SELECT id, name, seo_domain, seo_location FROM clients WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> ''`,
     )).rows;
@@ -101,12 +108,21 @@ async function main() {
           const r = results[i];
           if (!r) continue;
           const tgt = targets[i];
-          await c.query(
-            `INSERT INTO seo_rank_history
-               (id, seo_target_id, client_id, keyword, rank, ai_overview, device, scope, error, captured_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-            [randomUUID(), tgt?.id ?? null, client.id, r.keyword, r.rank, r.aiOverview, tgt?.device ?? null, tgt?.scope ?? null, r.error, now],
-          );
+          if (hasRankingUrl) {
+            await c.query(
+              `INSERT INTO seo_rank_history
+                 (id, seo_target_id, client_id, keyword, rank, ai_overview, device, scope, error, captured_at, ranking_url)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              [randomUUID(), tgt?.id ?? null, client.id, r.keyword, r.rank, r.aiOverview, tgt?.device ?? null, tgt?.scope ?? null, r.error, now, r.rank != null ? (r.url ?? null) : null],
+            );
+          } else {
+            await c.query(
+              `INSERT INTO seo_rank_history
+                 (id, seo_target_id, client_id, keyword, rank, ai_overview, device, scope, error, captured_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+              [randomUUID(), tgt?.id ?? null, client.id, r.keyword, r.rank, r.aiOverview, tgt?.device ?? null, tgt?.scope ?? null, r.error, now],
+            );
+          }
         }
         console.log(`  persisted ${results.length} keyword ranks for ${slug}`);
       }
