@@ -78,6 +78,15 @@ async function main() {
   const loc = "United States", lang = "English";
   await probe(auth, "keyword_ideas (Labs)", "/dataforseo_labs/google/keyword_ideas/live",
     [{ keywords: ["personal injury lawyer"], location_name: loc, language_name: lang, limit: 5 }]);
+  // The two calls a keyword research run uses for a place below the country.
+  // The CITY form is the thing nothing here could test without an account, so
+  // this is how to find out whether the plan accepts it. A 40501 on either line
+  // means the account or the spelling does not, and a run in that place stops
+  // with the provider's own sentence.
+  await probe(auth, "keywords_for_keywords at a city (Keywords Data)", "/keywords_data/google_ads/keywords_for_keywords/live",
+    [{ keywords: ["drug rehab"], location_name: "Cincinnati,Ohio,United States", language_name: lang }]);
+  await probe(auth, "search_volume at a city (Keywords Data)", "/keywords_data/google_ads/search_volume/live",
+    [{ keywords: ["drug rehab near me"], location_name: "Cincinnati,Ohio,United States", language_name: lang }]);
   await probe(auth, "ranked_keywords (Labs)", "/dataforseo_labs/google/ranked_keywords/live",
     [{ target: "nolo.com", location_name: loc, language_name: lang, limit: 5 }]);
   await probe(auth, "domain_rank_overview (Labs)", "/dataforseo_labs/google/domain_rank_overview/live",

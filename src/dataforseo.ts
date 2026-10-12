@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { judgeIdeas, type IdeaJudgement } from "./ads/idea-relevance.js";
+import { isNational, placeLabel, UNITED_STATES } from "./research-location.js";
 
 /**
  * Thin DataForSEO API client. Two surfaces we use:
@@ -512,6 +514,26 @@ export interface DiscoveryKeyword extends KeywordIdea {
   clientRank: number | null;
   competitorRank: number | null;
   sources: Array<"seed" | "gap">;
+  /** The place this row's volume was measured in, in the provider's own form.
+   *  A volume belongs to this place and is never compared with one measured
+   *  somewhere else. */
+  measuredIn: string | null;
+  /** What the relevance gate said when the run was stored. Informational: the
+   *  app judges again at read, against today's services and a person's answers. */
+  relevance: {
+    kept: boolean;
+    via: string | null;
+    source: "seed" | "service" | "tracked" | null;
+    why: "no_anchor" | "blank" | null;
+  };
+}
+
+/** What a run is judged against besides its own seeds. Null is unanswered:
+ *  `services: null` means nobody has signed a list off, and the seeds alone are
+ *  then used and the run says so. */
+export interface DiscoveryGate {
+  services: readonly string[] | null;
+  tracked: readonly string[] | null;
 }
 
 export interface DiscoveryResult {
@@ -520,6 +542,12 @@ export interface DiscoveryResult {
   costUsd: number;
   /** Non-fatal problems (e.g. the competitor pull failed) — surfaced in the log. */
   warnings: string[];
+  /** The place the volumes were measured in. */
+  place: string;
+  /** Which provider call produced the ideas. */
+  source: "labs_national" | "google_ads_local";
+  /** What the relevance gate did, in the words the run prints. */
+  judgement: IdeaJudgement;
 }
 
 /** DataForSEO reports what each task cost in the response; read it defensively. */
@@ -529,29 +557,170 @@ function taskCost(resp: any): number {
   return Number.isFinite(c) ? c : 0;
 }
 
+async function getJson<T = any>(creds: DfsCreds, path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "GET",
+    headers: { authorization: authHeader(creds) },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`DataForSEO ${path} HTTP ${res.status}`);
+  return (await res.json()) as T;
+}
+
+/** The location names in a provider locations answer. Pure; exported for the guard. */
+export function locationNamesFrom(resp: any): string[] | null {
+  const t = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  if (!t || t.status_code !== 20000 || !Array.isArray(t.result)) return null;
+  const names = t.result
+    .map((x: any) => (typeof x?.location_name === "string" ? x.location_name : null))
+    .filter((n: string | null): n is string => n != null && n.length > 0);
+  return names.length ? names : null;
+}
+
 /**
- * The SEO tab's "Keyword research" run. Three Labs calls at most:
- *   1. keyword_ideas for ALL seeds in one task (the endpoint accepts up to 200
- *      seed keywords) → volume / CPC / KD / intent / SERP features.
- *   2. ranked_keywords for the client domain (up to 1000) → each idea's
- *      "you rank #N today", and the set a gap is diffed against.
- *   3. ranked_keywords for the competitor (top 700 by volume) when given →
- *      rows the competitor wins (top 50) that the client doesn't rank for,
- *      merged in and tagged "gap".
- * Rows are deduped by keyword; the app sorts by Opportunity. Cost is the sum
- * of what DataForSEO says each task cost, so the UI can show estimate vs
- * actual. The client/competitor pulls are best-effort: if one fails the run
- * still returns the ideas, with the failure recorded in `warnings`.
+ * The places Google's ad tools can target, for checking a run's place before it
+ * is paid for. Free to call. NULL MEANS WE COULD NOT READ THE LIST, which is
+ * not the same as the place being missing from it: the run then goes ahead
+ * unverified and the provider's own refusal, if there is one, becomes the
+ * run's error.
+ */
+export async function googleAdsLocationNames(creds: DfsCreds): Promise<string[] | null> {
+  for (const path of ["/keywords_data/google_ads/locations/us", "/keywords_data/google_ads/locations"]) {
+    try {
+      const names = locationNamesFrom(await getJson(creds, path));
+      if (names) return names;
+    } catch {
+      // Try the next form; a failure here costs the verification and nothing else.
+    }
+  }
+  return null;
+}
+
+/**
+ * Ideas for a place below the country: Google Keyword Planner's own related
+ * ideas, through the Keywords Data API, which takes a city. The Labs
+ * `keyword_ideas` call used for the whole country measures nationally, and a
+ * national volume is not what people near the client search.
  *
- * Endpoints: POST /v3/dataforseo_labs/google/keyword_ideas/live
- *            POST /v3/dataforseo_labs/google/ranked_keywords/live (×0–2)
+ * Endpoint: POST /v3/keywords_data/google_ads/keywords_for_keywords/live (up to
+ * 20 seeds a task). It returns volume, CPC and competition; it returns no
+ * keyword difficulty and no intent, which are left null here (a gap, never a
+ * guess) and difficulty is filled for the ideas that are KEPT only.
+ */
+export async function keywordIdeasLocal(
+  creds: DfsCreds,
+  seeds: string[],
+  locationName: string,
+  languageName: string,
+): Promise<{ ideas: KeywordIdea[]; costUsd: number }> {
+  const resp = await post(creds, "/keywords_data/google_ads/keywords_for_keywords/live", [
+    { keywords: seeds.slice(0, 20), location_name: locationName, language_name: languageName, sort_by: "search_volume" },
+  ]);
+  const costUsd = taskCost(resp);
+  const task = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  if (!task || task.status_code !== 20000) throw new Error(task?.status_message || "DataForSEO returned no result");
+  const items: any[] = Array.isArray(task.result) ? task.result : [];
+  const ideas = items
+    .filter((it) => it && typeof it.keyword === "string" && it.keyword.trim().length > 0)
+    .map((it): KeywordIdea => ({
+      keyword: it.keyword,
+      volume: num(it.search_volume),
+      cpc: num(it.cpc),
+      competition: num(it.competition_index) != null ? (num(it.competition_index) as number) / 100 : null,
+      difficulty: null,
+      intent: null,
+      serpFeatures: null,
+    }));
+  return { ideas, costUsd };
+}
+
+/** Monthly searches and CPC for exact phrases in one place. Pure parse is the
+ *  loop below; the call is one task. A phrase the provider returns nothing for
+ *  comes back absent, and absent is unanswered. */
+async function localVolumes(
+  creds: DfsCreds,
+  keywords: string[],
+  locationName: string,
+  languageName: string,
+): Promise<{ byKeyword: Map<string, { volume: number | null; cpc: number | null }>; costUsd: number }> {
+  const list = [...new Set(keywords.map((k) => k.trim()).filter(Boolean))].slice(0, 1000);
+  const byKeyword = new Map<string, { volume: number | null; cpc: number | null }>();
+  if (!list.length) return { byKeyword, costUsd: 0 };
+  const resp = await post(creds, "/keywords_data/google_ads/search_volume/live", [
+    { keywords: list, location_name: locationName, language_name: languageName },
+  ]);
+  const task = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  if (!task || task.status_code !== 20000) throw new Error(task?.status_message || "DataForSEO returned no search volume result");
+  const items: any[] = Array.isArray(task.result) ? task.result : [];
+  for (const it of items) {
+    if (typeof it?.keyword === "string") byKeyword.set(normKw(it.keyword), { volume: num(it.search_volume), cpc: num(it.cpc) });
+  }
+  return { byKeyword, costUsd: taskCost(resp) };
+}
+
+/** Keyword difficulty for exact phrases. It is a country-level measure, so it
+ *  is always asked for the whole country. */
+async function difficultyFor(
+  creds: DfsCreds,
+  keywords: string[],
+  languageName: string,
+): Promise<{ byKeyword: Map<string, number | null>; costUsd: number }> {
+  const list = [...new Set(keywords.map((k) => k.trim()).filter(Boolean))].slice(0, 1000);
+  const byKeyword = new Map<string, number | null>();
+  if (!list.length) return { byKeyword, costUsd: 0 };
+  const resp = await post(creds, "/dataforseo_labs/google/bulk_keyword_difficulty/live", [
+    { keywords: list, location_name: UNITED_STATES, language_name: languageName },
+  ]);
+  const task = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  const result = task?.status_code === 20000 && Array.isArray(task.result) ? task.result[0] : null;
+  const items: any[] = Array.isArray(result?.items) ? result.items : [];
+  for (const it of items) byKeyword.set(normKw(it?.keyword ?? ""), num(it?.keyword_difficulty));
+  return { byKeyword, costUsd: taskCost(resp) };
+}
+
+/**
+ * The SEO tab's "Keyword research" run.
+ *
+ * ── WHERE IT SEARCHES, AND WHY THERE ARE TWO PATHS ─────────────────────────
+ *
+ * `locationName` arrives already resolved to the provider's own form (see
+ * src/research-provider-location.ts). For the WHOLE COUNTRY it is the original
+ * three Labs calls. For any smaller place it is the Keywords Data call that
+ * accepts a city, because the Labs ideas call measures at country level and a
+ * national volume was what priced a Cincinnati provider's research. In that path
+ * the client's footprint and the competitor's are still read from Labs, whose
+ * ranking data is country-level, so a position is the national one and the run
+ * says so; every VOLUME in the run is for the place the run names, and a row
+ * whose volume came from anywhere else is re-measured in that place or has its
+ * volume left blank. A run never mixes two places in one column.
+ *
+ * ── WHAT IT KEEPS ──────────────────────────────────────────────────────────
+ *
+ * Every idea is judged by src/ads/idea-relevance.ts against the seeds, the
+ * client's signed-off services and its tracked searches. NOTHING IS DELETED:
+ * every idea is stored and flagged, so a person can keep one the rule set
+ * aside. What the flag changes is cost and trust. In the local path keyword
+ * difficulty is bought for the kept ideas only, and no reading treats a
+ * set-aside idea as demand the client sells into.
+ *
+ * Cost is the sum of what DataForSEO says each task cost, so the UI can show
+ * estimate vs actual. The client/competitor pulls are best-effort: if one fails
+ * the run still returns the ideas, with the failure recorded in `warnings`.
+ *
+ * Endpoints (country): POST /v3/dataforseo_labs/google/keyword_ideas/live
+ *                      POST /v3/dataforseo_labs/google/ranked_keywords/live (×0–2)
+ * Endpoints (place):   POST /v3/keywords_data/google_ads/keywords_for_keywords/live
+ *                      POST /v3/keywords_data/google_ads/search_volume/live (gap rows)
+ *                      POST /v3/dataforseo_labs/google/bulk_keyword_difficulty/live
+ *                      POST /v3/dataforseo_labs/google/ranked_keywords/live (×0–2)
  */
 export async function keywordDiscovery(
   creds: DfsCreds,
   params: DiscoveryParams,
   clientDomain: string | null,
-  locationName = "United States",
+  locationName = UNITED_STATES,
   languageName = "English",
+  gate: DiscoveryGate = { services: null, tracked: null },
 ): Promise<DiscoveryResult> {
   const seeds = [...new Set(params.seeds.map((s) => s.trim().replace(/\s+/g, " ")).filter(Boolean))].slice(0, 200);
   if (!seeds.length) throw new Error("no seed keywords");
@@ -559,11 +728,17 @@ export async function keywordDiscovery(
   const clean = (d: string) => d.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
   const client = clientDomain ? clean(clientDomain) : null;
   const competitor = params.competitor ? clean(params.competitor) : null;
+  const national = isNational(locationName);
+  // The ranking calls are Labs, and Labs is country-level.
+  const rankLocation = UNITED_STATES;
   let costUsd = 0;
   const warnings: string[] = [];
+  if (!national && (client || competitor)) {
+    warnings.push(`positions are the national ones: the ranking data is country-level, so "you rank #N" is not a position in ${placeLabel(locationName)}. Every volume is for ${placeLabel(locationName)}.`);
+  }
 
   async function ranked(target: string, take: number): Promise<any[]> {
-    const payload = [{ target, location_name: locationName, language_name: languageName, limit: take, order_by: ["keyword_data.keyword_info.search_volume,desc"] }];
+    const payload = [{ target, location_name: rankLocation, language_name: languageName, limit: take, order_by: ["keyword_data.keyword_info.search_volume,desc"] }];
     const resp = await post(creds, "/dataforseo_labs/google/ranked_keywords/live", payload);
     costUsd += taskCost(resp);
     const rt = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
@@ -578,22 +753,35 @@ export async function keywordDiscovery(
   };
 
   // 1. Ideas — the one call that must succeed.
-  const ideasResp = await post(creds, "/dataforseo_labs/google/keyword_ideas/live", [
-    { keywords: seeds, location_name: locationName, language_name: languageName, limit, order_by: ["keyword_info.search_volume,desc"] },
-  ]);
-  costUsd += taskCost(ideasResp);
-  const ideasTask = Array.isArray(ideasResp?.tasks) ? ideasResp.tasks[0] : null;
-  if (!ideasTask || ideasTask.status_code !== 20000) throw new Error(ideasTask?.status_message || "DataForSEO returned no result");
-  const ideasResult = Array.isArray(ideasTask.result) ? ideasTask.result[0] : null;
-  const ideaItems: any[] = Array.isArray(ideasResult?.items) ? ideasResult.items : [];
-
-  const rows = new Map<string, DiscoveryKeyword>();
-  for (const it of ideaItems) {
-    const idea = toKeywordIdea(it);
-    if (!idea.keyword) continue;
-    const key = normKw(idea.keyword);
-    if (rows.has(key)) continue;
-    rows.set(key, { ...idea, clientRank: null, competitorRank: null, sources: ["seed"] });
+  type Row = Omit<DiscoveryKeyword, "relevance" | "measuredIn"> & { measuredIn: string };
+  const rows = new Map<string, Row>();
+  const place = national ? UNITED_STATES : locationName;
+  if (national) {
+    const ideasResp = await post(creds, "/dataforseo_labs/google/keyword_ideas/live", [
+      { keywords: seeds, location_name: locationName, language_name: languageName, limit, order_by: ["keyword_info.search_volume,desc"] },
+    ]);
+    costUsd += taskCost(ideasResp);
+    const ideasTask = Array.isArray(ideasResp?.tasks) ? ideasResp.tasks[0] : null;
+    if (!ideasTask || ideasTask.status_code !== 20000) throw new Error(ideasTask?.status_message || "DataForSEO returned no result");
+    const ideasResult = Array.isArray(ideasTask.result) ? ideasTask.result[0] : null;
+    const ideaItems: any[] = Array.isArray(ideasResult?.items) ? ideasResult.items : [];
+    for (const it of ideaItems) {
+      const idea = toKeywordIdea(it);
+      if (!idea.keyword) continue;
+      const key = normKw(idea.keyword);
+      if (rows.has(key)) continue;
+      rows.set(key, { ...idea, clientRank: null, competitorRank: null, sources: ["seed"], measuredIn: place });
+    }
+  } else {
+    const local = await keywordIdeasLocal(creds, seeds, locationName, languageName);
+    costUsd += local.costUsd;
+    // The provider returns far more than anyone reads; keep the biggest by volume.
+    const top = local.ideas.slice().sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0)).slice(0, limit);
+    for (const idea of top) {
+      const key = normKw(idea.keyword);
+      if (rows.has(key)) continue;
+      rows.set(key, { ...idea, clientRank: null, competitorRank: null, sources: ["seed"], measuredIn: place });
+    }
   }
 
   // 2. Client's own footprint (best-effort).
@@ -625,7 +813,9 @@ export async function keywordDiscovery(
           existing.competitorRank = compRank;
           if (!existing.sources.includes("gap")) existing.sources.push("gap");
         } else {
-          rows.set(key, { ...idea, clientRank: null, competitorRank: compRank, sources: ["gap"] });
+          // Its volume is the national one (Labs). In a place run it is
+          // re-measured below or left blank, never kept as is.
+          rows.set(key, { ...idea, clientRank: null, competitorRank: compRank, sources: ["gap"], measuredIn: UNITED_STATES });
         }
       }
     } catch (e) {
@@ -633,8 +823,71 @@ export async function keywordDiscovery(
     }
   }
 
-  const out = [...rows.values()].sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
-  return { rows: out, costUsd: Math.round(costUsd * 10000) / 10000, warnings };
+  // 4. Judge every idea. Nothing is dropped.
+  const all = [...rows.values()];
+  const judgement = judgeIdeas(all.map((r) => r.keyword), { seeds, services: gate.services, tracked: gate.tracked });
+  const verdictByKey = new Map(judgement.verdicts.map((v) => [normKw(v.keyword), v] as const));
+  const kept = (r: Row): boolean => verdictByKey.get(normKw(r.keyword))?.kept !== false;
+
+  // 5. A place run: every volume must be for that place.
+  if (!national) {
+    const foreign = all.filter((r) => r.measuredIn !== place);
+    const wanted = foreign.filter(kept);
+    if (wanted.length) {
+      try {
+        const v = await localVolumes(creds, wanted.map((r) => r.keyword), locationName, languageName);
+        costUsd += v.costUsd;
+        for (const r of wanted) {
+          const hit = v.byKeyword.get(normKw(r.keyword));
+          r.volume = hit?.volume ?? null;
+          r.cpc = hit?.cpc ?? null;
+          r.measuredIn = place;
+        }
+      } catch (e) {
+        warnings.push(`volumes for ${wanted.length} competitor-gap ideas in ${placeLabel(place)}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    // Whatever is still measured elsewhere carries no volume: a number from
+    // another place beside local ones would be read as one market.
+    for (const r of foreign) {
+      if (r.measuredIn !== place) { r.volume = null; r.cpc = null; r.competition = null; }
+    }
+    // Keyword difficulty, for the ideas that are kept and have none.
+    const needKd = all.filter((r) => kept(r) && r.difficulty == null);
+    if (needKd.length) {
+      try {
+        const d = await difficultyFor(creds, needKd.map((r) => r.keyword), languageName);
+        costUsd += d.costUsd;
+        for (const r of needKd) r.difficulty = d.byKeyword.get(normKw(r.keyword)) ?? null;
+      } catch (e) {
+        warnings.push(`keyword difficulty for ${needKd.length} kept ideas: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  const out: DiscoveryKeyword[] = all
+    .map((r): DiscoveryKeyword => {
+      const v = verdictByKey.get(normKw(r.keyword));
+      return {
+        ...r,
+        measuredIn: r.volume == null && r.measuredIn !== place ? null : r.measuredIn,
+        relevance: {
+          kept: v?.kept !== false,
+          via: v?.via?.phrase ?? null,
+          source: v?.via?.source ?? null,
+          why: v?.why === "no_anchor" || v?.why === "blank" ? v.why : null,
+        },
+      };
+    })
+    .sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+  return {
+    rows: out,
+    costUsd: Math.round(costUsd * 10000) / 10000,
+    warnings,
+    place,
+    source: national ? "labs_national" : "google_ads_local",
+    judgement,
+  };
 }
 
 // ── Domain authority / backlinks (Backlinks + Labs) ─────────────────────────

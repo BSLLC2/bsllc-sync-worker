@@ -1,7 +1,10 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
-import { credsFromEnv, keywordResearch, rankedKeywords, keywordGap, keywordDiscovery, type DiscoveryParams } from "./dataforseo.js";
+import { credsFromEnv, keywordResearch, rankedKeywords, keywordGap, keywordDiscovery, googleAdsLocationNames, type DiscoveryParams, type DiscoveryGate } from "./dataforseo.js";
+import { resolveProviderPlace } from "./research-provider-location.js";
+import { isNational, placeLabel, providerLocationName } from "./research-location.js";
+import { clientServicesFor, seoTargetsFor } from "./ads/store.js";
 
 /**
  * Runs queued research requests against DataForSEO. The deployed app enqueues a
@@ -18,6 +21,12 @@ import { credsFromEnv, keywordResearch, rankedKeywords, keywordGap, keywordDisco
  *   • "discovery" — the in-client SEO-tab run: params_json holds the seeds,
  *     optional competitor and result limit; target is the client's domain.
  *     Writes the actual DataForSEO charge to cost_usd alongside the result.
+ *     THE PLACE IS RESOLVED FIRST (src/research-provider-location.ts): a run
+ *     with no readable place, or a place the provider's list does not hold, is
+ *     stopped with a sentence and costs nothing. Every idea is then judged
+ *     against the run's seeds, the client's signed-off services and its tracked
+ *     searches (src/ads/idea-relevance.ts), stored with the verdict, and the
+ *     counts are printed. Nothing is deleted.
  *
  *   npm run run-research
  *   npm run run-research -- --dry-run
@@ -34,6 +43,7 @@ async function columnExists(c: pg.Client, table: string, column: string): Promis
 }
 
 interface RequestRow {
+  client_id: string | null;
   id: string;
   kind: string | null;
   query: string;
@@ -56,6 +66,24 @@ function parseParams(raw: string | null): DiscoveryParams {
   };
 }
 
+/** The provider's list of places, read once per run of this job. */
+let catalogueCache: { names: string[] | null } | null = null;
+
+/**
+ * What a run's ideas are judged against besides its own seeds: the client's
+ * SIGNED-OFF services (null where nobody has signed a list off, which is not
+ * the same as none) and its tracked searches (null where the read failed).
+ */
+async function gateFor(c: pg.Client, clientId: string | null): Promise<DiscoveryGate> {
+  if (!clientId) return { services: null, tracked: null };
+  const services = await clientServicesFor(c, clientId);
+  const tracked = await seoTargetsFor(c, clientId);
+  return {
+    services: services.services ? services.services.map((x) => x.name) : null,
+    tracked: tracked ? tracked.map((t) => t.keyword) : null,
+  };
+}
+
 async function main() {
   const dryRun = process.argv.slice(2).includes("--dry-run");
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
@@ -64,10 +92,12 @@ async function main() {
     const hasTarget = await columnExists(c, "research_requests", "target");
     const hasParams = await columnExists(c, "research_requests", "params_json");
     const hasCost = await columnExists(c, "research_requests", "cost_usd");
+    const hasClient = await columnExists(c, "research_requests", "client_id");
+    const clientSel = hasClient ? "client_id" : "NULL::text AS client_id";
     const targetSel = hasTarget ? "target" : "NULL::text AS target";
     const paramsSel = hasParams ? "params_json" : "NULL::text AS params_json";
     const { rows } = await c.query<RequestRow>(
-      `SELECT id, kind, query, location_name, language_name, ${targetSel}, ${paramsSel}
+      `SELECT id, kind, query, location_name, language_name, ${targetSel}, ${paramsSel}, ${clientSel}
          FROM research_requests
         WHERE status = 'pending'
         ORDER BY created_at ASC
@@ -82,7 +112,8 @@ async function main() {
       const kind = (r.kind || "ideas").trim().toLowerCase();
       if (dryRun) {
         const subject = kind === "rankings" ? `target "${r.target ?? "—"}"` : `"${r.query}"`;
-        console.log(`  would run ${kind} ${subject} (${r.location_name})`);
+        const where = kind === "discovery" ? (providerLocationName(r.location_name) ?? `${r.location_name} (cannot be looked up: this run would stop)`) : r.location_name;
+        console.log(`  would run ${kind} ${subject} (${where})`);
         continue;
       }
       try {
@@ -102,7 +133,22 @@ async function main() {
         } else if (kind === "discovery") {
           const params = parseParams(r.params_json);
           const client = (r.target || "").trim() || null;
-          const out = await keywordDiscovery(creds, params, client, r.location_name, r.language_name);
+          // THE PLACE FIRST. A blank is never the whole country, a one-word city
+          // is not guessed, and a place the provider's list does not hold stops
+          // the run here, before any task is paid for.
+          let catalogue: string[] | null = null;
+          if (providerLocationName(r.location_name) && !isNational(r.location_name)) {
+            catalogueCache ??= { names: await googleAdsLocationNames(creds) };
+            catalogue = catalogueCache.names;
+          }
+          const place = resolveProviderPlace(r.location_name, catalogue);
+          if (!place.ok) throw new Error(place.message);
+          if (place.note) console.log(`    ⚠ ${place.note}`);
+          const gate = await gateFor(c, r.client_id);
+          const out = await keywordDiscovery(creds, params, client, place.name, r.language_name, gate);
+          console.log(`    searched in ${placeLabel(out.place)} (${out.source === "google_ads_local" ? "Keywords Data, local volumes" : "Labs, national volumes"})`);
+          console.log(`    ${out.judgement.line}`);
+          console.log(`    ${out.judgement.basisLine}`);
           for (const w of out.warnings) console.log(`    ⚠ ${w}`);
           result = out.rows;
           costUsd = out.costUsd;

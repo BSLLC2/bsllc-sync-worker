@@ -92,6 +92,8 @@ import {
   type ClientServiceFacts, type ProvenQuery, type Relevance,
 } from "./service-relevance.js";
 import { splitSeeds, skippedSeedsLine, type SkippedSeed } from "./service-seed.js";
+import { judgeIdeas, ideaUseLine, type IdeaReview } from "./idea-relevance.js";
+import { placeLabel, isNational } from "../research-location.js";
 import {
   planSeeds, bandOf, uncoveredTargets, uncoveredTargetsLine,
   seedSourceLine, tofuSetAsideLine, keptOwnTargetsLine, NO_TARGETS_RECORDED,
@@ -143,6 +145,9 @@ export interface ResearchFacts {
   /** The seeds a person typed for that run. Named on the row so somebody can
    *  see what the expansion came from. */
   seeds: string[];
+  /** What a person said about individual ideas on this client, by `ideaKey`
+   *  (app_settings `idea_review:<client>:<key>`). Read, never written, here. */
+  reviews?: Record<string, IdeaReview>;
 }
 
 /**
@@ -292,6 +297,15 @@ export interface GapReading {
   /** …and how many were dropped because no confirmed service covers them.
    *  This is the number that says the relevance gate is doing work. */
   droppedAsIrrelevant: number;
+  /**
+   * How many stored research ideas were READ, and how many of them contain a
+   * seed, a signed-off service or a tracked search (src/ads/idea-relevance.ts)
+   * and so were allowed to count as demand this client sells into. The rest
+   * were set aside before any volume was added up. Zero and zero where no
+   * research was read.
+   */
+  ideasRead: number;
+  ideasUsed: number;
   /** One clause naming why nothing was produced. Null where something was. */
   silence: string | null;
   /** True where the account's search-terms report accounts for enough of its
@@ -397,7 +411,7 @@ export function keywordGaps(i: GapInput): GapReading {
     verdict: GapVerdict, silence: string, skippedSeeds: SkippedSeed[] = [],
     extra: Partial<GapReading> = {},
   ): GapReading => ({
-    verdict, services: [], alreadyCovered: 0, droppedAsIrrelevant: 0,
+    verdict, services: [], alreadyCovered: 0, droppedAsIrrelevant: 0, ideasRead: 0, ideasUsed: 0,
     silence, coverageTrusted: false, skippedSeeds,
     seedSource: null, uncoveredOwnList: [],
     targetsUnread: i.targets === undefined || i.targets === null
@@ -534,8 +548,24 @@ export function keywordGaps(i: GapInput): GapReading {
     byService.set(service, g);
   };
 
+  // WHICH STORED IDEAS ARE SOMETHING THIS CLIENT SELLS (idea-relevance.ts).
+  // The research provider's idea call is a semantic expansion, so a run for a
+  // mental health provider returns hospital systems and insurers at national
+  // volumes. An idea counts as demand only if it contains a seed the run was
+  // given, a signed-off service, or a search already on the client's list — or
+  // a person kept it. The rest are counted, never added up.
+  const gate = judgeIdeas(i.research.keywords.map((k) => String(k.keyword ?? "")), {
+    seeds: i.research.seeds,
+    services: i.services.services ? i.services.services.map((s) => s.name) : null,
+    tracked: (i.targets ?? []).map((t) => String(t.keyword ?? "")),
+    reviews: i.research.reviews ?? null,
+  });
+  const ideasRead = gate.counts.total;
+  const ideasUsed = gate.counts.kept;
+  const useLine = ideaUseLine(ideasRead, ideasUsed, gate.basis !== "nothing_to_judge_by");
+
   const researchSeen = new Set<string>();
-  for (const k of i.research.keywords) {
+  for (const [idx, k] of i.research.keywords.entries()) {
     const text = String(k.keyword ?? "").trim();
     if (!text) continue;
     const phrase = keywordPhrase(text);
@@ -548,6 +578,10 @@ export function keywordGaps(i: GapInput): GapReading {
     // is not a long tail, it is a decision, and dropping it for a figure
     // DataForSEO did not report reads a null as a nought.
     if (source === "research" && (k.volume == null || k.volume < GAP_MIN_TERM_VOLUME)) continue;
+    // The relevance gate comes before the service match and is counted with it:
+    // an idea that contains no seed, no signed-off service and is not on their
+    // list is nothing this client provides, whatever its volume.
+    if (gate.verdicts[idx]?.kept === false) { droppedAsIrrelevant++; continue; }
 
     const rel = relevanceOf(text, seedable, i.provenQueries);
     if (rel.verdict !== "matched" || !rel.service) { droppedAsIrrelevant++; continue; }
@@ -681,10 +715,12 @@ export function keywordGaps(i: GapInput): GapReading {
     if (skippedLine) lines.push(skippedLine);
     if (i.research?.ranAt) {
       lines.push(
-        `Research run ${i.research.ranAt}${i.research.location ? ` for ${i.research.location}` : ""}`
-        + `${i.research.seeds.length ? ` from the seed(s): ${i.research.seeds.slice(0, 6).join(", ")}` : ""}.`,
+        `Research run ${i.research.ranAt}${i.research.location ? ` for ${placeLabel(i.research.location) ?? i.research.location}` : ""}`
+        + `${i.research.seeds.length ? ` from the seed(s): ${i.research.seeds.slice(0, 6).join(", ")}` : ""}.`
+        + `${i.research.location && isNational(i.research.location) ? " These volumes are for the whole country, not the client's own market." : ""}`,
       );
     }
+    if (useLine) lines.push(useLine);
 
     services.push({
       service,
@@ -724,7 +760,7 @@ export function keywordGaps(i: GapInput): GapReading {
   };
   if (services.length === 0) {
     return {
-      verdict: "covered", services: [], alreadyCovered, droppedAsIrrelevant,
+      verdict: "covered", services: [], alreadyCovered, droppedAsIrrelevant, ideasRead, ideasUsed,
       coverageTrusted, skippedSeeds: seedSplit.skipped, ...tail,
       silence: `Every recorded service this client sells is already covered by a keyword, a query the account has been seen on, or a negative somebody added on purpose`
         + ` — ${alreadyCovered} research term(s) matched a service and are already reached, and ${droppedAsIrrelevant} were dropped as nothing this client provides.`
@@ -743,7 +779,7 @@ export function keywordGaps(i: GapInput): GapReading {
     if (ownListLine) { g.lines.push(ownListLine); break; }
   }
   return {
-    verdict: "found", services, alreadyCovered, droppedAsIrrelevant,
+    verdict: "found", services, alreadyCovered, droppedAsIrrelevant, ideasRead, ideasUsed,
     silence: null, coverageTrusted, skippedSeeds: seedSplit.skipped, ...tail,
   };
 }
