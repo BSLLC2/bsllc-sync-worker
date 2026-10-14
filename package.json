@@ -151,6 +151,8 @@
     "ads-audit": "tsx src/ads-audit.ts",
     "ads-change-history": "tsx src/ads-change-history.ts",
     "ads-structure-snapshot": "tsx src/ads-structure-snapshot.ts",
+    "ads-daily-metrics": "tsx src/ads-daily-metrics.ts",
+    "verify-ads-daily-metrics": "tsx src/verify-ads-daily-metrics.ts",
     "ads-findings": "tsx src/ads-findings-run.ts",
     "ads-apply-approved": "tsx src/ads-apply-approved.ts",
     "ads-verify-outcomes": "tsx src/ads-verify-outcomes.ts",

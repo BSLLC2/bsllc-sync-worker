@@ -1,0 +1,77 @@
+name: Ads daily metrics (read-only)
+
+# One row per campaign per day (impressions, clicks, cost, conversions), kept so
+# the dashboard can read a change before and after it and say whether fewer
+# clicks explain fewer conversions. Monthly totals could not.
+#
+# READ-ONLY. Every query is a SELECT. Nothing is written to any ad account.
+#
+# A DISPATCHED RUN IS A DRY ONE UNLESS YOU SAY OTHERWISE. A scheduled run is live.
+# The first live run for an account backfills about sixty days; every later run
+# re-reads the last fourteen (conversions are attributed late).
+on:
+  schedule:
+    # 05:10 UTC daily: after the account day has closed in every US zone, clear of
+    # the structure snapshot (03:40) and Google's suggestions (04:20).
+    - cron: "10 5 * * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug. Blank = every mapped account."
+        required: false
+        default: ""
+      days:
+        description: "Days to read. Blank = about 60 on an account's first run, then 14."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print, write nothing (true/false). Defaults to true."
+        required: false
+        default: "true"
+
+concurrency:
+  group: ads-daily-metrics
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the campaign days
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          # Inputs go through the environment, never into the command line.
+          IN_CLIENT: ${{ inputs.client }}
+          IN_DAYS: ${{ inputs.days }}
+          IN_DRY: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$IN_CLIENT" ] && ARGS="--client=$IN_CLIENT"
+          [ -n "$IN_DAYS" ] && ARGS="$ARGS --days=$IN_DAYS"
+          [ "$IN_DRY" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run ads-daily-metrics -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure rather than as
+      # silence. A dry run and a single-account run are excluded: the heartbeat
+      # is one row for the whole book, and stamping it from a run that read one
+      # account would claim every other account was read today.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # The note is the job's own counts (accounts, read, rows), never text from
+        # an ad account, so it is safe in the command line as the other ads jobs do.
+        run: npm run heartbeat -- --job=ads_daily_metrics --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log

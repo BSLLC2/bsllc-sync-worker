@@ -94,6 +94,14 @@ export const ADS_JOBS: AdsJobSpec[] = [
     quiet: "An account with no suggestions from Google genuinely stores none, and the note's accounts/read/recs counts are what say so. What this job must never do is stop silently: the dashboard's \"Google's suggestions\" block then shows a list as old as the last good read, and it says when that was. A read that fails closes nothing, so the last good list stands.",
     fix: "Open bsllc-sync-worker → Actions → \"Google's ad recommendations (read-only)\" and re-run it. It is a SELECT against the recommendation resource and writes nothing to any ad account; the API's apply and dismiss calls are not used anywhere. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account. Dispatch it with dry_run=true first to see what it would store.",
   },
+  {
+    job: "ads_daily_metrics",
+    workflow: "ads-daily-metrics.yml",
+    label: "Ads daily metrics",
+    cadence: "daily 05:10 UTC",
+    quiet: "An account with no campaigns genuinely stores no rows, and the note's accounts/read/rows counts are what say so. What this job must never do is stop silently: the dashboard's before-and-after reading of a large change and its conversion explanation read these days, and each says how far the record reaches. A failed read writes a failure row (ok = false) and leaves the covered span where it was, so a gap is dated, never a quiet zero.",
+    fix: "Open bsllc-sync-worker \u2192 Actions \u2192 \"Ads daily metrics (read-only)\" and re-run it. Every query is a SELECT and nothing is written to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account. Days already read stay stored; the last fourteen are re-read every run, so a short outage mends itself, and a longer one leaves a gap the dashboard names. Dispatch it with dry_run=true first to see what it would store.",
+  },
 ];
 
 // `ads_change_digest` is deliberately NOT in this list (2026-09-23) for the

@@ -38,6 +38,8 @@ jobs:
         run: npm run verify-ads-volume-limited
       - name: Google's ad recommendations reader (read-only, closes only on a whole read)
         run: npm run verify-ads-google-recs
+      - name: Ads daily metrics reader (read-only, null versus zero, coverage)
+        run: npm run verify-ads-daily-metrics
       - name: Ads audit run summary and sweep guard (pure sections)
         run: npm run verify-ads-run-summary
       - name: Zero-vs-nothing guard
@@ -110,3 +112,5 @@ jobs:
       - run: npm ci
       - name: Ads audit store guard (real SQL)
         run: npm run verify-ads-run-summary
+      - name: Ads daily metrics store guard (real SQL)
+        run: npm run verify-ads-daily-metrics
