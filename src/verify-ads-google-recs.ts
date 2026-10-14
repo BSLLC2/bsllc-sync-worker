@@ -229,6 +229,14 @@ async function storeSection(url: string) {
     ok("a closed suggestion carries a closed date and Google's reason", st.find((s) => s.id === b.id)?.closedAt != null
       && (await c.query<{ closed_why: string }>(`SELECT closed_why FROM ads_google_recs WHERE id = $1`, [b.id])).rows[0]!.closed_why === CLOSED_GONE_REASON);
 
+    // Closing again never rewrites WHEN or WHY it was first closed.
+    const closedOnce = (await c.query<{ closed_at: Date; closed_why: string }>(`SELECT closed_at, closed_why FROM ads_google_recs WHERE id = $1`, [b.id])).rows[0]!;
+    await new Promise((r) => setTimeout(r, 20));
+    await closeRecs(c, [b.id], "a second, different reason");
+    const closedTwice = (await c.query<{ closed_at: Date; closed_why: string }>(`SELECT closed_at, closed_why FROM ads_google_recs WHERE id = $1`, [b.id])).rows[0]!;
+    ok("closing an already-closed suggestion keeps its first date and its first reason",
+      new Date(closedTwice.closed_at).getTime() === new Date(closedOnce.closed_at).getTime() && closedTwice.closed_why === closedOnce.closed_why);
+
     await new Promise((r) => setTimeout(r, 20));
     await upsertRecs(c, "CL", "google_ads", ACCOUNT, [a, b], names);
     const again = (await c.query<{ first_seen_at: Date }>(`SELECT first_seen_at FROM ads_google_recs WHERE id = $1`, [a.id])).rows[0]!;
