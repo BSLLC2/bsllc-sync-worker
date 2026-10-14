@@ -51,12 +51,15 @@ jobs:
           GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
           GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
           GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          # Typed inputs go through the environment, never into the command line.
+          INPUT_CLIENT: ${{ inputs.client }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          ARGS=""
-          [ -n "${{ inputs.client }}" ] && ARGS="--client=${{ inputs.client }}"
-          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
           set -o pipefail
-          npm run ads-google-recs -- $ARGS 2>&1 | tee run.log
+          ARGS=()
+          [ -n "$INPUT_CLIENT" ] && ARGS+=("--client=$INPUT_CLIENT")
+          [ "$INPUT_DRY_RUN" = "true" ] && ARGS+=("--dry-run")
+          npm run ads-google-recs -- "${ARGS[@]}" 2>&1 | tee run.log
 
       - name: Heartbeat
         # A dry run and a single-account run are both excluded: the heartbeat is

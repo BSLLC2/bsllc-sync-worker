@@ -65,10 +65,11 @@ export interface NegativeRule {
 /** Letters and digits only, lowercased, split on everything else. The same
  *  fold `normalizeQueryText` applies — case, punctuation and spacing never
  *  change what a query says. Kept local so this module imports nothing. */
+const NOT_A_WORD = new RegExp("[^\\p{L}\\p{N}]+", "gu");
 export function negTokens(s: string): string[] {
   return String(s ?? "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(NOT_A_WORD, " ")
     .trim()
     .split(" ")
     .filter(Boolean);
