@@ -86,6 +86,14 @@ export const ADS_JOBS: AdsJobSpec[] = [
     quiet: "An account nobody changed genuinely produces no new interval rows, and the note's entities/changed counts are what say so. What this job must never do is stop: a day with no snapshot is a date nothing can answer \"what was live then\" for, and unlike the change feed there is no window to catch up inside — a missed day is missed for good.",
     fix: "Open bsllc-sync-worker \u2192 Actions \u2192 \"Ads structure snapshot (read-only)\" and re-run it. Every query it makes is a SELECT and it writes nothing to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account; a missing GOOGLE_ADS_LOGIN_CUSTOMER_ID fails on startup by name. Today's snapshot is still takeable until midnight UTC; after that the day has no row and the intervals either side carry the gap.",
   },
+  {
+    job: "ads_google_recs",
+    workflow: "ads-google-recs.yml",
+    label: "Google's ad recommendations",
+    cadence: "daily 04:20 UTC",
+    quiet: "An account with no suggestions from Google genuinely stores none, and the note's accounts/read/recs counts are what say so. What this job must never do is stop silently: the dashboard's \"Google's suggestions\" block then shows a list as old as the last good read, and it says when that was. A read that fails closes nothing, so the last good list stands.",
+    fix: "Open bsllc-sync-worker → Actions → \"Google's ad recommendations (read-only)\" and re-run it. It is a SELECT against the recommendation resource and writes nothing to any ad account; the API's apply and dismiss calls are not used anywhere. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account. Dispatch it with dry_run=true first to see what it would store.",
+  },
 ];
 
 // `ads_change_digest` is deliberately NOT in this list (2026-09-23) for the

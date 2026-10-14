@@ -41,9 +41,20 @@
  * dismissal is untouched by this and stays sticky.
  */
 
-/** The sentence the sweep has always written, kept word for word. */
-export const CLEARED_REASON = "No longer present in the account — the condition cleared on its own.";
-export const CLEARED_EVENT = "Condition cleared — not seen in the latest audit.";
+/**
+ * What a row says when the audit closes it because the condition is gone.
+ *
+ * REWORDED 2026-10-14. The old sentence ("the condition cleared on its own")
+ * was read as "somebody fixed it", which the audit cannot know: a change in the
+ * account, a client's own edit and a slow drift all look the same from here. It
+ * says what the audit did and what it saw, and nothing about why. The dashboard
+ * recognises an audit closure by the actor and by these prefixes, so a row now
+ * reads "Closed by the audit" instead of "Dismissed by ads-findings-run". The
+ * earlier wording is kept as LEGACY so rows already closed are still recognised.
+ */
+export const CLEARED_REASON = "Closed: the audit no longer finds this. The condition is gone from the account, whether it was changed or drifted.";
+export const CLEARED_EVENT = "Closed: the audit no longer finds this.";
+export const LEGACY_CLEARED_REASON = "No longer present in the account — the condition cleared on its own.";
 
 /** Prefixes are how a closure is recognised later, so they are constants. */
 export const RULE_UPDATE_PREFIX = "Closed after a rule update";

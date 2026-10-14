@@ -290,7 +290,7 @@ async function auditOne(
     notRechecked = swept.notRechecked;
     const byKind = (w: string) => swept.closed.filter((x) => x.why === w).length;
     if (swept.closed.length) {
-      console.log(`    · ${swept.closed.length} finding(s) closed: ${byKind("cleared")} the condition cleared on its own`
+      console.log(`    · ${swept.closed.length} finding(s) closed: ${byKind("cleared")} the audit no longer finds them`
         + `${byKind("rule_update") ? `, ${byKind("rule_update")} after a rule update (ruleset ${ADS_RULESET_VERSION})` : ""}`);
     }
     for (const n of notRechecked) {
