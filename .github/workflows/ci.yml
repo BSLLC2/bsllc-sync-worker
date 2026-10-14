@@ -34,6 +34,8 @@ jobs:
         run: npm run verify-ads-reflect-actions
       - name: Ads audit gaps found on a Diesel Power Group account
         run: npm run verify-ads-dpg
+      - name: Ads campaigns limited by search volume (ruleset 12)
+        run: npm run verify-ads-volume-limited
       - name: Google's ad recommendations reader (read-only, closes only on a whole read)
         run: npm run verify-ads-google-recs
       - name: Ads audit run summary and sweep guard (pure sections)

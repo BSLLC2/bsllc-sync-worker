@@ -96,6 +96,10 @@ export const FINDING_STAGE: Record<string, FindingStage> = {
   converting_search_term: "grow",
   keyword_gap: "grow",
   unmet_demand: "grow",
+  // v12. Reach, not money: a campaign the platform calls limited by search
+  // volume needs more of what is searched. It sits with the other ways of
+  // widening what the account reaches, behind any waste that is still leaking.
+  volume_limited: "grow",
 
   // Not growth and not a repair: it is the reason the growth on this account
   // cannot be counted. `measure` is where it belongs for the same reason

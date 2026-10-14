@@ -37,6 +37,7 @@ import { headroomReading, headroomClaim } from "./headroom.js";
 import { demandCaptureReading, demandCaptureClaim, type DemandCaptureReading } from "./demand-capture.js";
 import { growthSilenceReading, growthSilenceClaim, type GrowthSilenceFact } from "./growth-silence.js";
 import { sequenceFindings } from "./sequence.js";
+import { volumeLimitReading, SPEND_SHARE_FLOOR, WEEKDAYS_READ, type VolumeLimitFacts, type VolumeCantTell } from "./volume-limited.js";
 import { keywordGaps, gapClaim, GAP_MIN_TERM_VOLUME, GAP_MIN_SERVICE_VOLUME, type ResearchFacts } from "./keyword-gap.js";
 import type { RecordedTarget } from "./keyword-sourcing.js";
 import { skippedSeedsLine } from "./service-seed.js";
@@ -105,7 +106,7 @@ import {
  * dashboard (shared/ads-acted-on.ts), because it changes with the date and a
  * stored label would go stale between weekly runs.
  */
-export const ADS_RULESET_VERSION = 11;
+export const ADS_RULESET_VERSION = 12;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;
@@ -1407,6 +1408,14 @@ export interface AuditInput {
    */
   dailyConversions?: DailyConversionRow[] | null;
   /**
+   * What the platform says about each campaign's status, and the last weekdays'
+   * spend by campaign, for the "limited by search volume" reading (ruleset 12).
+   * ABSENT = the adapter does not read it (Meta, Microsoft). NULL = it tried
+   * and could not, which the run says by name; it is never read as "nothing is
+   * limited".
+   */
+  volumeLimit?: VolumeLimitFacts | null;
+  /**
    * Spend the search-terms report accounts for, per campaign id, over the SAME
    * window as the campaign figures above. That sameness is the whole point — a
    * 90-day term total against a 30-day campaign total is not a coverage share,
@@ -1649,6 +1658,14 @@ export interface AuditAccounting {
   competitorKeywords: { campaignName: string; count: number }[];
   /** Keywords whose last-spend date showed they stopped, so their row claims no saving. */
   keywordsStopped: { campaignName: string; text: string; lastSpendOn: string }[];
+  /**
+   * Campaigns the "limited by search volume" reading could not judge, and why
+   * (`campaignName` null = the whole account). Optional so a caller that builds
+   * an accounting by hand keeps working; evaluateAudit always fills it.
+   */
+  volumeUnread?: { campaignName: string | null; why: VolumeCantTell }[];
+  /** Campaigns that raised a `volume_limited` row this run. */
+  volumeRaised?: { campaignName: string; spendSharePct: number }[];
 }
 
 export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; accounting: AuditAccounting } {
@@ -1656,7 +1673,7 @@ export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; 
     promotionsBlocked: [], negativesRead: false, negativeSourcesUnread: [],
     landing: [], coreSearchesNotBlocked: [], wasteRowsNotRaised: [],
     budgetRoutedToClient: [], targetHeld: [],
-    competitorKeywords: [], keywordsStopped: [],
+    competitorKeywords: [], keywordsStopped: [], volumeUnread: [], volumeRaised: [],
   };
   const out: DerivedFinding[] = [];
   const { windowStart, windowEnd } = input;
@@ -3526,6 +3543,83 @@ export function evaluateAudit(input: AuditInput): { findings: DerivedFinding[]; 
         changePayload: null,
         guardNote: "Nothing to apply. Every line here is a figure somebody records or a connector somebody fixes, and none of it is a change to a live ad account.",
       });
+    }
+  }
+
+  // ── 10. Campaigns the platform calls limited by search volume ─────────────
+  // The opposite problem from `budget_limited`: more money than reach. Fires
+  // only when the platform's own status reason says so AND the last seven
+  // weekdays' spend agrees, and never beside a budget row for the same
+  // campaign. `volumeLimitReading` (volume-limited.ts) argues all of it.
+  {
+    const budgetRowFor = new Set(out.filter((f) => f.findingType === "budget_limited" && f.campaignId).map((f) => f.campaignId as string));
+    const accountUnread = new Set<VolumeCantTell>();
+    for (const c of input.campaigns) {
+      if (input.volumeLimit === undefined) break;    // the adapter does not read it at all
+      const reading = volumeLimitReading({
+        campaignId: c.id, campaignName: c.name, channelType: c.channelType,
+        dailyBudgetMicros: c.dailyBudgetMicros, volume: input.volumeLimit,
+      });
+      if (reading.verdict === "cant_tell") {
+        // An account-wide failure is said once, not once per campaign.
+        if (reading.why === "not_read" || reading.why === "status_unreadable") {
+          if (!accountUnread.has(reading.why)) {
+            accountUnread.add(reading.why);
+            accounting.volumeUnread!.push({ campaignName: null, why: reading.why });
+          }
+        } else {
+          accounting.volumeUnread!.push({ campaignName: c.name, why: reading.why });
+        }
+        continue;
+      }
+      if (reading.verdict !== "limited") continue;
+      // Never together with the budget row, whatever made it.
+      if (budgetRowFor.has(c.id) || (c.budgetLostShare ?? 0) > THRESHOLDS.budgetLostShare) continue;
+      if (c.costMicros < THRESHOLDS.campaignMinSpendMicros) continue;
+
+      const pctUsed = Math.round(reading.share * 100);
+      const first = reading.weekdays[0] as string;
+      const last = reading.weekdays[reading.weekdays.length - 1] as string;
+      out.push({
+        entityType: "campaign", entityId: c.id, entityName: c.name, campaignId: c.id,
+        findingType: "volume_limited",
+        // Never high: nothing is leaking. Medium only where it is using under a
+        // third of its budget.
+        severity: reading.share < 0.34 ? "medium" : "low",
+        riskLevel: "low",
+        // OURS: widening what a campaign matches is a person's job, in the account.
+        applicability: "vendor",
+        title: `"${c.name}" spends about ${pctUsed}% of its budget, and Google says it is limited by search volume`,
+        summary:
+          `Google's own status for this campaign says it is limited by search volume: it is eligible to run and there are not enough matching searches to spend what it is allowed. `
+          + `Across the last ${WEEKDAYS_READ} weekdays it spent ${usd(reading.spendMicros)} of ${usd(reading.budgetMicros)} (${pctUsed}%). `
+          + `More budget would change nothing here. What widens the reach is more of what is searched: keywords for the services this client sells that nothing bids on, `
+          + `or a broader match on the ones it has. The services check on the Ads page lists the services with no keyword.`,
+        evidence: {
+          metrics: {
+            weekdaySpendMicros: reading.spendMicros, weekdayBudgetMicros: reading.budgetMicros,
+            spendShare: Math.round(reading.share * 1000) / 1000, weekdaysCounted: reading.weekdays.length,
+            dailyBudgetMicros: c.dailyBudgetMicros,
+          },
+          windowStart: first, windowEnd: last,
+          lines: [
+            `${usd(reading.spendMicros)} spent across the last ${reading.weekdays.length} weekdays (${first} to ${last}) against ${usd(reading.budgetMicros)} of daily budget`,
+            `Daily budget ${usd(c.dailyBudgetMicros)}, so ${pctUsed}% used. The line under which a campaign counts as not spending its budget is ${Math.round(SPEND_SHARE_FLOOR * 100)}%, and that line is ours`,
+            `Google's status: ${reading.primaryStatus ?? "not returned"}, reasons ${reading.reasons.join(", ") || "none"}`,
+            c.budgetLostShare != null
+              ? `Impression share lost to budget ${pct(c.budgetLostShare)}, so budget is not what holds it back`
+              : `Impression share lost to budget was not reported`,
+            `Weekends are left out. A weekday with no spend row counts as nought.`,
+          ],
+        },
+        estImpactCents: 0,
+        impactUnit: "usd_month",
+        impactAssumption:
+          "No impact claimed. This is a limit on how many searches there are, and nothing here can say how much more the campaign would spend or return if it reached more of them.",
+        changePayload: null,
+        guardNote: "Nothing to apply. Adding keywords or widening a match is a change a person makes in the account, and the services check on the Ads page builds the Editor file for it.",
+      });
+      accounting.volumeRaised!.push({ campaignName: c.name, spendSharePct: pctUsed });
     }
   }
 

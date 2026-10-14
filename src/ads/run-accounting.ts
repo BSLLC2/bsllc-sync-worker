@@ -20,6 +20,7 @@ import type { AuditAccounting } from "./rules.js";
 import { blockedPromotionLine, negativeSourcesUnreadLine, AD_GROUP_NEGATIVES_NOT_READ, type NegativeMatchType } from "./negative-match.js";
 import { allCoreHeldLine } from "./service-relevance.js";
 import { keywordLandingLine } from "./traffic-readiness.js";
+import { volumeCantTellLine } from "./volume-limited.js";
 
 const usd = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
@@ -81,5 +82,13 @@ export function accountingLines(a: AuditAccounting): string[] {
     const newest = rows.map((r) => r.lastSpendOn).sort().pop();
     out.push(`${name}: ${rows.length} keyword${rows.length === 1 ? "" : "s"} with no spend for over two weeks, kept as a low row with no saving claimed (the newest took spend on ${newest}).`);
   }
+
+  // 8. Campaigns the platform calls limited by search volume (ruleset 12), and
+  //    the ones this run could not check. Silence about a campaign it could not
+  //    read would look like a campaign that is fine.
+  for (const r of a.volumeRaised ?? []) {
+    out.push(`${r.campaignName}: limited by search volume, spending about ${r.spendSharePct}% of its budget across the last seven weekdays. Raised as a row; no budget row is raised for it.`);
+  }
+  for (const u of a.volumeUnread ?? []) out.push(volumeCantTellLine(u.campaignName, u.why));
   return out;
 }

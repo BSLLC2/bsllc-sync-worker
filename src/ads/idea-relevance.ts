@@ -246,13 +246,24 @@ function plural(n: number, one: string, many = `${one}s`): string {
   return `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
 }
 
+/**
+ * Does a phrase carry every significant word of this anchor? The one test of
+ * "contains", exported so the services-coverage reading asks a keyword the same
+ * question the idea filter asks an idea (`shared/ads-service-coverage.ts`).
+ * `words` is `ideaWords(phrase)` as a set. A "tracked" anchor is an exact phrase
+ * and is not judged here.
+ */
+export function anchorCoveredBy(words: ReadonlySet<string>, a: IdeaAnchor): boolean {
+  return a.words.length > 0 && a.words.every((w) => words.has(w));
+}
+
 /** One idea against the anchors. The longest match leads, a service before a seed. */
 function match(words: ReadonlySet<string>, key: string, anchors: readonly IdeaAnchor[]): IdeaAnchor | null {
   let best: IdeaAnchor | null = null;
   for (const a of anchors) {
     const hit = a.source === "tracked"
       ? ideaKey(a.phrase) === key
-      : a.words.every((w) => words.has(w));
+      : anchorCoveredBy(words, a);
     if (!hit) continue;
     if (!best || a.words.length > best.words.length
       || (a.words.length === best.words.length && a.source === "service" && best.source !== "service")) {

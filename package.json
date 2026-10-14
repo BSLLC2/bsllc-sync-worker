@@ -163,6 +163,7 @@
     "verify-ads-evidence-strength": "tsx src/verify-ads-evidence-strength.ts",
     "verify-ads-reflect-actions": "tsx src/verify-ads-reflect-actions.ts",
     "verify-ads-dpg": "tsx src/verify-ads-dpg.ts",
+    "verify-ads-volume-limited": "tsx src/verify-ads-volume-limited.ts",
     "verify-ads-google-recs": "tsx src/verify-ads-google-recs.ts",
     "ads-google-recs": "tsx src/ads-google-recs.ts",
     "verify-ads-run-summary": "tsx src/verify-ads-run-summary.ts",

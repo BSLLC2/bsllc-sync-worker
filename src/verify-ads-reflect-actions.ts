@@ -555,7 +555,7 @@ section("9. Determinism and the version");
   const again = evaluateAudit(och());
   ok("two runs over the same book produce byte-identical findings and accounting",
     JSON.stringify(again) === JSON.stringify(book));
-  ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 11);
+  ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 12);
 }
 
 // ── 10. A target that is set above the recorded ceiling ─────────────────────

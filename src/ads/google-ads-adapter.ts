@@ -29,6 +29,7 @@ import type { ConversionLagRow } from "./bidding-readiness.js";
 import type { DailyConversionRow } from "./tracking-outage.js";
 import type { ExistingKeyword } from "./query-promotion.js";
 import { decodeQsBucket } from "./qs-components.js";
+import { accountDay, addDaysYmd, statusFactsFromRow, type VolumeLimitFacts } from "./volume-limited.js";
 import {
   shapeCampaignNegativeRules, shapeSharedNegativeRules, shapeAccountNegativeRules, combineNegativeRules,
   type NegativeRuleFacts,
@@ -827,6 +828,9 @@ export class GoogleAdsAdapter implements PlatformAdapter {
         })).filter((d: DailyConversionRow) => d.date.length === 10)
       : null;
 
+    // ── Who the platform calls limited by search volume (ruleset 12) ───────
+    const volumeLimit = await this.readVolumeLimit(customer);
+
     // ── Conversion tracking ────────────────────────────────────────────────
     // Read last and read carefully, because every rule above it judges a
     // campaign on "converted" or "converted nothing" and a failed read here
@@ -851,6 +855,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       tracking,
       conversionLag,
       dailyConversions,
+      volumeLimit,
       searchTermSpendByCampaign,
       existingKeywords,
       keywordsTruncated,
@@ -860,6 +865,57 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       // onto the input, which keeps this adapter what it is: one vendor's API.
       economics: null,
     };
+  }
+
+  /**
+   * What the platform says about each campaign's status, and what each campaign
+   * spent on the last weekdays, for the "limited by search volume" reading.
+   *
+   * THREE SEPARATE READS, each allowed to fail without costing the others, and
+   * each failure arriving as NULL (never as an empty set, which would read as
+   * "nothing is limited"):
+   *   1. the account's time zone, because "the last seven weekdays" is a
+   *      statement about the account's own calendar and a day still in progress
+   *      there would count as under-spending;
+   *   2. the campaigns' primary status and its reasons, in a query of their own
+   *      so an API version that lacks the fields costs this reading and not the
+   *      campaign query every other rule stands on;
+   *   3. the daily spend by campaign over the fortnight ending the last complete
+   *      day, which is every weekday the reading can reach.
+   */
+  private async readVolumeLimit(customer: any): Promise<VolumeLimitFacts> {
+    const log = this.onLog;
+    const tzRows = await tryQuery(customer, "account time zone", `SELECT customer.time_zone FROM customer LIMIT 1`, log);
+    const today = accountDay(new Date(), tzRows?.[0]?.customer?.time_zone ? String(tzRows[0].customer.time_zone) : null);
+    const throughDate = today ? addDaysYmd(today, -1) : null;
+
+    const statusRows = await tryQuery(customer, "campaign status reasons", `
+      SELECT campaign.id, campaign.primary_status, campaign.primary_status_reasons, campaign.start_date,
+             campaign_budget.explicitly_shared
+        FROM campaign
+       WHERE campaign.status = 'ENABLED'`, log);
+    const status: VolumeLimitFacts["status"] = statusRows
+      ? Object.fromEntries(statusRows.map((r: any) => [String(r.campaign?.id ?? ""), statusFactsFromRow(r)]))
+      : null;
+
+    let dailySpend: VolumeLimitFacts["dailySpend"] = null;
+    if (throughDate) {
+      const rows = await tryQuery(customer, "daily spend by campaign", `
+        SELECT campaign.id, segments.date, metrics.cost_micros
+          FROM campaign
+         WHERE segments.date BETWEEN '${addDaysYmd(throughDate, -13)}' AND '${throughDate}'
+           AND campaign.status = 'ENABLED'`, log);
+      if (rows) {
+        dailySpend = {};
+        for (const r of rows as any[]) {
+          const id = String(r.campaign?.id ?? "");
+          const date = String(r.segments?.date ?? "");
+          if (!id || date.length !== 10) continue;
+          (dailySpend[id] ??= []).push({ date, costMicros: Number(r.metrics?.cost_micros ?? 0) });
+        }
+      }
+    }
+    return { throughDate, status, dailySpend };
   }
 
   /**
