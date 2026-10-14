@@ -78,6 +78,13 @@ async function main() {
   const loc = "United States", lang = "English";
   await probe(auth, "keyword_ideas (Labs)", "/dataforseo_labs/google/keyword_ideas/live",
     [{ keywords: ["personal injury lawyer"], location_name: loc, language_name: lang, limit: 5 }]);
+  // THE CALL A KEYWORD RESEARCH RUN NOW USES FOR THE WHOLE COUNTRY (one per seed).
+  // Its parameter names (`keyword` as a string, include_seed_keyword, order_by)
+  // are the provider's published ones as far as this repository knows; nothing
+  // here has called the endpoint, so this line is how to find out. A 40501 on it
+  // names the parameter the provider did not accept.
+  await probe(auth, "keyword_suggestions (Labs)", "/dataforseo_labs/google/keyword_suggestions/live",
+    [{ keyword: "furnace brazing", location_name: loc, language_name: lang, limit: 5, include_seed_keyword: true, order_by: ["keyword_info.search_volume,desc"] }]);
   // The two calls a keyword research run uses for a place below the country.
   // The CITY form is the thing nothing here could test without an account, so
   // this is how to find out whether the plan accepts it. A 40501 on either line

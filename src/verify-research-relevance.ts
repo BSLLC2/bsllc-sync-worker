@@ -24,7 +24,8 @@ import {
   researchLocationOptions, splitRunsByMarket, searchedInLine, NO_LOCATION_MESSAGE, UNITED_STATES,
 } from "./research-location.js";
 import { resolveProviderPlace } from "./research-provider-location.js";
-import { keywordDiscovery, locationNamesFrom } from "./dataforseo.js";
+import { keywordDiscovery, locationNamesFrom, competitorsOfParams } from "./dataforseo.js";
+import { containsAllWords, perSeedLimit, providerSeeds, trailingCore, judgingInputs, foldSeedWord, cleanDeclaredWord, distinctiveWords } from "./ads/idea-seeds.js";
 import { keywordGaps, type ResearchFacts } from "./ads/keyword-gap.js";
 import * as fs from "node:fs";
 
@@ -75,7 +76,15 @@ function plannerItems(list: Array<[string, number]>) {
 
 // ── The fake provider. It records every request. ───────────────────────────
 interface Req { path: string; body: any }
-function installFetch(opts: { localVolumes?: "ok" | "fail"; ranked?: Record<string, Array<[string, number, number]>> } = {}) {
+function installFetch(opts: {
+  localVolumes?: "ok" | "fail";
+  ranked?: Record<string, Array<[string, number, number]>>;
+  pool?: Array<[string, number]>;
+  /** Ideas the fake returns for any suggestions call whether or not they contain the seed. */
+  liar?: string[];
+  failSuggestionsFor?: string[];
+  rankedFail?: string[];
+} = {}) {
   const calls: Req[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = (async (url: any, init?: any) => {
@@ -85,12 +94,24 @@ function installFetch(opts: { localVolumes?: "ok" | "fail"; ranked?: Record<stri
     const task = (result: unknown, cost = 0.01) => ({ ok: true, json: async () => ({ tasks: [{ status_code: 20000, cost, result }] }) });
     const fail = () => ({ ok: true, json: async () => ({ tasks: [{ status_code: 40501, status_message: "Invalid Field: location_name." }] }) });
     if (path === "/dataforseo_labs/google/keyword_ideas/live") {
-      // Labs answers country-level only.
+      // Labs answers country-level only. THE OLD SHAPE: a semantic expansion of
+      // every seed at once, ordered by volume and cut at the limit.
       if (body?.[0]?.location_name !== UNITED_STATES) return fail();
-      return task([{ items: labsItems([...JUNK, ...REAL]) }]);
+      const pool = (opts.pool ?? [...JUNK, ...REAL]).slice().sort((a, b) => b[1] - a[1]).slice(0, body?.[0]?.limit ?? 100);
+      return task([{ items: labsItems(pool) }], 0.01 + pool.length * 0.0001);
+    }
+    if (path === "/dataforseo_labs/google/keyword_suggestions/live") {
+      // THE NEW SHAPE: searches that contain the one seed asked for, volume
+      // order, cut at the limit. A fake that honours the endpoint's promise.
+      if (body?.[0]?.location_name !== UNITED_STATES) return fail();
+      const seed = String(body?.[0]?.keyword ?? "");
+      if (opts.failSuggestionsFor?.includes(seed)) return fail();
+      const pool = (opts.pool ?? [...JUNK, ...REAL]).filter(([k]) => containsAllWords(k, seed) || (opts.liar ?? []).includes(k));
+      const items = pool.slice().sort((a, b) => b[1] - a[1]).slice(0, body?.[0]?.limit ?? 100);
+      return task([{ items: labsItems(items) }], 0.01 + items.length * 0.0001);
     }
     if (path === "/keywords_data/google_ads/keywords_for_keywords/live") {
-      return task(plannerItems([...JUNK, ...REAL]), 0.075);
+      return task(plannerItems(opts.pool ?? [...JUNK, ...REAL]), 0.075);
     }
     if (path === "/keywords_data/google_ads/search_volume/live") {
       if (opts.localVolumes === "fail") return fail();
@@ -99,6 +120,7 @@ function installFetch(opts: { localVolumes?: "ok" | "fail"; ranked?: Record<stri
     if (path === "/dataforseo_labs/google/bulk_keyword_difficulty/live") {
       return task([{ items: (body?.[0]?.keywords ?? []).map((k: string) => ({ keyword: k, keyword_difficulty: 33 })) }], 0.02);
     }
+    if (path === "/dataforseo_labs/google/ranked_keywords/live" && opts.rankedFail?.includes(body?.[0]?.target)) return fail();
     if (path === "/dataforseo_labs/google/ranked_keywords/live") {
       const items = (opts.ranked?.[body?.[0]?.target] ?? []).map(([keyword, v, rank]) => ({
         keyword_data: { keyword, keyword_info: { search_volume: v, cpc: 3 }, keyword_properties: { keyword_difficulty: 20 } },
@@ -214,19 +236,167 @@ hr("3. Where a run searches");
 }
 
 // ── 4. THE RUN, END TO END ──────────────────────────────────────────────────
-hr("4. A whole-country run keeps its original calls and flags every idea");
+hr("4. A whole-country run asks for searches that CONTAIN each seed, one call a seed");
 {
   const f = installFetch();
   try {
     const out = await keywordDiscovery(creds, { seeds: SEEDS, competitor: null, limit: 200 }, null, UNITED_STATES, "English",
       { services: SERVICES, tracked: [] });
-    ok("it used the Labs ideas call, in the country", f.calls[0]?.path === "/dataforseo_labs/google/keyword_ideas/live" && f.calls[0]?.body[0].location_name === UNITED_STATES);
-    ok("every idea is stored, none deleted", out.rows.length === JUNK.length + REAL.length);
-    ok("each junk idea is flagged, not removed", JUNK.every(([k]) => out.rows.find((r) => r.keyword === k)?.relevance.kept === false));
-    ok("each real idea is flagged kept with the term it contains", REAL.every(([k]) => { const r = out.rows.find((x) => x.keyword === k); return r?.relevance.kept === true && !!r.relevance.via; }));
+    const sugg = f.calls.filter((c) => c.path === "/dataforseo_labs/google/keyword_suggestions/live");
+    ok("it asked the Labs suggestions endpoint, in the country, once per search", sugg.length === providerSeeds(SEEDS).length && sugg.every((c) => c.body[0].location_name === UNITED_STATES), `${sugg.length} calls`);
+    ok("the one broad keyword_ideas call is gone", !f.calls.some((c) => c.path === "/dataforseo_labs/google/keyword_ideas/live"));
+    ok("each call carries ONE seed as a string and its share of the limit", sugg.every((c) => typeof c.body[0].keyword === "string" && c.body[0].limit === perSeedLimit(200, providerSeeds(SEEDS).length)));
+    ok("no junk head term was requested or stored", JUNK.every(([k]) => !out.rows.some((r) => r.keyword === k) && !f.calls.some((c) => c.body?.[0]?.keyword === k)));
+    ok("every stored idea contains the search it came from", out.rows.every((r) => providerSeeds(SEEDS).some((q) => containsAllWords(r.keyword, q))));
+    ok("each real idea is flagged kept with the term it contains", REAL.filter(([k]) => out.rows.some((r) => r.keyword === k)).every(([k]) => { const r = out.rows.find((x) => x.keyword === k); return r?.relevance.kept === true && !!r.relevance.via; }));
     ok("every row says the place its volume was measured in", out.rows.every((r) => r.measuredIn === UNITED_STATES));
-    ok("the run reports its counts", out.judgement.counts.kept === REAL.length && out.judgement.counts.setAside === JUNK.length, out.judgement.line);
+    ok("the run reports the searches it asked for", out.asked.length === providerSeeds(SEEDS).length);
+    ok("the run reports its counts and none of the stored ideas is set aside", out.judgement.counts.setAside === 0 && out.judgement.counts.kept === out.rows.length, out.judgement.line);
   } finally { f.restore(); }
+}
+
+hr("4b. A suggestion that does not contain its seed is not stored, and one failed seed costs only itself");
+{
+  const f = installFetch({ liar: ["sutter health"], failSuggestionsFor: ["sober living"] });
+  try {
+    const out = await keywordDiscovery(creds, { seeds: SEEDS, competitor: null, limit: 200 }, null, UNITED_STATES, "English", { services: SERVICES, tracked: [] });
+    ok("an idea the provider returned that contains no seed is dropped", !out.rows.some((r) => r.keyword === "sutter health"));
+    ok("…and the run says it happened", out.warnings.some((w) => /did not contain it/.test(w)));
+    ok("a seed whose call failed is named and the others still ran", out.warnings.some((w) => /suggestions for "sober living"/.test(w)) && out.rows.length > 0 && !out.asked.includes("sober living"));
+  } finally { f.restore(); }
+  const g = installFetch({ failSuggestionsFor: providerSeeds(SEEDS) });
+  try {
+    let threw = false;
+    try { await keywordDiscovery(creds, { seeds: SEEDS, competitor: null, limit: 200 }, null, UNITED_STATES, "English", { services: SERVICES, tracked: [] }); } catch { threw = true; }
+    ok("every call failing is a failed run, not an empty one", threw);
+  } finally { g.restore(); }
+}
+
+// ── 4c. THE FRANKLIN-SHAPED RUN, OLD CALL SHAPE AGAINST NEW ────────────────
+// The shape the owner read off one live screen: ten service names for a furnace
+// brazing and heat treating shop, 200 ideas back, none of them the client's
+// business. EVERY NAME AND FIGURE IS INVENTED. The fake provider is the same
+// for both shapes; only the way the run asks differs, so the difference in what
+// is kept is the difference in the call.
+const FSEEDS = [
+  "furnace brazing services", "brazing services", "contract brazing", "copper brazing", "controlled atmosphere brazing",
+  "belt furnace brazing", "annealing services", "bright annealing", "heat treating services", "vacuum brazing services",
+];
+const FSERVICES = ["Furnace brazing services", "Annealing services", "Heat treating services"];
+const HEAD_JUNK: Array<[string, number]> = [
+  ["pvc pipe", 450_000], ["furnace", 368_000], ["first american home warranty", 301_000], ["mold remediation services", 246_000],
+  ["coupe glass", 201_000], ["handyman services", 673_000],
+  ...Array.from({ length: 300 }, (_, i): [string, number] => [`head term ${i + 1}`, 120_000 - i * 200]),
+];
+const FREAL: Array<[string, number]> = [];
+{
+  const cores = providerSeeds(FSEEDS);
+  const tails = ["near me", "cost", "process", "temperature", "equipment", "for steel", "vs welding", "shop", "company", "companies"];
+  let v = 4_800;
+  for (const core of cores) for (const t of tails) { FREAL.push([`${core} ${t}`, v]); v = Math.max(40, v - 37); }
+  FREAL.push(["vacuum brazing", 2_900], ["brazing rods", 5_400], ["brazing alloys", 1_300], ["silver brazing", 1_900], ["what is brazing", 2_400], ["annealing temperature", 3_100], ["heat treating near me", 1_600]);
+}
+hr("4c. A Franklin-shaped run: ten long service names, a pool of national head terms");
+{
+  const pool = [...HEAD_JUNK, ...FREAL];
+  // THE OLD CALL SHAPE, replayed: every seed in one semantic call, ordered by
+  // volume and cut at 200, then the unchanged rule judging the result.
+  const o = installFetch({ pool });
+  let oldKept = -1; let oldTotal = 0; let oldJunk = 0;
+  try {
+    const resp: any = await (await fetch("https://api.dataforseo.com/v3/dataforseo_labs/google/keyword_ideas/live", {
+      method: "POST", body: JSON.stringify([{ keywords: FSEEDS, location_name: UNITED_STATES, language_name: "English", limit: 200, order_by: ["keyword_info.search_volume,desc"] }]),
+    })).json();
+    const got: string[] = resp.tasks[0].result[0].items.map((it: any) => it.keyword);
+    const old = judgeIdeas(got, { seeds: FSEEDS, services: FSERVICES, tracked: [] });
+    oldKept = old.counts.kept; oldTotal = got.length; oldJunk = got.filter((k) => HEAD_JUNK.some(([j]) => j === k)).length;
+  } finally { o.restore(); }
+  ok("OLD SHAPE: the 200 slots fill with head terms", oldTotal === 200 && oldJunk === 200, `${oldJunk} of ${oldTotal} were head terms`);
+  ok("OLD SHAPE: almost nothing is kept (this is the owner's \"0 kept of 200\")", oldKept <= 5, `${oldKept} kept`);
+
+  const f = installFetch({ pool });
+  try {
+    const out = await keywordDiscovery(creds, { seeds: FSEEDS, competitor: null, limit: 200 }, null, UNITED_STATES, "English", { services: FSERVICES, tracked: [] });
+    const searches = providerSeeds(FSEEDS);
+    ok("NEW SHAPE: kept is high", out.judgement.counts.kept >= 100 && out.judgement.counts.kept >= out.rows.length * 0.9, `${out.judgement.counts.kept} kept of ${out.rows.length}`);
+    ok("NEW SHAPE: no head term was requested or stored", HEAD_JUNK.every(([j]) => !out.rows.some((r) => r.keyword === j) && !f.calls.some((c) => c.body?.[0]?.keyword === j)));
+    ok("NEW SHAPE: the generic trailing word is off every search that has one", searches.every((q) => !/\b(services?|solutions?|companies|company|providers?)$/.test(q)), searches.join(" | "));
+    ok("NEW SHAPE: ten seeds are ten calls and no broad call", f.calls.filter((c) => c.path.endsWith("keyword_suggestions/live")).length === 10 && !f.calls.some((c) => c.path.endsWith("keyword_ideas/live")));
+    ok("NEW SHAPE: each seed was held to its share, so no seed spent the limit", f.calls.every((c) => c.body?.[0]?.limit == null || c.body[0].limit === perSeedLimit(200, 10)));
+    ok("NEW SHAPE: the ideas from every seed are in the run", searches.every((q) => out.rows.some((r) => containsAllWords(r.keyword, q))));
+    ok("NEW SHAPE: a run for ten seeds costs well under the $1.00 cap", out.costUsd > 0 && out.costUsd <= 0.13, `$${out.costUsd.toFixed(4)} from the fixture's own task costs`);
+  } finally { f.restore(); }
+}
+
+hr("4d. Several competitors: one rankings call each, rows list who ranks for them");
+{
+  const f = installFetch({
+    pool: [...FREAL],
+    rankedFail: ["c.example"],
+    ranked: {
+      "client.example": [["brazing rods", 5_400, 22]],
+      "a.example": [["vacuum brazing cost", 900, 4], ["shared idea", 500, 9]],
+      "b.example": [["shared idea", 500, 3], ["b only idea", 400, 12], ["brazing rods", 5_400, 2]],
+    },
+  });
+  try {
+    const params = { seeds: FSEEDS, competitor: "a.example", competitors: ["https://www.a.example/", "b.example", "c.example", "a.example"], limit: 200 };
+    ok("the first competitor stays `competitor` and duplicates fold", JSON.stringify(competitorsOfParams(params)) === JSON.stringify(["a.example", "b.example", "c.example"]));
+    ok("a run stored before there was a list reads as one competitor", JSON.stringify(competitorsOfParams({ competitor: "a.example", limit: 1 } as any)) === JSON.stringify(["a.example"]));
+    const out = await keywordDiscovery(creds, params, "client.example", UNITED_STATES, "English", { services: FSERVICES, tracked: [] });
+    const rankedCalls = f.calls.filter((c) => c.path.endsWith("ranked_keywords/live")).map((c) => c.body[0].target);
+    ok("the client's footprint was read once and each competitor once", rankedCalls.filter((t) => t === "client.example").length === 1 && ["a.example", "b.example", "c.example"].every((t) => rankedCalls.filter((x) => x === t).length === 1), rankedCalls.join(", "));
+    const shared = out.rows.find((r) => r.keyword === "shared idea");
+    ok("an idea two competitors rank for lists both and carries the better position", !!shared && JSON.stringify(shared.competitorsRanking) === JSON.stringify(["a.example", "b.example"]) && shared.competitorRank === 3);
+    ok("an idea only the second ranks for is a gap row naming it", out.rows.find((r) => r.keyword === "b only idea")?.competitorsRanking?.join() === "b.example");
+    ok("an idea the client already ranks for is not a gap, whoever ranks for it", out.rows.find((r) => r.keyword === "brazing rods")?.sources.includes("gap") === false);
+    ok("one competitor failing costs that competitor and is named", out.warnings.some((w) => /competitor rankings \(c\.example\)/.test(w)) && !!shared);
+    const single = installFetch({ pool: [...FREAL], ranked: { "client.example": [], "a.example": [["only a", 100, 5]] } });
+    try {
+      const one = await keywordDiscovery(creds, { seeds: FSEEDS, competitor: "a.example", limit: 200 }, "client.example", UNITED_STATES, "English", { services: FSERVICES, tracked: [] });
+      ok("a one-competitor run is unchanged: rank and list agree", one.rows.find((r) => r.keyword === "only a")?.competitorRank === 5 && one.rows.find((r) => r.keyword === "only a")?.competitorsRanking?.join() === "a.example");
+    } finally { single.restore(); }
+  } finally { f.restore(); }
+}
+
+hr("4e. A place run asks for the same containment: head terms cannot fill the cap");
+{
+  const pool = [...HEAD_JUNK, ...FREAL];
+  const f = installFetch({ pool });
+  try {
+    const out = await keywordDiscovery(creds, { seeds: FSEEDS, competitor: null, limit: 30 }, null, "Cincinnati,Ohio,United States", "English", { services: FSERVICES, tracked: [] });
+    const searches = providerSeeds(FSEEDS);
+    ok("the local call was asked for the searches, not the long service names", Boolean(f.calls[0]?.path.endsWith("keywords_for_keywords/live")) && JSON.stringify(f.calls[0]!.body[0].keywords) === JSON.stringify(searches));
+    ok("every stored idea contains a search that was asked for", out.rows.length > 0 && out.rows.every((r) => searches.some((q) => containsAllWords(r.keyword, q))));
+    ok("no head term is stored, though each outranks every real idea by volume", HEAD_JUNK.every(([j]) => !out.rows.some((r) => r.keyword === j)));
+    ok("the limit still holds", out.rows.length <= 30, `${out.rows.length} rows`);
+    ok("the run names what the provider returned that it did not keep", out.warnings.some((w) => /contained none of the searches asked for/.test(w)));
+  } finally { f.restore(); }
+}
+
+hr("4f. The seeds module: what is allowed and what is still refused");
+{
+  const kept = (kws: string[], seeds: string[], services: string[] | null = null) => {
+    const inp = judgingInputs({ seeds, services });
+    const j = judgeIdeas(kws, { seeds: inp.seeds, services: inp.services, tracked: [] });
+    return { j, kept: kws.filter((_, i) => j.verdicts[i]!.kept) };
+  };
+  ok("REFUSED: \"residential treatment\" still does not admit \"overactive bladder treatment\"", kept(["overactive bladder treatment", "residential treatment centers"], ["residential treatment"]).kept.join() === "residential treatment centers");
+  const acRepair = judgeIdeas(["roof repair"], { seeds: judgingInputs({ seeds: ["AC repair"] }).seeds, services: null, tracked: [] });
+  ok("REFUSED: \"AC repair\" is still refused as one common word, and nothing is called checked on it", acRepair.anchors.anchors.length === 0 && acRepair.anchors.unusable.some((u) => u.fault === "reduced_to_one_word") && acRepair.basis === "nothing_to_judge_by");
+  ok("REFUSED: \"AC repair services\" does not offer \"AC repair\" as a core (that rule would refuse it as one common word)", !judgingInputs({ seeds: ["AC repair services"] }).seeds.some((x) => x.toLowerCase() === "ac repair"));
+  ok("…and \"roof repair\" is not admitted on the word repair by it", judgeIdeas(["roof repair", "ac repair services near me"], { seeds: judgingInputs({ seeds: ["AC repair services"] }).seeds, services: null, tracked: [] }).verdicts.map((v) => v.kept).join() === "false,true");
+  const b = kept(["vacuum brazing", "brazing rods", "welding services", "sutter health", "brazing services near me"], ["brazing services"]);
+  ok("\"brazing services\" admits vacuum brazing and brazing rods", b.kept.includes("vacuum brazing") && b.kept.includes("brazing rods"));
+  ok("…and not welding services or sutter health", !b.kept.includes("welding services") && !b.kept.includes("sutter health"));
+  ok("a modifier is never dropped: \"furnace brazing\" does not admit \"vacuum brazing\"", kept(["vacuum brazing", "furnace brazing cost"], ["furnace brazing services"]).kept.join() === "furnace brazing cost");
+  ok("only a trailing generic word comes off", trailingCore("furnace brazing services") === "furnace brazing" && trailingCore("services") === null && trailingCore("heat treating services company") === "heat treating" && trailingCore("residential treatment") === null && trailingCore("services brazing") === null);
+  ok("the fold matches the relevance rule's", ["services", "companies", "glass", "bus", "analysis", "ies", "roofs", "rehabs"].every((w) => foldSeedWord(w) === foldWord(w)));
+  ok("a declared word must be one word of three to thirty letters", !cleanDeclaredWord("a b").ok && !cleanDeclaredWord("ab").ok && !cleanDeclaredWord("x".repeat(31)).ok && !cleanDeclaredWord("brazing2").ok && cleanDeclaredWord(" Brazing ").ok);
+  const withWord = judgeIdeas(["brazing rods", "pvc pipe"], { seeds: judgingInputs({ seeds: ["x"], declaredWords: ["brazing"] }).seeds, services: null, tracked: [] });
+  ok("a declared word keeps ideas that contain it and nothing else", withWord.verdicts[0]!.kept && !withWord.verdicts[1]!.kept);
+  const chips = distinctiveWords(["brazing rods", "brazing alloys", "vacuum brazing", "pvc pipe", "pvc fittings", "handyman services"], { declared: [], anchored: ["brazing"] });
+  ok("the words offered are counted from the ideas, skipping generic and already-counted words", chips[0]?.word === "pvc" && chips[0].count === 2 && !chips.some((c) => c.word === "brazing" || c.word === "service"));
 }
 
 hr("5. A run in Cincinnati asks for local volumes, and buys difficulty for the kept ideas only");
@@ -328,6 +498,13 @@ hr("8. The run refuses to start without a place, and checks it before paying");
   const dfs = fs.readFileSync(new URL("./dataforseo.ts", import.meta.url), "utf8");
   ok("keywordDiscovery judges every idea and deletes none", /judgeIdeas\(all\.map/.test(dfs) && !/rows\.delete\(/.test(dfs.slice(dfs.indexOf("export async function keywordDiscovery"))));
   ok("local difficulty is asked for the kept ideas only", /const needKd = all\.filter\(\(r\) => kept\(r\)/.test(dfs));
+  const disc = dfs.slice(dfs.indexOf("export async function keywordDiscovery"), dfs.indexOf("// ── Domain authority"));
+  ok("the whole-country branch no longer makes the one broad keyword_ideas call", !/keyword_ideas/.test(disc.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")));
+  ok("every search is asked on its own with its own share of the limit", /providerSeeds\(seeds\)/.test(disc) && /perSeedLimit\(limit, searches\.length\)/.test(disc) && /keywordSuggestions\(creds, search, locationName, languageName, perSeed\)/.test(disc));
+  ok("the place branch applies containment before volume order picks what to keep", disc.indexOf("containAndCap(local.ideas, searches, perSeed)") > 0 && disc.indexOf("containAndCap(") < disc.indexOf("addIdeas(contained)"));
+  ok("an idea the suggestions call returns without its seed is dropped inside keywordSuggestions", /containsAllWords\(k\.keyword, seed\)/.test(dfs));
+  ok("the gate judges with the derived seeds and the person's words", /judgingInputs\(\{ seeds, services: gate\.services, declaredWords: gate\.declaredWords/.test(disc));
+  ok("no provider-side filters are sent (their syntax is not confirmed anywhere in this repository)", !/filters\s*:/.test(dfs));
 }
 
 console.log(`\n${failures === 0 ? "✅ research relevance guard: all checks passed" : `❌ ${failures} check(s) FAILED`}`);

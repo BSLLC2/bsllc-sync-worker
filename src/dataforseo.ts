@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { judgeIdeas, type IdeaJudgement } from "./ads/idea-relevance.js";
 import { isNational, placeLabel, UNITED_STATES } from "./research-location.js";
+import { containAndCap, containsAllWords, judgingInputs, perSeedLimit, providerSeeds } from "./ads/idea-seeds.js";
 
 /**
  * Thin DataForSEO API client. Two surfaces we use:
@@ -524,14 +525,34 @@ export async function bulkKeywordMetrics(
 /** Inputs stored by the app in research_requests.params_json. */
 export interface DiscoveryParams {
   seeds: string[];
+  /** The first competitor. A run stored before 2026-10-14 has only this. */
   competitor: string | null;
+  /** Every competitor, first one included. Present only when there is more than one. */
+  competitors?: string[];
   limit: number;
+}
+
+/** Most competitors one run compares against (the app refuses more, and so do we). */
+export const MAX_COMPETITORS = 3;
+
+/** The competitors a run was given, first one first, bare hosts, deduped. */
+export function competitorsOfParams(p: Pick<DiscoveryParams, "competitor" | "competitors">): string[] {
+  const clean = (d: string) => d.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
+  const raw = Array.isArray(p.competitors) && p.competitors.length ? p.competitors : p.competitor ? [p.competitor] : [];
+  const out: string[] = [];
+  for (const r of raw) {
+    const h = typeof r === "string" ? clean(r) : "";
+    if (h && !out.includes(h)) out.push(h);
+  }
+  return out.slice(0, MAX_COMPETITORS);
 }
 
 /** One result row — matches the app's DiscoveryKeyword type. */
 export interface DiscoveryKeyword extends KeywordIdea {
   clientRank: number | null;
   competitorRank: number | null;
+  /** Which competitors rank for this idea. Written from 2026-10-14. */
+  competitorsRanking?: string[];
   sources: Array<"seed" | "gap">;
   /** The place this row's volume was measured in, in the provider's own form.
    *  A volume belongs to this place and is never compared with one measured
@@ -553,6 +574,8 @@ export interface DiscoveryKeyword extends KeywordIdea {
 export interface DiscoveryGate {
   services: readonly string[] | null;
   tracked: readonly string[] | null;
+  /** Words a person said to count ideas by (shared/idea-seeds.ts). */
+  declaredWords?: readonly string[] | null;
 }
 
 export interface DiscoveryResult {
@@ -565,6 +588,8 @@ export interface DiscoveryResult {
   place: string;
   /** Which provider call produced the ideas. */
   source: "labs_national" | "google_ads_local";
+  /** The searches the provider was asked for, one call each in a national run. */
+  asked: string[];
   /** What the relevance gate did, in the words the run prints. */
   judgement: IdeaJudgement;
 }
@@ -613,6 +638,46 @@ export async function googleAdsLocationNames(creds: DfsCreds): Promise<string[] 
     }
   }
   return null;
+}
+
+/**
+ * Searches that CONTAIN one seed, for the whole country: DataForSEO Labs
+ * keyword_suggestions. This replaced one `keyword_ideas` call that took every
+ * seed at once. That call is a semantic expansion ordered by volume, so with ten
+ * seeds and a limit of 200 the 200 slots went to the biggest national head terms
+ * near the seeds' words ("pvc pipe", "first american home warranty") before any
+ * test of relevance ran. Here each seed is its own task and its own share of the
+ * limit, and the provider returns only searches that contain the phrase.
+ *
+ * Endpoint: POST /v3/dataforseo_labs/google/keyword_suggestions/live
+ * ONE seed a task (`keyword` is a string). Parameters used: keyword,
+ * location_name, language_name, limit, include_seed_keyword, order_by. NOT
+ * VERIFIED AGAINST A LIVE CALL from this repository (nothing here called the
+ * endpoint before); `npm run verify-dataforseo -- --probe` fires one. No
+ * provider-side `filters` are sent: nothing in this repository shows their
+ * syntax, so containment is the endpoint's own and is checked again below.
+ */
+export async function keywordSuggestions(
+  creds: DfsCreds,
+  seed: string,
+  locationName: string,
+  languageName: string,
+  limit: number,
+): Promise<{ ideas: KeywordIdea[]; costUsd: number; notContained: number }> {
+  const resp = await post(creds, "/dataforseo_labs/google/keyword_suggestions/live", [
+    { keyword: seed, location_name: locationName, language_name: languageName, limit, include_seed_keyword: true, order_by: ["keyword_info.search_volume,desc"] },
+  ]);
+  const costUsd = taskCost(resp);
+  const task = Array.isArray(resp?.tasks) ? resp.tasks[0] : null;
+  if (!task || task.status_code !== 20000) throw new Error(task?.status_message || "DataForSEO returned no result");
+  const result = Array.isArray(task.result) ? task.result[0] : null;
+  const items: any[] = Array.isArray(result?.items) ? result.items : [];
+  const all = items.map(toKeywordIdea).filter((k) => k.keyword);
+  // The endpoint promises phrases that contain the seed. Check it: an idea that
+  // does not is not stored, and the count is reported so a change in what the
+  // provider returns is seen rather than absorbed.
+  const ideas = all.filter((k) => containsAllWords(k.keyword, seed));
+  return { ideas, costUsd, notContained: all.length - ideas.length };
 }
 
 /**
@@ -746,13 +811,13 @@ export async function keywordDiscovery(
   const limit = Math.max(1, Math.min(1000, Math.round(params.limit || 200)));
   const clean = (d: string) => d.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/^www\./, "");
   const client = clientDomain ? clean(clientDomain) : null;
-  const competitor = params.competitor ? clean(params.competitor) : null;
+  const competitors = competitorsOfParams(params).map(clean);
   const national = isNational(locationName);
   // The ranking calls are Labs, and Labs is country-level.
   const rankLocation = UNITED_STATES;
   let costUsd = 0;
   const warnings: string[] = [];
-  if (!national && (client || competitor)) {
+  if (!national && (client || competitors.length)) {
     warnings.push(`positions are the national ones: the ranking data is country-level, so "you rank #N" is not a position in ${placeLabel(locationName)}. Every volume is for ${placeLabel(locationName)}.`);
   }
 
@@ -771,35 +836,65 @@ export async function keywordDiscovery(
     return num(serpItem.rank_absolute) ?? num(rse.rank_absolute);
   };
 
-  // 1. Ideas — the one call that must succeed.
+  // 1. Ideas — the calls that must succeed.
   type Row = Omit<DiscoveryKeyword, "relevance" | "measuredIn"> & { measuredIn: string };
   const rows = new Map<string, Row>();
   const place = national ? UNITED_STATES : locationName;
-  if (national) {
-    const ideasResp = await post(creds, "/dataforseo_labs/google/keyword_ideas/live", [
-      { keywords: seeds, location_name: locationName, language_name: languageName, limit, order_by: ["keyword_info.search_volume,desc"] },
-    ]);
-    costUsd += taskCost(ideasResp);
-    const ideasTask = Array.isArray(ideasResp?.tasks) ? ideasResp.tasks[0] : null;
-    if (!ideasTask || ideasTask.status_code !== 20000) throw new Error(ideasTask?.status_message || "DataForSEO returned no result");
-    const ideasResult = Array.isArray(ideasTask.result) ? ideasTask.result[0] : null;
-    const ideaItems: any[] = Array.isArray(ideasResult?.items) ? ideasResult.items : [];
-    for (const it of ideaItems) {
-      const idea = toKeywordIdea(it);
-      if (!idea.keyword) continue;
-      const key = normKw(idea.keyword);
-      if (rows.has(key)) continue;
-      rows.set(key, { ...idea, clientRank: null, competitorRank: null, sources: ["seed"], measuredIn: place });
-    }
-  } else {
-    const local = await keywordIdeasLocal(creds, seeds, locationName, languageName);
-    costUsd += local.costUsd;
-    // The provider returns far more than anyone reads; keep the biggest by volume.
-    const top = local.ideas.slice().sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0)).slice(0, limit);
+  // ONE SEARCH PER SEED, with a trailing generic word taken off ("brazing
+  // services" asks for "brazing"), each with its share of the limit.
+  const searches = providerSeeds(seeds);
+  const perSeed = perSeedLimit(limit, searches.length);
+  const asked: string[] = [];
+  const addIdeas = (ideas: KeywordIdea[]) => {
+    const top = ideas.slice().sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
     for (const idea of top) {
       const key = normKw(idea.keyword);
       if (rows.has(key)) continue;
       rows.set(key, { ...idea, clientRank: null, competitorRank: null, sources: ["seed"], measuredIn: place });
+    }
+  };
+  if (national) {
+    const settled = await mapWithConcurrency(searches, 4, async (search) => {
+      try {
+        const r = await keywordSuggestions(creds, search, locationName, languageName, perSeed);
+        return { search, ok: true as const, ...r };
+      } catch (e) {
+        return { search, ok: false as const, error: e instanceof Error ? e.message : String(e) };
+      }
+    });
+    const good = settled.filter((r): r is Extract<typeof r, { ok: true }> => r.ok);
+    // A seed whose call failed costs that seed and is named. Every call failing is a failed run.
+    if (!good.length) throw new Error((settled[0] as { error?: string } | undefined)?.error || "DataForSEO returned no result");
+    for (const r of settled) {
+      if (!r.ok) { warnings.push(`suggestions for "${r.search}": ${r.error}`); continue; }
+      asked.push(r.search);
+      costUsd += r.costUsd;
+      if (r.notContained > 0) warnings.push(`${r.notContained} idea(s) the provider returned for "${r.search}" did not contain it and were not stored`);
+    }
+    // Merge in the order asked, then keep the biggest up to the limit.
+    const merged: KeywordIdea[] = [];
+    for (const r of good) merged.push(...r.ideas);
+    addIdeas(merged);
+    if (rows.size > limit) {
+      const keep = [...rows.entries()].sort((a, b) => (b[1].volume ?? 0) - (a[1].volume ?? 0)).slice(0, limit);
+      rows.clear();
+      for (const [k, v] of keep) rows.set(k, v);
+    }
+  } else {
+    // The Keywords Data call has no phrase filter, so containment is applied here
+    // BEFORE the volume order picks what to keep: head terms nobody asked about
+    // can never fill the cap. Each search keeps its own share.
+    const local = await keywordIdeasLocal(creds, searches, locationName, languageName);
+    costUsd += local.costUsd;
+    asked.push(...searches.slice(0, 20));
+    const contained = containAndCap(local.ideas, searches, perSeed);
+    const dropped = local.ideas.length - local.ideas.filter((i) => searches.some((s) => containsAllWords(i.keyword, s))).length;
+    if (dropped > 0) warnings.push(`${dropped} of the ${local.ideas.length} ideas the provider returned contained none of the searches asked for and were not stored`);
+    addIdeas(contained);
+    if (rows.size > limit) {
+      const keep = [...rows.entries()].sort((a, b) => (b[1].volume ?? 0) - (a[1].volume ?? 0)).slice(0, limit);
+      rows.clear();
+      for (const [k, v] of keep) rows.set(k, v);
     }
   }
 
@@ -818,33 +913,43 @@ export async function keywordDiscovery(
   }
 
   // 3. Competitor gap (best-effort, only meaningful with a client footprint).
-  if (competitor && client) {
-    try {
-      for (const it of await ranked(competitor, 700)) {
-        const idea = toKeywordIdea(it);
-        if (!idea.keyword) continue;
-        const key = normKw(idea.keyword);
-        const compRank = rankOf(it);
-        if (compRank != null && compRank > 50) continue;      // only real competitor wins
-        if (clientRank.has(key)) continue;                     // client already ranks — not a gap
-        const existing = rows.get(key);
-        if (existing) {
-          existing.competitorRank = compRank;
-          if (!existing.sources.includes("gap")) existing.sources.push("gap");
-        } else {
-          // Its volume is the national one (Labs). In a place run it is
-          // re-measured below or left blank, never kept as is.
-          rows.set(key, { ...idea, clientRank: null, competitorRank: compRank, sources: ["gap"], measuredIn: UNITED_STATES });
+  // Each competitor is its own rankings call. A row more than one of them ranks
+  // for lists them all and carries the best position among them.
+  if (client) {
+    for (const comp of competitors) {
+      try {
+        for (const it of await ranked(comp, 700)) {
+          const idea = toKeywordIdea(it);
+          if (!idea.keyword) continue;
+          const key = normKw(idea.keyword);
+          const compRank = rankOf(it);
+          if (compRank != null && compRank > 50) continue;      // only real competitor wins
+          if (clientRank.has(key)) continue;                     // client already ranks — not a gap
+          const existing = rows.get(key);
+          if (existing) {
+            if (compRank != null && (existing.competitorRank == null || compRank < existing.competitorRank)) existing.competitorRank = compRank;
+            else if (existing.competitorRank == null) existing.competitorRank = compRank;
+            if (!existing.sources.includes("gap")) existing.sources.push("gap");
+            if (!existing.competitorsRanking) existing.competitorsRanking = [];
+            if (!existing.competitorsRanking.includes(comp)) existing.competitorsRanking.push(comp);
+          } else {
+            // Its volume is the national one (Labs). In a place run it is
+            // re-measured below or left blank, never kept as is.
+            rows.set(key, { ...idea, clientRank: null, competitorRank: compRank, competitorsRanking: [comp], sources: ["gap"], measuredIn: UNITED_STATES });
+          }
         }
+      } catch (e) {
+        warnings.push(`competitor rankings (${comp}): ${e instanceof Error ? e.message : String(e)}`);
       }
-    } catch (e) {
-      warnings.push(`competitor rankings (${competitor}): ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
   // 4. Judge every idea. Nothing is dropped.
   const all = [...rows.values()];
-  const judgement = judgeIdeas(all.map((r) => r.keyword), { seeds, services: gate.services, tracked: gate.tracked });
+  // Seeds and services gain their cores ("furnace brazing services" also counts
+  // as "furnace brazing") and a person's declared words join the seeds.
+  const inputs = judgingInputs({ seeds, services: gate.services, declaredWords: gate.declaredWords ?? null });
+  const judgement = judgeIdeas(all.map((r) => r.keyword), { seeds: inputs.seeds, services: inputs.services, tracked: gate.tracked });
   const verdictByKey = new Map(judgement.verdicts.map((v) => [normKw(v.keyword), v] as const));
   const kept = (r: Row): boolean => verdictByKey.get(normKw(r.keyword))?.kept !== false;
 
@@ -905,6 +1010,7 @@ export async function keywordDiscovery(
     warnings,
     place,
     source: national ? "labs_national" : "google_ads_local",
+    asked,
     judgement,
   };
 }

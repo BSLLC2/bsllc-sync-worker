@@ -94,6 +94,7 @@ import {
 } from "./service-relevance.js";
 import { splitSeeds, skippedSeedsLine, type SkippedSeed } from "./service-seed.js";
 import { judgeIdeas, ideaUseLine, type IdeaReview } from "./idea-relevance.js";
+import { judgingInputs } from "./idea-seeds.js";
 import { placeLabel, isNational } from "../research-location.js";
 import {
   planSeeds, bandOf, uncoveredTargets, uncoveredTargetsLine,
@@ -555,9 +556,17 @@ export function keywordGaps(i: GapInput): GapReading {
   // volumes. An idea counts as demand only if it contains a seed the run was
   // given, a signed-off service, or a search already on the client's list — or
   // a person kept it. The rest are counted, never added up.
-  const gate = judgeIdeas(i.research.keywords.map((k) => String(k.keyword ?? "")), {
+  // Seeds and services gain their cores ("furnace brazing services" also counts
+  // as "furnace brazing"). A person's declared words are NOT read here: they are
+  // in the dashboard's settings and this reading does not load them, so a word a
+  // person added moves the dashboard's readings and not this one.
+  const inputs = judgingInputs({
     seeds: i.research.seeds,
     services: i.services.services ? i.services.services.map((s) => s.name) : null,
+  });
+  const gate = judgeIdeas(i.research.keywords.map((k) => String(k.keyword ?? "")), {
+    seeds: inputs.seeds,
+    services: inputs.services,
     tracked: (i.targets ?? []).map((t) => String(t.keyword ?? "")),
     reviews: i.research.reviews ?? null,
   });

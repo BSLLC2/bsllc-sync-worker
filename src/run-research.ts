@@ -59,9 +59,13 @@ function parseParams(raw: string | null): DiscoveryParams {
   try { p = JSON.parse(raw); } catch { throw new Error("unreadable research parameters"); }
   const seeds = Array.isArray(p?.seeds) ? p.seeds.filter((s: unknown): s is string => typeof s === "string" && s.trim().length > 0) : [];
   if (!seeds.length) throw new Error("no seed keywords");
+  const competitors = Array.isArray(p?.competitors)
+    ? p.competitors.filter((x: unknown): x is string => typeof x === "string" && x.trim().length > 0).map((x: string) => x.trim())
+    : undefined;
   return {
     seeds,
     competitor: typeof p?.competitor === "string" && p.competitor.trim() ? p.competitor.trim() : null,
+    ...(competitors && competitors.length > 1 ? { competitors } : {}),
     limit: typeof p?.limit === "number" && p.limit > 0 ? p.limit : 200,
   };
 }
@@ -74,13 +78,32 @@ let catalogueCache: { names: string[] | null } | null = null;
  * SIGNED-OFF services (null where nobody has signed a list off, which is not
  * the same as none) and its tracked searches (null where the read failed).
  */
+/**
+ * The words a person said to count this client's ideas by, from the dashboard's
+ * own setting (`idea_words:<clientId>`, written by the app and never here). It
+ * only widens what the stored flag says; the app judges again on every read.
+ * Null where it could not be read, which is not the same as none.
+ */
+async function declaredWordsFor(c: pg.Client, clientId: string): Promise<string[] | null> {
+  try {
+    const { rows } = await c.query<{ value: string }>(`SELECT value FROM app_settings WHERE key = $1`, [`idea_words:${clientId}`]);
+    if (!rows[0]) return [];
+    const parsed: unknown = JSON.parse(rows[0].value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((e: { word?: unknown }) => (typeof e?.word === "string" ? e.word : "")).filter((w) => w.length > 0);
+  } catch {
+    return null;
+  }
+}
+
 async function gateFor(c: pg.Client, clientId: string | null): Promise<DiscoveryGate> {
-  if (!clientId) return { services: null, tracked: null };
+  if (!clientId) return { services: null, tracked: null, declaredWords: null };
   const services = await clientServicesFor(c, clientId);
   const tracked = await seoTargetsFor(c, clientId);
   return {
     services: services.services ? services.services.map((x) => x.name) : null,
     tracked: tracked ? tracked.map((t) => t.keyword) : null,
+    declaredWords: await declaredWordsFor(c, clientId),
   };
 }
 
@@ -146,7 +169,8 @@ async function main() {
           if (place.note) console.log(`    ⚠ ${place.note}`);
           const gate = await gateFor(c, r.client_id);
           const out = await keywordDiscovery(creds, params, client, place.name, r.language_name, gate);
-          console.log(`    searched in ${placeLabel(out.place)} (${out.source === "google_ads_local" ? "Keywords Data, local volumes" : "Labs, national volumes"})`);
+          console.log(`    searched in ${placeLabel(out.place)} (${out.source === "google_ads_local" ? "Keywords Data, local volumes" : "Labs keyword suggestions, national volumes"})`);
+          console.log(`    asked for searches that contain: ${out.asked.join(" | ")}`);
           console.log(`    ${out.judgement.line}`);
           console.log(`    ${out.judgement.basisLine}`);
           for (const w of out.warnings) console.log(`    ⚠ ${w}`);
