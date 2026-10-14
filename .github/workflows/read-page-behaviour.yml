@@ -1,0 +1,75 @@
+name: Read page behaviour (analytics, Search Console, Chrome field data, site events)
+
+# Reads how visitors use each client's pages and keeps counts in the dashboard's
+# tables (schema v252): analytics sessions, engagement and key events per landing
+# page and device; Search Console clicks per page and each page's few biggest
+# searches; the site's own events (calls to action, form starts and submits,
+# scroll depth); Chrome's field data for loading, response and layout stability,
+# phone against desktop; and a lab test of the busiest few pages.
+#
+# WHAT IT TOUCHES. Google's analytics, Search Console, Chrome UX Report and
+# PageSpeed APIs, read-only, with the service account the other importers use plus
+# one Google API key. Our own database. It touches no client site and no ad account.
+# It stores counts and timings, never a visitor.
+#
+# WHEN. Mondays 08:00 UTC, after the weekly rank pull and page read. The dashboard's
+# "Check now" button dispatches it for one client with client_id.
+#
+# NEEDS: DATABASE_URL, GOOGLE_SERVICE_ACCOUNT_JSON (existing), the dashboard on
+# schema v252 or later, and CRUX_API_KEY (new): a Google Cloud API key with the
+# Chrome UX Report API and PageSpeed Insights API enabled on the same project.
+# Without CRUX_API_KEY this run goes RED on purpose and says which secret.
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id). Blank = every client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-page-behaviour-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the pages' behaviour
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          CRUX_API_KEY: ${{ secrets.CRUX_API_KEY }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-page-behaviour -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own
+      # last line as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is ONE row for the whole book, so stamping it from a run that
+      # read one account would claim every other account was read this week.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_page_behaviour --status="$STATUS" --note="$NOTE" --log=run.log

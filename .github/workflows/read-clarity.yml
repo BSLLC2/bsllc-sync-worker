@@ -1,0 +1,67 @@
+name: Read Clarity (page-level aggregates)
+
+# Reads Microsoft Clarity's data export once a day for each client that has a
+# Clarity project recorded in the dashboard (Admin, Connectors) and keeps one row
+# per page per day in seo_clarity_days: sessions, the share with rapid repeated
+# clicks, with clicks that did nothing and with a quick return, the average scroll
+# depth and active time.
+#
+# WHY DAILY. Clarity's export reaches back three days and allows ten calls a day per
+# project, so history exists only because a row is kept for each day.
+#
+# WHAT IT TOUCHES. Clarity's export API, read-only, with a per-client export token,
+# and our own database. No recording, no visitor and no element is read or stored.
+#
+# NEEDS: DATABASE_URL, the dashboard on schema v252 or later, and CLARITY_TOKENS_JSON:
+# a secret holding an object of client slug to that project's export token, for
+# example {"studio-b1": "<token>"}. A client with a project and no token goes RED on
+# purpose and is named.
+on:
+  schedule:
+    - cron: "15 9 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every client with a Clarity project."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-clarity-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read Clarity
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLARITY_TOKENS_JSON: ${{ secrets.CLARITY_TOKENS_JSON }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-clarity -- $ARGS 2>&1 | tee run.log
+
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_clarity --status="$STATUS" --note="$NOTE" --log=run.log
