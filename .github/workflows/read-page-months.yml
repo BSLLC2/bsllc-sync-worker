@@ -1,0 +1,76 @@
+name: Read pages by month (SEO page history)
+
+# Keeps each client's Search Console clicks, impressions and average position, and
+# analytics' unpaid-search sessions, for every page and every COMPLETE calendar
+# month (seo_page_months). The rolling 28-day windows the page-behaviour reader
+# keeps are overwritten every run, so only this can say which pages lost visits
+# between two whole months.
+#
+# WHAT IT TOUCHES. Search Console and analytics, read-only, with the service account
+# the other Google jobs use, and our own database. It writes nothing to any client
+# account and stores no visitor: counts per page and an average position.
+#
+# WHEN. Mondays 08:30 UTC. A month is written once its last day is three days behind
+# (Search Console's figures are final by then), so a new month appears on the 4th and
+# the job is a no-op on every other Monday: a month is replaced as a whole, so a
+# re-run is free. To fill a year of history once: run it by hand with months = 14
+# (Search Console keeps about sixteen).
+#
+# NEEDS: GOOGLE_SERVICE_ACCOUNT_JSON, DATABASE_URL, and the dashboard on schema v256.
+on:
+  schedule:
+    - cron: "30 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id). Blank = every client with analytics or Search Console."
+        required: false
+        default: ""
+      months:
+        description: "How many complete months back to write (1 to 16). 3 is the usual."
+        required: false
+        default: "3"
+      dry_run:
+        description: "Read and print, write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-page-months-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the months
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          MONTHS: ${{ inputs.months }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ -n "$MONTHS" ] && ARGS="$ARGS --months=$MONTHS"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-page-months -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure. A dry run and a
+      # one-client run are excluded: the heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_page_months --status="$STATUS" --note="$NOTE" --log=run.log
