@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
@@ -7,6 +8,7 @@ import { slugify, writeSignalRun, ymd } from "./signals/common.js";
 import { SECRET_NAMES, ctmAccountKeys, ctmHashKey, secretValues, type CtmKeys } from "./signals/secrets.js";
 import { readCtmClient } from "./ctm/run.js";
 import { PRUNE_CTM_CALLS, writeCalls } from "./ctm/store.js";
+import { dailyFillLine, runDailyFill } from "./ctm/call-backfill.js";
 import { CTM_KEEP_DAYS, CTM_MAX_DAYS, CTM_PAUSE_MS } from "./ctm/types.js";
 
 /**
@@ -19,6 +21,12 @@ import { CTM_KEEP_DAYS, CTM_MAX_DAYS, CTM_PAUSE_MS } from "./ctm/types.js";
  *   npm run read-ctm -- --client=<id-or-slug>
  *   npm run read-ctm -- --days=120    (a longer window; at most 400)
  *   npm run read-ctm -- --dry-run     (proves the keys work and says how many calls; reads none)
+ *
+ * THEN, FOR EACH CLIENT READ: the recent stored calls in `web_inquiries` that are missing details the
+ * webhook did not carry (how the call ended, talk and ring time, tracking label, the two tags, the repeat
+ * count) are filled from this log, matched by the caller's hash and the time with the dashboard's own
+ * correction rules. It FILLS ONLY: a value already on a row is never replaced, no row is relabelled, none is
+ * created or deleted. The one-time relabel of history is `npm run backfill-calls-from-ctm`.
  *
  * NEVER STORED: the caller's number, the caller-ID text or name, the recording or any audio
  * link, the transcript, the summary, notes, the message body, or the visitor's IP.
@@ -39,6 +47,24 @@ function arg(name: string): string | undefined {
 async function tableExists(c: pg.Client, table: string): Promise<boolean> {
   const r = await c.query(`SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`, [table]);
   return r.rowCount === 1;
+}
+
+/**
+ * After a client's log is read, give the recent stored calls the details the webhook left blank (how it
+ * ended, talk time, tracking label) from the log now in the database. FILLS ONLY, on rows that are already
+ * calls; it relabels nothing (that is the one-time correction, `backfill-calls-from-ctm`). It can never fail
+ * the read: a problem here is printed and the run goes on.
+ */
+async function fillRecentCalls(c: pg.Client, m: { id: string }, slug: string, hashKey: string | null, status: string, now: Date, dry: boolean): Promise<void> {
+  if (!hashKey || !(status === "ok" || status === "no_data" || status === "capped")) return;
+  try {
+    const cols = await c.query(`SELECT 1 FROM information_schema.columns WHERE table_name = 'web_inquiries' AND column_name = 'call_status'`);
+    if (cols.rowCount !== 1) { console.log("  calls: the dashboard has not been updated to record calls (schema 255), so no stored call was filled"); return; }
+    const r = await runDailyFill(c, { clientId: m.id, slug, hashKey, apply: !dry, now, newId: randomUUID });
+    console.log(`  calls: ${dailyFillLine(r, dry)}`);
+  } catch (e) {
+    console.log(`  calls: stored calls were not filled this run (${safeMessage(e, secretValues())})`);
+  }
 }
 
 async function main() {
@@ -89,12 +115,13 @@ async function main() {
       const line = `${dryRun ? "(dry run) " : ""}${m.name}: ctm=${res.run.status}; ${res.calls.length} calls${res.skipped.noId + res.skipped.noTime ? `, ${res.skipped.noId + res.skipped.noTime} skipped` : ""}`;
       console.log(line);
       if (res.run.detail) console.log(`  ${res.run.status} - ${res.run.detail}`);
-      if (dryRun) continue;
+      if (dryRun) { await fillRecentCalls(c, m, slug, hashKey, res.run.status, now, true); continue; }
       if (res.calls.length) {
         await writeCalls(c, m.id, res.calls, now);
         await c.query(PRUNE_CTM_CALLS, [m.id, new Date(now.getTime() - CTM_KEEP_DAYS * 86_400_000).toISOString()]);
       }
       await writeSignalRun(c, m.id, res.run, now);
+      await fillRecentCalls(c, m, slug, hashKey, res.run.status, now, dryRun);
     }
   } finally {
     await c.end();

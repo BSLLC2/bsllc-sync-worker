@@ -85,12 +85,19 @@ export function calledAtOf(rec: Rec): string | null {
   return null;
 }
 
-/** The caller's number to a stable hash. null where there is no usable number. The key is never stored or returned. */
+/**
+ * The caller's number to a stable hash. null where there is no usable number. The key is never
+ * stored or returned.
+ *
+ * THE KEY IS THE LAST TEN DIGITS, exactly as the dashboard's call correction reads a stored form's
+ * phone (`right(digits, 10)`), so a `ctm_calls` row and a `web_inquiries` row for one number hash to
+ * the same value whatever the country-code or punctuation. Fewer than ten digits is "no usable
+ * number" (a withheld or blocked call), the same refusal the correction makes.
+ */
 export function callerHashOf(v: unknown, key: string): string | null {
   const digits = typeof v === "string" || typeof v === "number" ? String(v).replace(/\D/g, "") : "";
-  const ten = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
-  if (ten.length < 7 || ten.length > 15) return null;
-  return createHmac("sha256", key).update(ten).digest("hex");
+  if (digits.length < 10 || digits.length > 15) return null;
+  return createHmac("sha256", key).update(digits.slice(-10)).digest("hex");
 }
 
 function tagsOf(v: unknown): string[] | null {

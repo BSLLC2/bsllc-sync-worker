@@ -91,6 +91,7 @@ async function main() {
   ok("a different key is a different hash (the salt is the key)", callerHashOf("5135550188", `${HASHKEY}-other`) !== h);
   ok("the hash does not contain the digits", !h.includes("5135550188"));
   ok("no usable number is no hash, not a hash of nothing", callerHashOf("", HASHKEY) === null && callerHashOf("abc", HASHKEY) === null && callerHashOf("12345", HASHKEY) === null && callerHashOf(null, HASHKEY) === null);
+  ok("the key is the last ten digits: nine digits is no number, and a country code in front does not change the hash", callerHashOf("513555018", HASHKEY) === null && callerHashOf("+44 5135550188", HASHKEY) === callerHashOf("5135550188", HASHKEY));
   ok("the key is read only if long enough: under 24 characters is not a key", ctmHashKey({ CTM_CALLER_HASH_KEY: "short" }) === null && ctmHashKey({ CTM_CALLER_HASH_KEY: HASHKEY }) === HASHKEY && ctmHashKey({}) === null);
 
   hr("3. the export's headings and a different casing are read through the declared names");

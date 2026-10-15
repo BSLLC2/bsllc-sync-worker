@@ -1,0 +1,67 @@
+name: Correct stored calls from the call log (one-time, per client)
+
+# The calls this dashboard stored as forms (no form name, no call details) can be corrected
+# from the call log the daily reader already keeps in the database (`ctm_calls`). This matches
+# each logged call to the stored row it became, by the caller's salted hash and the time, using
+# the SAME rules as the dashboard's CSV correction (`npm run calls:backfill`), then relabels the
+# rows that are calls and fills the details they lack. No file is downloaded and no phone
+# number leaves the database.
+#
+# RUN ORDER (also in the dashboard's docs/INTEGRATIONS-SETUP.md):
+#   1. The dashboard is deployed (schema 255 or later records calls; v257 holds the call log).
+#   2. CTM_ACCOUNT_KEYS_JSON and CTM_CALLER_HASH_KEY are set on this repository.
+#   3. "Read CallTrackingMetrics (call log)": a dry run, then a real run with `days` as far back
+#      as the calls to correct (at most 400).
+#   4. THIS workflow, with dry_run left TRUE. Read the counts.
+#   5. Run it again with dry_run FALSE to apply exactly that.
+#
+# THE DRY RUN PRINTS COUNTS ONLY: matched, would relabel, would fill, ambiguous, unmatched. Never a
+# phone number, a name or caller-ID text.
+#
+# IT NEVER deletes or creates a row; it fills only blank call columns (a value already on a row is
+# never replaced, so a second run changes nothing); it relabels only a row with no form name AND no
+# email; a row it cannot match to exactly one call (or one that two calls both want) is left alone
+# and counted. Applying adds one internal line to the account's history, counts only.
+#
+# SECRETS. DATABASE_URL, and CTM_CALLER_HASH_KEY: the same key the reader hashes callers with.
+# There is no way to compare a stored phone to a hashed caller without it. No CallTrackingMetrics
+# access key is used: this job calls no third party.
+#
+# Dispatch-only and no heartbeat: it is an act somebody decides to perform, not a schedule, and a
+# heartbeat would make Data health report a stopped job on every day nobody ran it.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "The client's address, such as diesel-power-group (its name lowercased, dashes between words)."
+        required: true
+      dry_run:
+        description: "Count only; write nothing (true/false). Leave true for the first run."
+        required: false
+        default: "true"
+
+concurrency:
+  group: backfill-calls-from-ctm-${{ inputs.client }}
+  cancel-in-progress: false
+
+jobs:
+  correct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Match the call log to the stored calls
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CTM_CALLER_HASH_KEY: ${{ secrets.CTM_CALLER_HASH_KEY }}
+          CLIENT: ${{ inputs.client }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_BY: ${{ github.actor }}
+        run: |
+          ARGS="--client=$CLIENT"
+          [ "$DRY_RUN" != "true" ] && ARGS="$ARGS --apply"
+          npm run backfill-calls-from-ctm -- $ARGS
