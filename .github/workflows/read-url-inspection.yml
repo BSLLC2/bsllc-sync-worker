@@ -1,0 +1,74 @@
+name: Read URL inspection (what Google says about each page)
+
+# Asks Google, page by page, whether a client's page is indexed, which address it
+# chose as the original, when it last visited, whether robots.txt or a noindex stopped
+# it, and whether the page is usable on a phone. Keeps counts and states in the
+# dashboard's seo_url_inspection table (schema v257), the latest four readings per
+# page, and a status per account in signal_runs.
+#
+# WHAT IT TOUCHES. Google's Search Console URL Inspection API, read-only, with the
+# service account the other Google readers use, and our own database. It touches no
+# client site and no ad account. It stores states and dates, never page text.
+#
+# QUOTA. Google publishes 2,000 inspections per property per day (as published when
+# this was written; verify). This job spends at most 150 a property a day, 40 a client
+# a run, by our own limit, and counts what it already wrote today.
+#
+# WHEN. Daily 09:40 UTC, after Monday's page-behaviour read (08:00) has the week's
+# clicks by page, because the pages that fell are the ones inspected first.
+#
+# NEEDS: DATABASE_URL, GOOGLE_SERVICE_ACCOUNT_JSON (existing; the service account must
+# be a full user on each Search Console property) and the dashboard on schema v257 or
+# later. Without the service account this run goes RED on purpose and names the secret.
+on:
+  schedule:
+    - cron: "40 9 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Print the plan and prove the key works; inspect nothing and write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-url-inspection-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Inspect the pages
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-url-inspection -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own
+      # last line as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_url_inspection --status="$STATUS" --note="$NOTE" --log=run.log

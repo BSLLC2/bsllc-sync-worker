@@ -50,6 +50,14 @@ jobs:
         run: npm run verify-page-reader
       - name: Page behaviour guard, against a pretend Google
         run: npm run verify-page-behaviour
+      - name: URL inspection guard, against a pretend Search Console
+        run: npm run verify-url-inspection
+      - name: Business Profile guard, against a pretend Google
+        run: npm run verify-gbp
+      - name: Bing Webmaster guard, against a pretend Bing
+        run: npm run verify-bing
+      - name: CallTrackingMetrics guard, against a pretend CTM
+        run: npm run verify-ctm
       - name: Page history guard (top results, pages above a client, pages by month)
         run: npm run verify-page-history
       - name: Meta importer guard
@@ -120,3 +128,5 @@ jobs:
         run: npm run verify-ads-run-summary
       - name: Ads daily metrics store guard (real SQL)
         run: npm run verify-ads-daily-metrics
+      - name: Call log to stored calls guard (real SQL)
+        run: npm run verify-call-backfill

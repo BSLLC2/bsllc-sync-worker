@@ -28,6 +28,6 @@ export async function getJson(f: FetchLike, url: string, headers: Record<string,
 export function safeMessage(e: unknown, secrets: readonly (string | undefined)[] = []): string {
   let m = e instanceof Error ? e.message : String(e);
   for (const s of secrets) if (s && s.length > 4) m = m.split(s).join("[secret]");
-  m = m.replace(/([?&](?:key|token|access_token)=)[^&\s]+/gi, "$1[secret]");
+  m = m.replace(/([?&](?:key|token|access_token|apikey|apiKey)=)[^&\s]+/gi, "$1[secret]");
   return m.length > 240 ? `${m.slice(0, 237)}...` : m;
 }

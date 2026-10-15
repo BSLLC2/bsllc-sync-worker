@@ -1,0 +1,74 @@
+name: Read Business Profile (calls, directions, website clicks, views, search terms)
+
+# Reads Google Business Profile's performance counts for each client that has a
+# location recorded in the dashboard (Admin, Connectors, Business Profile): calls,
+# direction requests, website clicks, messages, bookings and views per day, and the
+# search terms people used to find the profile, per month. Keeps COUNTS ONLY in the
+# dashboard's gbp_daily and gbp_keywords tables (schema v257) and a status per account
+# in signal_runs. It reads no review, no reviewer and no photo.
+#
+# THIS DOES NOTHING UNTIL TWO THINGS EXIST. Google has to approve Business Profile API
+# access for the Google Cloud project (an application form, days to weeks), and these
+# repository secrets have to be added:
+#   GBP_OAUTH_CLIENT_JSON  {"clientId": "...", "clientSecret": "..."}
+#   GBP_TOKENS_JSON        {"<client slug>": {"refreshToken": "..."}}
+# Without them a client that HAS a location recorded goes red here on purpose and the
+# run names the secret. A client with no location recorded costs nothing.
+#
+# WHEN. Daily 10:20 UTC. Google's counts trail by a few days, so a daily read mostly
+# re-reads the same window; the rows are upserted by day and metric.
+#
+# NEEDS: DATABASE_URL and the dashboard on schema v257 or later.
+on:
+  schedule:
+    - cron: "20 10 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Prove the authorisation works; read no count and write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-gbp-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read Business Profile
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GBP_OAUTH_CLIENT_JSON: ${{ secrets.GBP_OAUTH_CLIENT_JSON }}
+          GBP_TOKENS_JSON: ${{ secrets.GBP_TOKENS_JSON }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-gbp -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own
+      # last line as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_gbp --status="$STATUS" --note="$NOTE" --log=run.log
