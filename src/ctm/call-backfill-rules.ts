@@ -232,7 +232,6 @@ export function planBackfill(read: ExportRead, rows: readonly StoredRow[]): Back
   return { plans, counts };
 }
 
-// ── copied: the report lines ────────────────────────────────────────────────
 /** The dry run, as lines. Counts only: never a number, a name or caller-ID text. */
 export function backfillReportLines(counts: BackfillCounts, applied: boolean): string[] {
   const verb = applied ? "" : "would ";
