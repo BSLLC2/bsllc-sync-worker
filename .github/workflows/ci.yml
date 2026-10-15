@@ -70,6 +70,8 @@ jobs:
         run: npm run verify-och-e2e
       - name: DPG tracker import, against a pretend Google
         run: npm run verify-dpg-tracker
+      - name: Client sales-sheet tracker (Franklin), against a pretend Smartsheet and Google
+        run: npm run verify-tracker
       - name: Reply-To header guard
         run: npm run verify-reply-to
       - name: GA4 per-channel import guard

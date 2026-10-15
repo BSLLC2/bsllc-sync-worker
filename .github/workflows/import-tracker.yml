@@ -1,0 +1,121 @@
+name: Import closed-deal tracker (Franklin and other clients)
+
+# Reads a client's sales sheet (Smartsheet or Google Sheets), READ ONLY, and plants
+# the wins that are ours as dashboard snapshots via `npm run sync`: won revenue by
+# the month each deal CLOSED, a deal count and a summary (what was read, when,
+# what is pending). DPG has its own job (import-dpg-tracker.yml) and is untouched.
+#
+# It is never written to the sheet. A heading it cannot find, a sheet it cannot
+# open or a token that is refused is a STOP with a named cause: nothing is written,
+# the last good figures stand, and the heartbeat note says why.
+#
+# THE FIRST RUN, owner. Do these in order (docs/FRANKLIN-TRACKER.md has the steps):
+#   1. Add the secret SMARTSHEET_API_TOKEN (Settings, Secrets and variables, Actions).
+#   2. Add the repository VARIABLE FRANKLIN_TRACKER_SHEET: the sheet's link or id.
+#      (A variable, not a committed value. A link is fine: the job finds the id.)
+#   3. Run this workflow with diagnose = true. It lists the sheet's NAME and column
+#      headings and counts. It prints no cell.
+#   4. Run it with dry_run = true (the default), then with dry_run = false.
+# A dry run and a diagnose do not stamp the heartbeat, so a green job always means
+# a real read.
+on:
+  schedule:
+    - cron: "40 8 * * *" # 08:40 UTC daily, after the DPG tracker (08:20)
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Which client (franklin). Blank = every configured client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print counts only, write nothing (true/false)."
+        required: false
+        default: "true"
+      diagnose:
+        description: "List the sheet's name, headings and counts only (true/false). Nothing is written."
+        required: false
+        default: "false"
+      sheet:
+        description: "Optional: the sheet's link or id, for this run only. Normally leave blank and set the FRANKLIN_TRACKER_SHEET variable."
+        required: false
+        default: ""
+
+concurrency:
+  group: import-tracker
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Check out the dashboard (for `npm run sync`)
+        uses: actions/checkout@v4
+        with:
+          repository: BSLLC2/bsllc-account-health
+          token: ${{ secrets.DASHBOARD_REPO_TOKEN }}
+          path: dashboard
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Read the tracker
+        working-directory: worker
+        env:
+          SMARTSHEET_API_TOKEN: ${{ secrets.SMARTSHEET_API_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}/dashboard
+          # The sheet is a variable (or, if you prefer, a secret of the same name), never a committed value.
+          FRANKLIN_TRACKER_SHEET: ${{ inputs.sheet || vars.FRANKLIN_TRACKER_SHEET || secrets.FRANKLIN_TRACKER_SHEET }}
+          TRACKER_FRANKLIN_SOURCE: ${{ vars.TRACKER_FRANKLIN_SOURCE }}
+          TRACKER_FRANKLIN_KEPT_BY: ${{ vars.TRACKER_FRANKLIN_KEPT_BY }}
+          TRACKER_FRANKLIN_COUNTED_FROM: ${{ vars.TRACKER_FRANKLIN_COUNTED_FROM }}
+          SMARTSHEET_API_BASE: ${{ vars.SMARTSHEET_API_BASE }}
+          CLIENT: ${{ inputs.client }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          DIAGNOSE: ${{ inputs.diagnose }}
+        run: |
+          # Keep the sheet value out of the log even if something prints it.
+          if [ -n "$FRANKLIN_TRACKER_SHEET" ]; then echo "::add-mask::$FRANKLIN_TRACKER_SHEET"; fi
+          ARGS=""
+          case "$CLIENT" in *[!a-z0-9-]*) echo "The client must be lowercase letters, digits and dashes."; exit 1 ;; esac
+          if [ -n "$CLIENT" ]; then ARGS="$ARGS --client=$CLIENT"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "$DIAGNOSE" = "true" ]; then ARGS="$ARGS --diagnose"; fi
+          set -o pipefail
+          npm run import-tracker -- $ARGS 2>&1 | tee run.log
+
+      - name: Summary line
+        id: summary
+        if: always()
+        working-directory: worker
+        run: |
+          LINE="$(grep '^TRACKER-FEED ' run.log | tail -1 | cut -c1-290)"
+          echo "summary=${LINE}" >> "$GITHUB_OUTPUT"
+
+      - name: Heartbeat
+        # Only a real read stamps the heartbeat: a dry run or a diagnose proves nothing about the daily job.
+        if: always() && inputs.dry_run != 'true' && inputs.diagnose != 'true'
+        working-directory: worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Through an environment variable, never pasted into the script: the line
+          # can carry a heading somebody typed, and a quote or a backtick in it
+          # would otherwise be run as a command.
+          NOTE: ${{ steps.summary.outputs.summary }}
+        run: npm run heartbeat -- --job=import_tracker --status=${{ job.status }} --log=run.log --note="$NOTE"
