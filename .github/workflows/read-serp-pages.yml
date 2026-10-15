@@ -1,0 +1,67 @@
+name: Read the pages above a client (SEO top results)
+
+# For the searches where it changes the work (just off page one, or fallen from it),
+# reads the first few pages that rank above the client and keeps FACTS about them in
+# seo_serp_results: word count, headings, structured-data types and where the search
+# words appear. The dashboard puts them beside the client's own page: "Pages ranking
+# above you cover: ... and carry ...; yours is 410 words with no section on ...".
+#
+# WHAT IT TOUCHES. Other people's public web pages: robots.txt first, one request a
+# second per site, same-site redirects only, a size and time limit, no JavaScript, no
+# cookie. At most 12 searches a client a week and 3 pages a search; a page read in the
+# last 28 days is copied, not fetched again. It stores no page text. It makes no
+# search-provider call (the top results were kept by the weekly rank pull) and writes
+# nothing to any website.
+#
+# WHEN. Mondays 08:00 UTC, after the rank pull (06:00) has stored this week's results.
+#
+# NEEDS: DATABASE_URL, and the dashboard on schema v256 (the job says so and stops
+# if the table is missing).
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id). Blank = every client with a domain."
+        required: false
+        default: ""
+      dry_run:
+        description: "Choose and print, fetch and write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-serp-pages-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the pages
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-serp-pages -- $ARGS 2>&1 | tee run.log
+
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_serp_pages --status="$STATUS" --note="$NOTE" --log=run.log

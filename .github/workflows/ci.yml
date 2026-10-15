@@ -58,6 +58,8 @@ jobs:
         run: npm run verify-bing
       - name: CallTrackingMetrics guard, against a pretend CTM
         run: npm run verify-ctm
+      - name: Page history guard (top results, pages above a client, pages by month)
+        run: npm run verify-page-history
       - name: Meta importer guard
         run: npm run verify-meta-import
       - name: HubSpot deal-outcome guard
