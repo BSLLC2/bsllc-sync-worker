@@ -5,7 +5,7 @@ import { appendFileSync } from "node:fs";
 import pg from "pg";
 import { safeMessage } from "./page-behaviour/http.js";
 import { slugify } from "./signals/common.js";
-import { SECRET_NAMES, ctmHashKey } from "./signals/secrets.js";
+import { SECRET_NAMES, ctmHashKey, secretValues } from "./signals/secrets.js";
 import { runBackfill } from "./ctm/call-backfill.js";
 
 /**
@@ -67,4 +67,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(safeMessage(e, [process.env.CTM_CALLER_HASH_KEY ?? ""].filter(Boolean))); process.exit(1); });
+main().catch((e) => { console.error(safeMessage(e, secretValues())); process.exit(1); });
