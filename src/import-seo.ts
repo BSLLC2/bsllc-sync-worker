@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { credsFromEnv, serpRanks, type SerpTask, type SerpResult } from "./dataforseo.js";
+import { serpTableExists, writeSerpCapture } from "./serp-results.js";
 
 /**
  * Weekly SEO rank tracking via DataForSEO's SERP API. Reads each client's
@@ -54,6 +55,15 @@ async function main() {
       `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'seo_rank_history' AND column_name = 'ranking_url'`,
     )).rowCount === 1;
     if (!hasRankingUrl) console.log("· seo_rank_history has no ranking_url column yet; positions are kept without the address");
+    // How the check was made (v256): the place asked about and how many organic
+    // results came back. Kept only where both columns exist, so a deploy order that
+    // is wrong costs the detail and never the position.
+    const hasCheckDetail = (await c.query(
+      `SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'seo_rank_history' AND column_name IN ('location_name', 'items_returned')`,
+    )).rows[0]?.n === 2;
+    if (!hasCheckDetail) console.log("· seo_rank_history has no location_name / items_returned columns yet; checks are kept without how they were made");
+    const hasSerpTable = await serpTableExists(c);
+    if (!hasSerpTable) console.log("· seo_serp_results does not exist yet; the top results are not kept");
     const clients = (await c.query<ClientRow>(
       `SELECT id, name, seo_domain, seo_location FROM clients WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> ''`,
     )).rows;
@@ -108,7 +118,15 @@ async function main() {
           const r = results[i];
           if (!r) continue;
           const tgt = targets[i];
-          if (hasRankingUrl) {
+          if (hasRankingUrl && hasCheckDetail) {
+            await c.query(
+              `INSERT INTO seo_rank_history
+                 (id, seo_target_id, client_id, keyword, rank, ai_overview, device, scope, error, captured_at, ranking_url, location_name, items_returned)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+              [randomUUID(), tgt?.id ?? null, client.id, r.keyword, r.rank, r.aiOverview, tgt?.device ?? null, tgt?.scope ?? null, r.error, now, r.rank != null ? (r.url ?? null) : null,
+                tasks[i]?.locationName ?? null, r.error ? null : (r.itemsReturned ?? null)],
+            );
+          } else if (hasRankingUrl) {
             await c.query(
               `INSERT INTO seo_rank_history
                  (id, seo_target_id, client_id, keyword, rank, ai_overview, device, scope, error, captured_at, ranking_url)
@@ -123,6 +141,17 @@ async function main() {
               [randomUUID(), tgt?.id ?? null, client.id, r.keyword, r.rank, r.aiOverview, tgt?.device ?? null, tgt?.scope ?? null, r.error, now],
             );
           }
+        }
+        // The organic results the same response carried, kept for the dashboard's
+        // "who ranks above this page". No extra provider call; a failed check keeps none.
+        if (hasSerpTable) {
+          let kept = 0;
+          for (let i = 0; i < results.length; i++) {
+            const r = results[i];
+            if (!r || r.error || !r.organic?.length) continue;
+            kept += await writeSerpCapture(c, { clientId: client.id, targetId: targets[i]?.id ?? null, keyword: r.keyword, device: targets[i]?.device ?? "desktop", capturedAt: now, organic: r.organic });
+          }
+          console.log(`  kept ${kept} top results for ${slug}`);
         }
         console.log(`  persisted ${results.length} keyword ranks for ${slug}`);
       }

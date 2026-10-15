@@ -70,8 +70,12 @@ jobs:
             npm run import-seo -- $ARGS
           fi
 
+      # `if: always()` so a FAILED run is recorded as a failure. A dry run and a
+      # one-client run are excluded: the heartbeat is ONE row for the whole book, and
+      # a dashboard press that re-runs one account must not claim every other account
+      # was checked today.
       - name: Heartbeat
-        if: always()
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
         working-directory: worker
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

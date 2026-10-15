@@ -67,7 +67,42 @@ export interface SerpResult {
   /** The address the engine returned for the tracked domain at `rank`. Null where the domain was not found
    *  or the check failed. Optional so a result built elsewhere (a test, an older caller) need not carry it. */
   url?: string | null;
+  /** The first organic results the same response carried, for the stored top ten. Optional for the same reason as `url`. */
+  organic?: SerpOrganic[];
+  /** How many organic results came back at all (up to the depth asked for). Null where the check failed.
+   *  Zero with no position means the provider answered with nothing, which is not the same as "not in the top 100". */
+  itemsReturned?: number | null;
   error: string | null;
+}
+
+/** One organic result as the search engine listed it. A title is the one the result showed. */
+export interface SerpOrganic { position: number; url: string; domain: string; title: string | null }
+
+/** How many organic results a capture keeps. OURS: the first page of results, which is what a rewrite competes with. */
+export const SERP_ORGANIC_KEPT = 10;
+
+const hostOnly = (u: string): string => { try { return new URL(u).hostname.replace(/^www\./, "").toLowerCase(); } catch { return ""; } };
+
+/**
+ * The first ten organic results of one response, in order. Only an http(s) address
+ * with a host is kept, a title is cut to 200 characters, and nothing else about a
+ * result (snippet, rating, sitelinks) is read. No extra provider call is made for
+ * this: it is the response the position was already taken from.
+ */
+export function topOrganic(items: readonly any[]): SerpOrganic[] {
+  const out: SerpOrganic[] = [];
+  for (const it of items) {
+    if (it?.type !== "organic") continue;
+    const url = cleanRankingUrl(it.url);
+    const position = typeof it.rank_absolute === "number" ? it.rank_absolute : (typeof it.rank_group === "number" ? it.rank_group : null);
+    if (!url || position == null) continue;
+    const domain = hostOnly(url) || String(it.domain ?? "").toLowerCase().replace(/^www\./, "");
+    if (!domain) continue;
+    const title = typeof it.title === "string" ? it.title.replace(/\s+/g, " ").trim().slice(0, 200) || null : null;
+    out.push({ position, url, domain, title });
+    if (out.length >= SERP_ORGANIC_KEPT) break;
+  }
+  return out.sort((a, b) => a.position - b.position);
 }
 
 /** An address worth keeping: http(s), no credentials, no longer than a database should hold. */
@@ -156,7 +191,8 @@ export async function serpRanks(
           rankingUrl = cleanRankingUrl(it.url);
         }
       }
-      return { keyword: t.keyword, rank, aiOverview, url: rankingUrl, error: null };
+      const organicCount = items.filter((it) => it?.type === "organic").length;
+      return { keyword: t.keyword, rank, aiOverview, url: rankingUrl, organic: topOrganic(items), itemsReturned: organicCount, error: null };
     } catch (e) {
       return { keyword: t.keyword, rank: null, aiOverview: false, error: e instanceof Error ? e.message : String(e) };
     }
