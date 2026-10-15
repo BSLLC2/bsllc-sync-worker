@@ -324,7 +324,7 @@ section("9. The closed-sales tracker is read and labelled");
 }
 
 section("Ruleset");
-ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 11);
+ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 12);
 
 console.log(failures ? `\n${failures} check(s) FAILED.` : "\nAll checks passed.");
 process.exit(failures ? 1 : 0);

@@ -2056,7 +2056,7 @@ async function main() {
         "neither sunk nor floated — it keeps its group and its stage");
     }
 
-    ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 11);
+    ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 12);
   }
 
   console.log(`\n${"─".repeat(72)}`);

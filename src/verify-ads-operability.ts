@@ -85,6 +85,7 @@ if (WF_DIR) {
     // much as it does for the change capture the line above covers.
     ads_structure_snapshot: { hours: 24, why: "daily 03:40 UTC" },
     ads_google_recs: { hours: 24, why: "daily 04:20 UTC" },
+    ads_daily_metrics: { hours: 24, why: "daily 05:10 UTC" },
   };
   for (const [job, exp] of Object.entries(EXPECT)) {
     const c = cad.get(job);
