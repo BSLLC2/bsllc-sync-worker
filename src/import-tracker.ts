@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
-import { TRACKER_CONFIGS, resolveConfig, type TrackerConfig } from "./tracker/config.js";
+import { TRACKER_CONFIGS, resolveConfig, countedFromNote, type TrackerConfig } from "./tracker/config.js";
 import { FINDINGS, hasStop, lineFor, worstLine, type Finding } from "./tracker/causes.js";
 import { buildFeedEntries, buildFeedSummary, readRows } from "./tracker/reading.js";
 import { resolveLayouts } from "./tracker/table.js";
@@ -41,6 +41,8 @@ function printFindings(findings: Finding[]) {
 
 async function one(base: TrackerConfig, o: { dryRun: boolean; diagnose: boolean; today: string }): Promise<{ line: string; findings: Finding[] }> {
   const cfg = resolveConfig(base);
+  const ignored = countedFromNote(base);
+  if (ignored) console.log(ignored);
   console.log(`\n-- ${cfg.key} (${cfg.source})${o.diagnose ? " diagnose" : o.dryRun ? " dry-run" : ""}: counted from ${cfg.countedFrom}, kept by ${cfg.keptBy}, today ${o.today}`);
   const opened = await openSource(cfg, process.env, { headersOnly: o.diagnose });
   if (opened.kind === "stop") return { line: lineFor(cfg.clientSlug, [opened.finding], null), findings: [opened.finding] };

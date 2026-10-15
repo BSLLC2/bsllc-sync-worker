@@ -266,8 +266,23 @@ export function resolveConfig(base: TrackerConfig, env: Env = process.env): Trac
     tab: env[`TRACKER_${k}_TAB`]?.trim() || base.tab,
     keptBy: kept === "client" || kept === "us" ? kept : base.keptBy,
     rowLimit: /^\d{2,6}$/.test(env[`TRACKER_${k}_ROW_LIMIT`]?.trim() ?? "") ? Number(env[`TRACKER_${k}_ROW_LIMIT`]) : base.rowLimit,
-    countedFrom: /^\d{4}-\d{2}-\d{2}$/.test(env[`TRACKER_${k}_COUNTED_FROM`]?.trim() ?? "") ? env[`TRACKER_${k}_COUNTED_FROM`]!.trim() : base.countedFrom,
+    countedFrom: countedFromOf(base, env),
   };
+}
+
+/** The first counted day. A typed start on or before the seed's last day would count the same wins twice, so it is ignored. */
+function countedFromOf(base: TrackerConfig, env: Env): string {
+  const typed = env[`TRACKER_${upper(base.key)}_COUNTED_FROM`]?.trim() ?? "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(typed)) return base.countedFrom;
+  if (base.seed && typed <= base.seed.through) return base.countedFrom;
+  return typed;
+}
+
+/** A sentence for the log when a typed start was ignored because it overlaps the seed. Null when nothing was ignored. */
+export function countedFromNote(base: TrackerConfig, env: Env = process.env): string | null {
+  const typed = env[`TRACKER_${upper(base.key)}_COUNTED_FROM`]?.trim() ?? "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(typed) || !base.seed || typed > base.seed.through) return null;
+  return `NOTE: TRACKER_${upper(base.key)}_COUNTED_FROM (${typed}) is on or before the day the entered figure ends (${base.seed.through}), so it was ignored and ${base.countedFrom} is used. Counting those days twice would overstate revenue.`;
 }
 
 export const configByKey = (key: string): TrackerConfig | null => TRACKER_CONFIGS.find((c) => c.key === key || c.clientSlug === key) ?? null;

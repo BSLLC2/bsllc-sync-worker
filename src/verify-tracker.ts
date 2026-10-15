@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeSmartsheet, type FakeColumn, type FakeSheet, type PagingMode } from "./fake-smartsheet.js";
 import { FakeGoogle } from "./fake-google.js";
-import { FRANKLIN, FRANKLIN_SEED_CENTS, dpgParityConfig, normHeader, parseSheetRef, resolveConfig, type TrackerConfig } from "./tracker/config.js";
+import { FRANKLIN, FRANKLIN_SEED_CENTS, dpgParityConfig, normHeader, parseSheetRef, resolveConfig, countedFromNote, type TrackerConfig } from "./tracker/config.js";
 import { parseAmountCents, parseDay, resolveLayouts, resolveRoles, safeLabel, isClickId, type Table } from "./tracker/table.js";
 import { buildFeedEntries, buildFeedSummary, feedMonths, readRows, type FeedSummary } from "./tracker/reading.js";
 import { CAUSE_CODES, FINDINGS, lineFor, worstLine } from "./tracker/causes.js";
@@ -204,6 +204,8 @@ function pure() {
   // Configs
   const live = resolveConfig(FRANKLIN, { FRANKLIN_TRACKER_SHEET: PERMALINK, TRACKER_FRANKLIN_KEPT_BY: "client", TRACKER_FRANKLIN_SOURCE: "google_sheet", TRACKER_FRANKLIN_COUNTED_FROM: "2026-02-01", TRACKER_FRANKLIN_ROW_LIMIT: "500" });
   check("pure: repository variables apply: sheet, who keeps it, source, first day, row limit", live.sheetId === PERMALINK && live.keptBy === "client" && live.source === "google_sheet" && live.countedFrom === "2026-02-01" && live.rowLimit === 500);
+  check("pure: a typed start on or before the seed's last day is ignored, so no day is counted twice", resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2025-06-01" }).countedFrom === FRANKLIN.countedFrom && resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: FRANKLIN.seed!.through }).countedFrom === FRANKLIN.countedFrom);
+  check("pure: the ignored start is said in the log, and a good one is not", /ignored/.test(countedFromNote(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2025-06-01" }) ?? "") && countedFromNote(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2026-02-01" }) === null);
   check("pure: a nonsense variable changes nothing", resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_KEPT_BY: "maybe", TRACKER_FRANKLIN_SOURCE: "excel", TRACKER_FRANKLIN_COUNTED_FROM: "soon" }).keptBy === "us");
   check("pure: Franklin's default is that BS LLC keeps the sheet (unconfirmed wording) and the feed starts the day after the seed", FRANKLIN.keptBy === "us" && FRANKLIN.seed?.through === "2025-12-30" && FRANKLIN.countedFrom === "2025-12-31");
   check("pure: the committed config holds no sheet link or id", FRANKLIN.sheetId === null);
