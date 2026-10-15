@@ -57,8 +57,8 @@ async function main() {
     const slug = slugify(client.name);
     const res = await runBackfill(c, { clientId: client.id, slug, hashKey, apply, by: by || "dry run", now: new Date(), newId: randomUUID });
     console.log(`${apply ? "" : "(dry run, nothing written) "}${client.name}`);
-    for (const l of res.lines) console.log(`  ${l}`);
-    if (apply) console.log(`  rows written: ${res.written}. One internal line was added to the account's history.`);
+    for (const l of res.lines) console.log(`  ${l.replace(/^export:/, "call log:")}`);
+    if (apply) console.log(`  rows written: ${res.written}.${res.written > 0 ? " One internal line was added to the account's history." : " Nothing needed changing, so no line was added."}`);
     else console.log("  Nothing was written. Run it again with dry_run off to apply exactly this.");
     const summary = `${res.counts ? `${res.counts.matched} matched, ${res.counts.wouldRelabel} ${apply ? "relabelled" : "would relabel"}, ${res.counts.ambiguous} ambiguous, ${res.counts.unmatched} unmatched` : "nothing to match"}${apply ? `; ${res.written} rows written` : ""}`;
     if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `summary=${summary}\n`);
