@@ -1,0 +1,69 @@
+name: Read Bing Webmaster (searches, pages, crawl counts and issues)
+
+# Reads Bing Webmaster Tools for each client that has a Bing site recorded in the
+# dashboard (Admin, Connectors, Bing): the searches and pages that sent visits from Bing
+# (about six months), the crawl counts, the index and inbound-link counts, and the crawl
+# issues by exact address. Keeps COUNTS and the addresses of the client's own pages in the
+# dashboard's bing_* tables (schema v257) and a status per account in signal_runs.
+#
+# ONE SECRET: BING_WEBMASTER_API_KEY, created in Bing Webmaster Tools (Settings, API
+# access). It can read every site in that Bing account. Without it a client that HAS a
+# Bing site recorded goes red here on purpose and the run names the secret. A client with
+# no site recorded costs nothing. Free; the key costs nothing and there is no application.
+#
+# WHEN. Daily 10:40 UTC. Bing gives about six months of history in one call and the rows
+# are upserted by day, so a daily read mostly re-reads what is stored.
+#
+# NEEDS: DATABASE_URL and the dashboard on schema v257 or later.
+on:
+  schedule:
+    - cron: "40 10 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Prove the key works and the site is listed; read no count and write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-bing-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read Bing Webmaster
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BING_WEBMASTER_API_KEY: ${{ secrets.BING_WEBMASTER_API_KEY }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-bing -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own
+      # last line as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_bing --status="$STATUS" --note="$NOTE" --log=run.log

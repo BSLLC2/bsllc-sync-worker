@@ -1,0 +1,81 @@
+name: Read CallTrackingMetrics (call log)
+
+# Reads each client's CallTrackingMetrics call log into the dashboard's ctm_calls table
+# (schema v257): when a call came, the tracker source and label, how it ended, how long
+# it rang and talked, the caller's city and state, the click id and campaign, two tags as
+# yes or no, and the caller as a SALTED HASH. A status per account goes in signal_runs.
+#
+# NEVER STORED: the caller's number, the caller-ID text or name, the recording or any audio
+# link, the transcript, the summary, notes, the message body, or the visitor's IP.
+#
+# TWO SECRETS BESIDES THE DATABASE:
+#   CTM_ACCOUNT_KEYS_JSON  {"<client slug>": {"accessKey": "...", "secretKey": "...", "accountId": "..."}}
+#   CTM_CALLER_HASH_KEY    any long random string (24+ characters), kept for good. If it ever changes,
+#                          repeat callers stop matching. There is no fallback.
+# Without them a client that HAS a CallTrackingMetrics row switched on goes red here on
+# purpose and the run names the secret. A client with no row switched on costs nothing.
+#
+# WHEN. Daily 11:05 UTC, reading the last 45 days. A call's status can change after it
+# ends, so each run overwrites the window. A first run for a client can read further back
+# with the `days` input (at most 400).
+#
+# NEEDS: DATABASE_URL and the dashboard on schema v257 or later.
+on:
+  schedule:
+    - cron: "5 11 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every client."
+        required: false
+        default: ""
+      days:
+        description: "How many days back to read (blank = 45, at most 400)."
+        required: false
+        default: ""
+      dry_run:
+        description: "Prove the keys work and count the calls; read none and write nothing (true/false)."
+        required: false
+        default: "false"
+
+concurrency:
+  group: read-ctm-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read CallTrackingMetrics
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CTM_ACCOUNT_KEYS_JSON: ${{ secrets.CTM_ACCOUNT_KEYS_JSON }}
+          CTM_CALLER_HASH_KEY: ${{ secrets.CTM_CALLER_HASH_KEY }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DAYS: ${{ inputs.days }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ -n "$DAYS" ] && ARGS="$ARGS --days=$DAYS"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-ctm -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own
+      # last line as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_ctm --status="$STATUS" --note="$NOTE" --log=run.log

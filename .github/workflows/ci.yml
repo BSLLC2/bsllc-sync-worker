@@ -54,6 +54,10 @@ jobs:
         run: npm run verify-url-inspection
       - name: Business Profile guard, against a pretend Google
         run: npm run verify-gbp
+      - name: Bing Webmaster guard, against a pretend Bing
+        run: npm run verify-bing
+      - name: CallTrackingMetrics guard, against a pretend CTM
+        run: npm run verify-ctm
       - name: Meta importer guard
         run: npm run verify-meta-import
       - name: HubSpot deal-outcome guard
