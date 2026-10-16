@@ -1,0 +1,37 @@
+name: One-off, switch on a client's CallTrackingMetrics connector
+
+# Writes the same connector row Admin, Connectors writes, for one client. Dry run unless
+# dry_run is false. Needs only DATABASE_URL. Prints no key.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "The client's address, such as ohio-community-health-och."
+        required: true
+      account:
+        description: "The call tracker's account number, digits only."
+        required: true
+      dry_run:
+        description: "Report only (true/false)."
+        required: false
+        default: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLIENT: ${{ inputs.client }}
+          ACCOUNT: ${{ inputs.account }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          APPLY=""
+          if [ "$DRY_RUN" = "false" ]; then APPLY="--apply"; fi
+          npm run oneoff-enable-ctm-connector -- --client="$CLIENT" --account="$ACCOUNT" $APPLY

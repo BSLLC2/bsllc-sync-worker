@@ -111,6 +111,7 @@
     "oneoff-retire-heartbeat": "tsx src/oneoff-retire-heartbeat.ts",
     "post-note": "tsx src/post-note.ts",
     "oneoff-label-och-ctm-calls": "tsx src/oneoff-label-och-ctm-calls.ts",
+    "oneoff-enable-ctm-connector": "tsx src/oneoff-enable-ctm-connector.ts",
     "oneoff-trim-pre-contract-web-inquiries": "tsx src/oneoff-trim-pre-contract-web-inquiries.ts",
     "oneoff-fix-och-gsc-and-junk": "tsx src/oneoff-fix-och-gsc-and-junk.ts",
     "debug-och-webform-key-rotation-check": "tsx src/debug-och-webform-key-rotation-check.ts",
