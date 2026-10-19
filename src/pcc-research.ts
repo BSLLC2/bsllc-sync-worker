@@ -381,5 +381,47 @@ async function partB(creds: DfsCreds) {
   console.log(`\nPCC RESEARCH PART B DONE · spend $${total.toFixed(4)}`);
 }
 
+// ── PART C: Google Ads (Keyword Planner) data — US volumes for the filtered list, and Google's own
+// geo-aware idea expansion for the core seeds at US and Cincinnati. Labs' database misses long-tail
+// local phrases; this is the honest second source before calling a term "no volume".
+async function partC(creds: DfsCreds) {
+  console.log(`\nRUN ${RUN} · PCC research · PART C · DataForSEO Google Ads · read-only`);
+  const fs = await import("node:fs");
+  const kwList = [...new Set([...(fs.existsSync("data/pcc-keywords.txt") ? fs.readFileSync("data/pcc-keywords.txt", "utf8").split("\n") : []), ...Object.values(SEEDS).flat()].map(norm).filter(Boolean))];
+  const cityCode = 1023626;
+  block("2d_google_ads_us", ["keyword", "volume_us_google_ads", "cpc_us_google_ads", "competition_us_google_ads", "low_top_of_page_bid", "high_top_of_page_bid", "trend_12m_us_google_ads", "source", "date"]);
+  console.log(`# google_ads search_volume (US): ${kwList.length} keywords ≈ $${(Math.ceil(kwList.length / 1000) * 0.05).toFixed(2)}`);
+  for (let i = 0; i < kwList.length; i += 1000) {
+    const r = await dfs(creds, "POST", "/keywords_data/google_ads/search_volume/live", [{ keywords: kwList.slice(i, i + 1000), location_code: US, language_code: "en" }]).catch((e) => { console.log(`# google_ads us: ${e}`); return null; });
+    for (const v of r ?? []) row(norm(String(v?.keyword ?? "")), n(v.search_volume), n(v.cpc), n(v.competition_index), n(v.low_top_of_page_bid), n(v.high_top_of_page_bid), trend(v.monthly_searches), "keywords_data/google_ads/search_volume (US 2840)", RUN);
+  }
+  end();
+  const groups: Array<[string, string[]]> = [
+    ["A Cincinnati STR management", SEEDS["A Cincinnati STR management"]!],
+    ["B Out-of-state investor", SEEDS["B Out-of-state investor"]!],
+    ["D Market and regulation", SEEDS["D Market and regulation"]!.slice(0, 20)],
+    ["E Services", SEEDS["E Services"]!],
+    ["G Question / AI-search", SEEDS["G Question / AI-search"]!],
+  ];
+  block("2e_keyword_planner_ideas", ["seed_cluster", "location", "keyword", "volume", "cpc", "competition", "trend_12m", "label", "source", "date"]);
+  console.log(`# google_ads keywords_for_keywords: ${groups.length} clusters × 2 locations ≈ $${(groups.length * 2 * 0.05).toFixed(2)}`);
+  for (const [c, seeds] of groups) for (const [loc, code] of [["US", US], ["Cincinnati", cityCode]] as const) {
+    const r = await dfs(creds, "POST", "/keywords_data/google_ads/keywords_for_keywords/live", [{ keywords: seeds.slice(0, 20), location_code: code, language_code: "en", sort_by: "search_volume", include_adult_keywords: false }]).catch((e) => { console.log(`# keywords_for_keywords ${c} ${loc}: ${e}`); return null; });
+    let kept = 0;
+    for (const v of r ?? []) {
+      const k = norm(String(v?.keyword ?? "")); if (!k || JUNK.test(k)) continue;
+      if (!/airbnb|vrbo|short[- ]?term|\bstr\b|mid[- ]?term|vacation rental|furnish|co-?host|bnb|property manag|rental propert|investment propert|cost seg|loophole|cash ?flow|turnkey|out of state|remote|passive|cincinnati|ohio|host|regulation|permit|ordinance|license|neighborhood|invest/i.test(k)) continue;
+      row(c, loc, k, n(v.search_volume), n(v.cpc), n(v.competition_index), trend(v.monthly_searches), label(k), "keywords_data/google_ads/keywords_for_keywords", RUN); kept++;
+    }
+    console.log(`# ${c} ${loc}: ${(r ?? []).length} ideas, ${kept} relevant`);
+  }
+  end();
+  block("9_spend", ["endpoint", "calls", "errors", "cost_usd", "date"]);
+  let total = 0; for (const [p, s] of Object.entries(spend)) { row(p, s.calls, s.errors, s.cost.toFixed(4), RUN); total += s.cost; }
+  row("TOTAL (part C)", Object.values(spend).reduce((a, s) => a + s.calls, 0), Object.values(spend).reduce((a, s) => a + s.errors, 0), total.toFixed(4), RUN);
+  end();
+  console.log(`\nPCC RESEARCH PART C DONE · spend $${total.toFixed(4)}`);
+}
+
 const PART = (process.env.PART ?? "all").toLowerCase();
-(PART === "b" ? partB(credsFromEnv()) : main()).catch((e) => { console.error(e instanceof Error ? e.stack ?? e.message : e); process.exit(1); });
+(PART === "b" ? partB(credsFromEnv()) : PART === "c" ? partC(credsFromEnv()) : main()).catch((e) => { console.error(e instanceof Error ? e.stack ?? e.message : e); process.exit(1); });
