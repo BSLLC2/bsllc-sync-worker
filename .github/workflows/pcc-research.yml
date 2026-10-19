@@ -1,0 +1,31 @@
+name: PCC research pull (READ ONLY)
+
+# DataForSEO-only keyword + SERP research for the Pink Cash Cow redesign. No writes.
+on:
+  workflow_dispatch:
+    inputs:
+      part:
+        description: "all"
+        required: true
+        default: "all"
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run research
+        env:
+          PART: ${{ inputs.part }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run pcc-research 2>&1 | tee pcc-research-${{ inputs.part }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pcc-research-${{ inputs.part }}
+          path: pcc-research-${{ inputs.part }}.txt
