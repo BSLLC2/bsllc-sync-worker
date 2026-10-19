@@ -423,5 +423,37 @@ async function partC(creds: DfsCreds) {
   console.log(`\nPCC RESEARCH PART C DONE · spend $${total.toFixed(4)}`);
 }
 
+// ── PART D: live SERPs for the FINAL priority list (national) and the local-investor set (Cincinnati) ──
+async function partD(creds: DfsCreds) {
+  console.log(`\nRUN ${RUN} · PCC research · PART D · live SERPs for the priority set · read-only`);
+  const fs = await import("node:fs");
+  const read = (p: string) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8").split("\n").map(norm).filter(Boolean) : []);
+  const nat = read("data/pcc-serp-national.txt"), loc = read("data/pcc-serp-local.txt");
+  const cityCode = 1023626;
+  console.log(`# live SERP advanced: ${nat.length} national + ${loc.length} Cincinnati ≈ $${((nat.length + loc.length) * 0.003).toFixed(2)}`);
+  block("3i_serp_priority", ["keyword", "location", "local_pack", "people_also_ask", "ai_overview", "featured_snippet", "video", "paid_ads", "all_features", "top1", "top2", "top3", "top1_url", "top2_url", "top3_url", "ai_overview_cited_domains", "paa_questions", "pcc_position_top10", "source", "date"]);
+  async function one(keyword: string, where: "US" | "Cincinnati") {
+    const r = await dfs(creds, "POST", "/serp/google/organic/live/advanced", [{ keyword, location_code: where === "US" ? US : cityCode, language_code: "en", device: "desktop", depth: 10, people_also_ask_click_depth: 1 }]).catch((e) => ({ _err: String(e) }));
+    if (r?._err) { row(keyword, where, "", "", "", "", "", "", `ERROR ${r._err.slice(0, 100)}`, "", "", "", "", "", "", "", "", "", "serp/google/organic/live/advanced", RUN); return; }
+    const items: any[] = r?.[0]?.items ?? [];
+    const types = [...new Set(items.map((i) => String(i?.type)))];
+    const f = (t: string) => (types.includes(t) ? "yes" : "no");
+    const organic = items.filter((i) => i?.type === "organic").map((i) => ({ domain: String(i.domain ?? "").replace(/^www\./, ""), url: String(i.url ?? "") }));
+    const paa: string[] = []; for (const i of items) if (i?.type === "people_also_ask") for (const it of i.items ?? []) if (it?.title) paa.push(String(it.title));
+    const ai = items.find((i) => i?.type === "ai_overview");
+    const aiRefs = ai ? [...new Set((ai.references ?? ai.items?.flatMap((x: any) => x.references ?? []) ?? []).map((x: any) => hostOf(String(x?.url ?? ""))).filter(Boolean))] as string[] : [];
+    const pcc = organic.findIndex((o) => o.domain.endsWith(DOMAIN));
+    row(keyword, where, types.includes("local_pack") || types.includes("map") ? "yes" : "no", f("people_also_ask"), f("ai_overview"), f("featured_snippet"), f("video"), f("paid"), types.filter((t) => t !== "organic").join("|"), organic[0]?.domain, organic[1]?.domain, organic[2]?.domain, organic[0]?.url, organic[1]?.url, organic[2]?.url, aiRefs.join("|"), paa.join(" | "), pcc >= 0 ? pcc + 1 : "", "serp/google/organic/live/advanced (desktop, depth 10)", RUN);
+  }
+  for (const k of nat) await one(k, "US");
+  for (const k of loc) await one(k, "Cincinnati");
+  end();
+  block("9_spend", ["endpoint", "calls", "errors", "cost_usd", "date"]);
+  let total = 0; for (const [p, s] of Object.entries(spend)) { row(p, s.calls, s.errors, s.cost.toFixed(4), RUN); total += s.cost; }
+  row("TOTAL (part D)", Object.values(spend).reduce((a, s) => a + s.calls, 0), Object.values(spend).reduce((a, s) => a + s.errors, 0), total.toFixed(4), RUN);
+  end();
+  console.log(`\nPCC RESEARCH PART D DONE · spend $${total.toFixed(4)}`);
+}
+
 const PART = (process.env.PART ?? "all").toLowerCase();
-(PART === "b" ? partB(credsFromEnv()) : PART === "c" ? partC(credsFromEnv()) : main()).catch((e) => { console.error(e instanceof Error ? e.stack ?? e.message : e); process.exit(1); });
+(PART === "b" ? partB(credsFromEnv()) : PART === "c" ? partC(credsFromEnv()) : PART === "d" ? partD(credsFromEnv()) : main()).catch((e) => { console.error(e instanceof Error ? e.stack ?? e.message : e); process.exit(1); });

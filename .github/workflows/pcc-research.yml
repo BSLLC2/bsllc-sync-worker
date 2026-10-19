@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       part:
-        description: "all, b or c"
+        description: "all, b, c or d"
         required: true
         default: "all"
       competitors:
