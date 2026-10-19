@@ -7,7 +7,8 @@ import { credsFromEnv, type DfsCreds } from "./dataforseo.js";
  * website redesign. DataForSEO only. Every block names its endpoint and the
  * run date; nothing is estimated here — a missing figure prints blank.
  *
- *   PART=all (default) · PART=a (seeds+metrics+serp+competitors)
+ *   PART=all (default): seeds → metrics → SERPs → auto competitor pass
+ *   PART=b: hand-listed competitors (COMPETITORS / NATIONAL env), full local top-10s, DMA volumes
  *
  * Output: CSV blocks between "### CSV name" / "### END" so the sections split
  * into sheet tabs without re-typing. Spend is summed from each task's `cost`.
@@ -265,4 +266,120 @@ async function main() {
   end();
   console.log(`\nPCC RESEARCH DONE · total DataForSEO spend $${total.toFixed(4)}`);
 }
-main().catch((e) => { console.error(e instanceof Error ? e.stack ?? e.message : e); process.exit(1); });
+
+// ── PART B: competitor pass with a hand-checked list, full local top-10s, DMA volumes ──
+const BRAND_SAFE = (t: string) => t.replace(/[^a-z0-9 ]/gi, " ").replace(/\s+/g, " ").trim().toLowerCase();
+async function partB(creds: DfsCreds) {
+  console.log(`\nRUN ${RUN} · PCC research · PART B · DataForSEO · read-only`);
+  const handList = (process.env.COMPETITORS ?? "").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+  const national = (process.env.NATIONAL ?? "").split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+
+  block("0b_locations_matching_cincinnati", ["location_name", "location_code", "location_type", "source", "date"]);
+  const locs: any[] = await dfs(creds, "GET", "/keywords_data/google_ads/locations/us").catch((e) => { console.log(`# locations error: ${e}`); return []; });
+  const matches = locs.filter((l) => /cincinnati/i.test(String(l.location_name)));
+  for (const l of matches) row(l.location_name, l.location_code, l.location_type, "keywords_data/google_ads/locations/us", RUN);
+  end();
+  const dma = matches.find((l) => /dma/i.test(String(l.location_type)));
+  const city = matches.find((l) => /^Cincinnati,Ohio,United States$/i.test(String(l.location_name)) && /city/i.test(String(l.location_type)));
+  const cityCode = n(city?.location_code) ?? 1023626;
+
+  // DMA volumes for the filtered keyword list
+  const fs = await import("node:fs");
+  const kwList = fs.existsSync("data/pcc-keywords.txt") ? fs.readFileSync("data/pcc-keywords.txt", "utf8").split("\n").map(norm).filter(Boolean) : [];
+  block("2c_dma_volumes", ["keyword", "volume_cincinnati_dma", "cpc_cincinnati_dma", "competition_cincinnati_dma", "trend_12m_cincinnati_dma", "dma_location", "source", "date"]);
+  if (!dma) { row("(no DMA-type location containing 'Cincinnati' in DataForSEO's Google Ads location list — DMA volumes not available)", "", "", "", "", "", "keywords_data/google_ads/locations/us", RUN); }
+  else {
+    console.log(`# google_ads search_volume (DMA ${dma.location_code}): ${kwList.length} keywords ≈ $${(Math.ceil(kwList.length / 1000) * 0.05).toFixed(2)}`);
+    for (let i = 0; i < kwList.length; i += 1000) {
+      const r = await dfs(creds, "POST", "/keywords_data/google_ads/search_volume/live", [{ keywords: kwList.slice(i, i + 1000), location_code: dma.location_code, language_code: "en" }]).catch((e) => { console.log(`# google_ads dma: ${e}`); return null; });
+      for (const v of r ?? []) row(norm(String(v?.keyword ?? "")), n(v.search_volume), n(v.cpc), n(v.competition_index), trend(v.monthly_searches), dma.location_name, "keywords_data/google_ads/search_volume (DMA)", RUN);
+    }
+  }
+  end();
+
+  // Full top-10 SERPs, Cincinnati + national, for the management / question terms
+  const localTerms = ["short term rental management cincinnati", "airbnb management cincinnati", "airbnb property management cincinnati", "vacation rental property manager cincinnati", "furnished rental management cincinnati", "mid term rental management cincinnati", "str management company cincinnati", "airbnb co-host cincinnati", "airbnb property manager cincinnati ohio", "short term rental property management cincinnati ohio", "vacation rental management cincinnati", "who manages airbnbs in cincinnati", "cincinnati short term rental regulations", "cincinnati airbnb permit", "best neighborhoods for airbnb cincinnati", "is cincinnati a good airbnb market", "airbnb investment property cincinnati", "turnkey airbnb cincinnati"];
+  const natTerms = ["airbnb management company", "short term rental management company", "airbnb property management", "how to invest in airbnb out of state", "out of state airbnb investor", "short term rental tax loophole", "airbnb management fees", "design and furnish short term rental", "airbnb furnishing service"];
+  console.log(`# live SERP advanced: ${localTerms.length} Cincinnati + ${natTerms.length} national ≈ $${((localTerms.length + natTerms.length) * 0.003).toFixed(2)}`);
+  block("3g_serp_top10", ["keyword", "location", "position", "domain", "url", "title", "serp_features", "paa_questions", "ai_overview_cited_domains", "source", "date"]);
+  const domCount = new Map<string, { local: number; nat: number; titles: string[]; bestPos: number }>();
+  const BLOCK = /^(airbnb|vrbo|booking|expedia|tripadvisor|hotels|yelp|m\.yelp|bbb|facebook|instagram|linkedin|youtube|reddit|biggerpockets|google|wikipedia|zillow|realtor|redfin|trulia|apartments|furnishedfinder|craigslist|indeed|glassdoor|nerdwallet|forbes|investopedia|irs|quora|medium|thumbtack|angi|homeadvisor|mapquest|yellowpages|marriott|hilton|hyatt|scholar\.google|play\.google|cincinnati-oh|hamiltoncountyohio|wvxu|wcpo|local12|cincinnati\.com|bizjournals|fox19|wlwt|airdna|mashvisor|rabbu|hostaway|guesty|lodgify|hospitable|turno|pricelabs|hello\.pricelabs|hostfully|awning|evolve|vacasa|redawning|airbtics|onefinebnb|guestable|homeguide|cincinnatireia|revenuebase|staywithdave|hosttools|avantstay|furnishgreen|homeriver|allpropertymanagement|therealdeal|ownerdirect|greystar|pinkcashcow)\./i;
+  const MGMT_TITLE = /airbnb|short[- ]term|vacation rental|\bstr\b|host|bnb|rental management|property management|furnished|co-?host/i;
+  async function serp10(keyword: string, loc: "US" | "Cincinnati") {
+    const r = await dfs(creds, "POST", "/serp/google/organic/live/advanced", [{ keyword, ...(loc === "US" ? { location_code: US } : { location_code: cityCode }), language_code: "en", device: "desktop", depth: 10, people_also_ask_click_depth: 1 }]).catch((e) => ({ _err: String(e) }));
+    if (r?._err) { row(keyword, loc, "", "", "", "", `ERROR ${r._err.slice(0, 100)}`, "", "", "serp/google/organic/live/advanced", RUN); return; }
+    const items: any[] = r?.[0]?.items ?? [];
+    const feats = [...new Set(items.map((i) => String(i?.type)))].filter((t) => t !== "organic").join("|");
+    const paa: string[] = []; for (const i of items) if (i?.type === "people_also_ask") for (const it of i.items ?? []) if (it?.title) paa.push(String(it.title));
+    const ai = items.find((i) => i?.type === "ai_overview");
+    const aiRefs = ai ? [...new Set((ai.references ?? ai.items?.flatMap((x: any) => x.references ?? []) ?? []).map((x: any) => hostOf(String(x?.url ?? ""))).filter(Boolean))] as string[] : [];
+    const organic = items.filter((i) => i?.type === "organic").slice(0, 10);
+    organic.forEach((i, idx) => {
+      const d = String(i.domain ?? "").replace(/^www\./, ""); const t = String(i.title ?? "");
+      row(keyword, loc, idx + 1, d, i.url ?? "", t, idx === 0 ? feats : "", idx === 0 ? paa.join(" | ") : "", idx === 0 ? aiRefs.join("|") : "", "serp/google/organic/live/advanced (desktop, depth 10)", RUN);
+      const c = domCount.get(d) ?? { local: 0, nat: 0, titles: [], bestPos: 99 };
+      if (loc === "Cincinnati") c.local++; else c.nat++; c.titles.push(t); c.bestPos = Math.min(c.bestPos, idx + 1); domCount.set(d, c);
+    });
+    if (!organic.length) row(keyword, loc, "", "(no organic results returned)", "", "", feats, paa.join(" | "), aiRefs.join("|"), "serp/google/organic/live/advanced", RUN);
+  }
+  for (const k of localTerms) await serp10(k, "Cincinnati");
+  for (const k of natTerms) await serp10(k, "US");
+  end();
+
+  block("3h_competitor_candidates", ["domain", "cincinnati_top10_appearances", "national_top10_appearances", "best_position", "management_title", "example_title", "picked", "source", "date"]);
+  const cands = [...domCount.entries()].filter(([d, c]) => !BLOCK.test(d) && !d.endsWith(DOMAIN)).map(([d, c]) => ({ d, c, mgmt: c.titles.some((t) => MGMT_TITLE.test(t)) })).sort((a, b) => (b.c.local - a.c.local) || (a.c.bestPos - b.c.bestPos));
+  const auto = cands.filter((x) => x.mgmt && x.c.local >= 1).map((x) => x.d);
+  const direct = [...new Set([...handList, ...auto])].slice(0, 6);
+  for (const x of cands.slice(0, 40)) row(x.d, x.c.local, x.c.nat, x.c.bestPos, x.mgmt ? "yes" : "no", x.c.titles[0]?.slice(0, 90) ?? "", direct.includes(x.d) ? "yes" : "", "derived from 3g_serp_top10", RUN);
+  for (const d of handList) if (!cands.some((x) => x.d === d)) row(d, 0, 0, "", "", "(hand-listed; not in these top-10s)", "yes", "COMPETITORS env", RUN);
+  end();
+  console.log(`# direct competitors: ${direct.join(", ")} · national comparison: ${national.join(", ")}`);
+
+  block("3c_domains", ["domain", "role", "organic_keywords_us", "est_organic_visits_mo", "keywords_top3", "keywords_top10", "backlink_rank_0_1000", "backlinks", "referring_domains", "source", "date", "note"]);
+  for (const d of [DOMAIN, ...direct, ...national]) {
+    const [ov, bl] = await Promise.all([
+      dfs(creds, "POST", "/dataforseo_labs/google/domain_rank_overview/live", [{ target: d, location_code: US, language_code: "en" }]).then((r: any) => r?.[0]?.items?.[0]?.metrics?.organic).catch((e) => ({ _err: String(e) })),
+      dfs(creds, "POST", "/backlinks/summary/live", [{ target: d, internal_list_limit: 10, backlinks_status_type: "live" }]).then((r: any) => r?.[0]).catch((e) => ({ _err: String(e) })),
+    ]);
+    row(d, d === DOMAIN ? "client" : national.includes(d) ? "national STR manager (comparison)" : "direct competitor", n(ov?.count), n(ov?.etv), n(ov?.pos_1) == null ? "" : (ov.pos_1 ?? 0) + (ov.pos_2_3 ?? 0), n(ov?.pos_1) == null ? "" : (ov.pos_1 ?? 0) + (ov.pos_2_3 ?? 0) + (ov.pos_4_10 ?? 0), n(bl?.rank), n(bl?.backlinks), n(bl?.referring_domains), "labs/domain_rank_overview (US) · backlinks/summary", RUN, [ov?._err, bl?._err].filter(Boolean).join(" ; ") || (ov == null ? "no organic data returned (domain not in Labs index)" : ""));
+  }
+  end();
+
+  block("3d_ranked_keywords", ["domain", "keyword", "position", "volume_us", "kd", "intent", "url", "label", "source", "date"]);
+  for (const d of [DOMAIN, ...direct]) {
+    const r = await dfs(creds, "POST", "/dataforseo_labs/google/ranked_keywords/live", [{ target: d, location_code: US, language_code: "en", limit: d === DOMAIN ? 500 : 300, order_by: ["keyword_data.keyword_info.search_volume,desc"] }]).catch((e) => { console.log(`# ranked_keywords ${d}: ${e}`); return null; });
+    const items: any[] = r?.[0]?.items ?? [];
+    if (!items.length) row(d, "(no ranked keywords returned)", "", "", "", "", "", "", "labs/ranked_keywords (US)", RUN);
+    for (const it of items) { const k = norm(String(it?.keyword_data?.keyword ?? "")); row(d, k, n(it?.ranked_serp_element?.serp_item?.rank_absolute), n(it?.keyword_data?.keyword_info?.search_volume), n(it?.keyword_data?.keyword_properties?.keyword_difficulty), it?.keyword_data?.search_intent_info?.main_intent ?? "", it?.ranked_serp_element?.serp_item?.url ?? "", label(k), "labs/ranked_keywords (US)", RUN); }
+  }
+  end();
+
+  block("3e_gap", ["competitor", "keyword", "competitor_position", "competitor_url", "pcc_position", "volume_us", "kd", "intent", "label", "source", "date"]);
+  for (const d of [...direct, ...national]) {
+    const r = await dfs(creds, "POST", "/dataforseo_labs/google/domain_intersection/live", [{ target1: d, target2: DOMAIN, location_code: US, language_code: "en", intersections: false, limit: 200, order_by: ["keyword_data.keyword_info.search_volume,desc"] }]).catch((e) => { console.log(`# domain_intersection ${d}: ${e}`); return null; });
+    const items: any[] = r?.[0]?.items ?? [];
+    if (!items.length) row(d, "(no gap rows returned)", "", "", "", "", "", "", "", "labs/domain_intersection (target1=competitor, target2=pinkcashcow.com, intersections=false, US)", RUN);
+    for (const it of items) { const k = norm(String(it?.keyword_data?.keyword ?? "")); row(d, k, n(it?.first_domain_serp_element?.rank_absolute), it?.first_domain_serp_element?.url ?? "", n(it?.second_domain_serp_element?.rank_absolute) ?? "", n(it?.keyword_data?.keyword_info?.search_volume), n(it?.keyword_data?.keyword_properties?.keyword_difficulty), it?.keyword_data?.search_intent_info?.main_intent ?? "", label(k), "labs/domain_intersection (US)", RUN); }
+  }
+  end();
+
+  const brandTerms = [...SEEDS["F Brand"]!];
+  for (const d of direct) { const stem = d.replace(/\.(com|net|co|org|io|us)$/, ""); brandTerms.push(stem); const t = domCount.get(d)?.titles[0] ?? ""; const name = BRAND_SAFE(t.split(/[|\-–—:]/)[0] ?? ""); if (name && name.length < 40 && name !== stem) brandTerms.push(name); }
+  const bt = [...new Set(brandTerms.map(BRAND_SAFE).filter(Boolean))];
+  block("5_brand", ["keyword", "volume_us", "cpc_us", "kd", "intent", "serp_features", "volume_cincinnati_city", "source", "date"]);
+  const bo = await dfs(creds, "POST", "/dataforseo_labs/google/keyword_overview/live", [{ keywords: bt, location_code: US, language_code: "en", include_serp_info: true }]).catch((e) => { console.log(`# brand overview: ${e}`); return null; });
+  const bl = await dfs(creds, "POST", "/keywords_data/google_ads/search_volume/live", [{ keywords: bt, location_code: cityCode, language_code: "en" }]).catch((e) => { console.log(`# brand local: ${e}`); return null; });
+  const bmap = new Map<string, any>(); for (const it of bo?.[0]?.items ?? []) bmap.set(norm(String(it.keyword)), it);
+  const blmap = new Map<string, any>(); for (const it of bl ?? []) blmap.set(norm(String(it.keyword)), it);
+  for (const t of bt) { const it = bmap.get(t); row(t, n(it?.keyword_info?.search_volume), n(it?.keyword_info?.cpc), n(it?.keyword_properties?.keyword_difficulty), it?.search_intent_info?.main_intent ?? "", (it?.serp_info?.serp_item_types ?? []).join("|"), n(blmap.get(t)?.search_volume), "labs/keyword_overview (US) · google_ads/search_volume (Cincinnati city)", RUN); }
+  end();
+
+  block("9_spend", ["endpoint", "calls", "errors", "cost_usd", "date"]);
+  let total = 0; for (const [p, s] of Object.entries(spend)) { row(p, s.calls, s.errors, s.cost.toFixed(4), RUN); total += s.cost; }
+  row("TOTAL (part B)", Object.values(spend).reduce((a, s) => a + s.calls, 0), Object.values(spend).reduce((a, s) => a + s.errors, 0), total.toFixed(4), RUN);
+  end();
+  console.log(`\nPCC RESEARCH PART B DONE · spend $${total.toFixed(4)}`);
+}
+
+const PART = (process.env.PART ?? "all").toLowerCase();
+(PART === "b" ? partB(credsFromEnv()) : main()).catch((e) => { console.error(e instanceof Error ? e.stack ?? e.message : e); process.exit(1); });

@@ -5,9 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       part:
-        description: "all"
+        description: "all or b"
         required: true
         default: "all"
+      competitors:
+        description: "PART b: hand-checked direct competitor domains, comma-separated"
+        required: false
+        default: ""
+      national:
+        description: "PART b: national STR managers for comparison, comma-separated"
+        required: false
+        default: "awning.com,evolve.com"
 
 jobs:
   research:
@@ -21,6 +29,8 @@ jobs:
       - name: Run research
         env:
           PART: ${{ inputs.part }}
+          COMPETITORS: ${{ inputs.competitors }}
+          NATIONAL: ${{ inputs.national }}
           DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
           DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
         run: npm run pcc-research 2>&1 | tee pcc-research-${{ inputs.part }}.txt
