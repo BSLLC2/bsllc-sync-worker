@@ -182,7 +182,7 @@ function pure() {
     const mg = mergeSheets([r], [{ index: 1, label: "Sheet 2", cause: "headers_missing", line: "The sheet has no heading for the amount." }], cfg, etToday);
     return mg.sheets.length === 2 && mg.sheets[1]!.state === "stopped" && mg.sheets[1]!.cause === "headers_missing" && mg.reading.counted.length === r.reading.counted.length;
   })());
-  check("pure: the cause list names both new causes", (CAUSE_CODES as readonly string[]).includes("one_sheet_stopped") && (CAUSE_CODES as readonly string[]).includes("sheets_disagree"));
+  check("pure: the cause list names the merge cause, and has no 'one sheet stopped' cause (a stopped sheet holds the read and keeps its own cause)", (CAUSE_CODES as readonly string[]).includes("sheets_disagree") && !(CAUSE_CODES as readonly string[]).includes("one_sheet_stopped"));
 
   // Configuration
   check("config: only the first variable is the one-sheet behaviour (one entry)", sheetRefsOf(resolveConfig(FRANKLIN, { FRANKLIN_TRACKER_SHEET: "111111" })).join() === "111111");
@@ -243,21 +243,45 @@ async function e2e() {
   check("e2e: no customer detail in the payload other than the one counted click id", !NEVER.filter((x) => x !== GCLIDS[0]).some((x) => JSON.stringify(two.payload).includes(x)));
   check("e2e: it asked Smartsheet only with GET", ss.writes === 0 && ss.calls.every((c) => c.method === "GET"));
 
-  // One sheet failing while the other reads
+  // ONE SHEET FAILING WHILE THE OTHER READS: the whole read is held. Nothing is written (the dashboard keeps the last good
+  // figures of BOTH sheets), the exit is a stop, and the line names the sheet and its own cause.
   ss.reset([quoteSheet(), { ...formSheet(), columns: FORM_COLS.map((c) => (c.title === "Order value ($)" ? { ...c, title: "Deal total" } : c)) }]);
   const half = await run();
-  const sh = summaryOf(half);
-  check("e2e: one sheet's heading renamed: the other still reads, warn one_sheet_stopped, exit 0", half.code === 0 && /^TRACKER-FEED franklin-brazing warn one_sheet_stopped:/.test(verdictOf(half)), verdictOf(half));
-  check("e2e: the stopped sheet is in the summary with its cause, and the figure is the quote log's alone", sh?.v === 2 && sh.sheets?.[1]?.state === "stopped" && sh.sheets[1].cause === "headers_missing" && sh.sheets[0].state === "read", sh?.sheets);
-  check("e2e: the line names the sheet that could not be read", /Ad form sheet \(headers_missing\)/.test(verdictOf(half)), verdictOf(half));
+  check("e2e: one sheet's heading renamed while the other reads: a stop (exit 1), the cause is the sheet's own", half.code === 1 && /^TRACKER-FEED franklin-brazing stop headers_missing:/.test(verdictOf(half)), verdictOf(half));
+  check("e2e: ... and NOTHING is written, so the last good figures stand (a partial figure would lose the sales only the other sheet holds)", half.payload == null, half.payload && Object.keys(half.payload));
+  check("e2e: ... and the line names which sheet could not be read", /stop headers_missing: (Ad form sheet|Sheet 2): /.test(verdictOf(half)), verdictOf(half));
+  check("e2e: ... and says what it did read, without printing a figure for it", /read, \d+ rows\. Not recorded, because the other sheet could not be read\./.test(half.out) && /Nothing was written/.test(half.out));
+  ss.reset([{ ...quoteSheet(), columns: RFQ_COLS.map((c) => (c.title === "Amount" ? { ...c, title: "Total" } : c)) }, formSheet()]);
+  const quoteBroken = await run();
+  check("e2e: the FIRST sheet failing while the second reads holds the read too", quoteBroken.code === 1 && /^TRACKER-FEED franklin-brazing stop headers_missing:/.test(verdictOf(quoteBroken)) && quoteBroken.payload == null, verdictOf(quoteBroken));
   ss.reset([quoteSheet(), { ...formSheet(), hidden: true }]);
   const hid = await run();
-  check("e2e: a second sheet nobody shared: the first still reads and the line says which cause", hid.code === 0 && /one_sheet_stopped/.test(verdictOf(hid)) && /sheet_not_shared|sheet_not_found/.test(verdictOf(hid)), verdictOf(hid));
+  check("e2e: a second sheet nobody shared: a stop with that sheet's cause (a person can fix it), nothing written", hid.code === 1 && /stop (sheet_not_shared|sheet_not_found):/.test(verdictOf(hid)) && hid.payload == null, verdictOf(hid));
+  check("e2e: ... and the line says which sheet", /stop (sheet_not_shared|sheet_not_found): Sheet 2: /.test(verdictOf(hid)), verdictOf(hid));
+  // The key expired or was revoked: every sheet is refused with the key's own cause.
+  ss.reset([quoteSheet(), formSheet()]);
+  const badKey = await run({ SMARTSHEET_API_TOKEN: "revoked-token-invented" });
+  check("e2e: an expired or revoked token: a stop with the token's cause, exit 1, nothing written", badKey.code === 1 && /stop (token_rejected|access_denied):/.test(verdictOf(badKey)) && badKey.payload == null, verdictOf(badKey));
+  // Not a lower number, and not a quiet one: a rename of a heading on the quote log is a stop, never a read as the form layout.
+  ss.reset([{ ...quoteSheet(), columns: RFQ_COLS.map((c) => (c.title === "RFQ Source" ? { ...c, title: "Channel" } : c)) }, formSheet()]);
+  const noSource = await run();
+  check("e2e: the quote log with its source heading renamed is a stop, never read as the form layout (that would count every customer as ours)", noSource.code === 1 && /^TRACKER-FEED franklin-brazing stop (headers_missing|lead_list_only)/.test(verdictOf(noSource)) && noSource.payload == null, verdictOf(noSource));
 
   // Both failing
   ss.reset([{ ...quoteSheet(), columns: RFQ_COLS.map((c) => (c.title === "Amount" ? { ...c, title: "Total" } : c)) }, { ...formSheet(), columns: FORM_COLS.map((c) => (c.title === "Order value ($)" ? { ...c, title: "Deal total" } : c)) }]);
   const none = await run();
-  check("e2e: both sheets failing: a stop, exit 1, nothing handed to the dashboard", none.code === 1 && /stop headers_missing/.test(verdictOf(none)) && none.payload == null, verdictOf(none));
+  check("e2e: both sheets failing: a stop, exit 1, nothing handed to the dashboard, and it says how many", none.code === 1 && /stop headers_missing: 2 sheets could not be read\. /.test(verdictOf(none)) && none.payload == null, verdictOf(none));
+
+  // A day with nothing new: the same sheets read again write the same figures.
+  ss.reset([quoteSheet(), formSheet()]);
+  const day1 = await run(), day2 = await run();
+  const figures = (r: Run) => JSON.stringify((r.payload?.syncs ?? []).map((x: any) => [x.external_id, x.period_start, x.period_end, x.metrics["manual.revenue_system_cents"] ?? null, x.metrics["manual.tracker_won_deals"] ?? null]).sort());
+  const strip = (r: Run) => { const x = summaryOf(r); if (x) { delete x.readAt; for (const sh of x.sheets ?? []) delete sh.readAt; } return JSON.stringify(x); };
+  check("e2e: a second run with nothing new writes the same months and the same figure (idempotent: it re-states, it does not add)", day1.code === 0 && day2.code === 0 && figures(day1) === figures(day2) && figures(day1).length > 40 && revenueOf(day1) === revenueOf(day2), [revenueOf(day1), revenueOf(day2)]);
+  check("e2e: ... and the same summary apart from the time it was read", strip(day1) === strip(day2) && strip(day1) !== "null");
+  // A sale added to the form sheet, also on the quote log by email, does not move the total.
+  const added = await (async () => { ss.reset([quoteSheet(), formSheet([...FORMS, { email: "e1@example.test", gclid: GCLIDS[0], value: 10_000, won: ago(10), ts: ago(39) }])]); return run(); })();
+  check("e2e: the same sale typed a second time on the form sheet changes nothing about the total", revenueOf(added) === revenueOf(day1) || /could_be_same|ambiguous/.test(JSON.stringify(summaryOf(added)?.pending ?? [])), [revenueOf(added), revenueOf(day1)]);
 
   // One sheet configured: exactly the old behaviour
   ss.reset([quoteSheet(), formSheet()]);

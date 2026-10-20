@@ -16,7 +16,7 @@ export const CAUSE_CODES = [
   "key_missing", "key_unreadable", "key_rejected", "access_removed", "sheet_in_bin", "tab_missing",
   "headers_missing", "headers_duplicate", "lead_list_only", "sheet_empty", "sheet_too_long", "rows_incomplete",
   "rate_limited", "source_unavailable", "rows_refused", "other_status", "access_too_wide", "check_crashed",
-  "one_sheet_stopped", "sheets_disagree",
+  "sheets_disagree",
 ] as const;
 export type CauseCode = (typeof CAUSE_CODES)[number];
 export type Level = "stop" | "warn";
@@ -101,12 +101,6 @@ export const FINDINGS = {
   },
   other_status: (n: number): Finding => ({ code: "other_status", level: "warn", who: "us", line: `${n} row${n === 1 ? " has" : "s have"} a status this job does not recognise, so ${n === 1 ? "it is" : "they are"} counted nowhere.`, steps: ["Use Won for a win, or add the new status word to the known words in src/tracker/config.ts."] }),
   access_too_wide: (level: string): Finding => ({ code: "access_too_wide", level: "warn", who: "us", line: `The integration user has ${level.toLowerCase()} access to this sheet. Viewer is enough, and this job only reads.`, steps: ["Change the share to Viewer so a mistake here could never edit the sheet."] }),
-  /** Several sheets are set and some could not be read. The ones that could are counted; the others' wins are left out until they can be. */
-  one_sheet_stopped: (stopped: readonly { label: string; cause: string }[], read: readonly string[]): Finding => ({
-    code: "one_sheet_stopped", level: "warn", who: "us",
-    line: `${stopped.map((s) => `${s.label} (${s.cause})`).join(" and ")} could not be read, so its wins are left out of this figure until it can be. ${read.join(" and ")} ${read.length === 1 ? "was" : "were"} read.`.slice(0, 400),
-    steps: ["Read that sheet's own line above for the cause and its steps, fix it, then run this again.", "Run with diagnose set to true to list the headings that sheet has."],
-  }),
   /** Two sheets hold rows that may be the same sale and the sheets do not prove it. */
   sheets_disagree: (conflicts: number, held: number): Finding => ({
     code: "sheets_disagree", level: "warn", who: "either",

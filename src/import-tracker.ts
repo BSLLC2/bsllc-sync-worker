@@ -4,7 +4,7 @@ import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { TRACKER_CONFIGS, resolveConfig, countedFromNote, sheetRefsOf, type TrackerConfig } from "./tracker/config.js";
 import { FINDINGS, hasStop, lineFor, worstLine, type Finding } from "./tracker/causes.js";
 import { buildFeedEntries, buildFeedSummary, readRows, type RowItem } from "./tracker/reading.js";
-import { buildMergedSummary, mergeSheets, sheetLabels, type SheetRead, type SheetStopped } from "./tracker/merge.js";
+import { buildMergedSummary, mergeSheets, sheetLabels, type SheetRead } from "./tracker/merge.js";
 import { resolveLayouts } from "./tracker/table.js";
 import { openSource } from "./tracker/source.js";
 import { diagnoseLines } from "./tracker/diagnose.js";
@@ -89,27 +89,31 @@ async function many(cfg: TrackerConfig, refs: string[], o: { dryRun: boolean; di
       : `TRACKER-FEED ${cfg.clientSlug} ok: diagnose found every needed heading on all ${refs.length} sheets (${labels.join(", ")}).`;
     return { line, findings: [] };
   }
-  if (readOnes.length === 0) {
-    // Nothing could be read: a stop with the first sheet's cause, as one sheet would be.
-    const first = stopFindings[0]!;
-    return { line: lineFor(cfg.clientSlug, [first], null), findings: stopFindings };
+  if (stops.length > 0) {
+    // ONE SHEET THAT CANNOT BE READ HOLDS THE WHOLE READ. A figure built from the sheets that did read would silently lose every
+    // sale that is only on the sheet that did not, and each month's newest row wins, so the loss would reach the page as a
+    // lower number. Nothing is written: the last good figures of both sheets stand, and the line names the sheet and its own cause
+    // (the cause is the sheet's, so "not connected" stays not connected and the prompt can ask for the right thing).
+    for (const x of readOnes) console.log(`${labels[x.index]}: read, ${x.reading.rows} rows. Not recorded, because the other sheet could not be read.`);
+    const first = stops[0]!;
+    const many2 = stops.length > 1 ? `${stops.length} sheets could not be read. ` : "";
+    const held: Finding = { ...first.finding!, level: "stop", line: `${many2}${labels[first.index]}: ${first.finding!.line}` };
+    console.log("Nothing was written, so the figures on the dashboard are from the last read in which every sheet could be read.");
+    return { line: lineFor(cfg.clientSlug, [held], null), findings: [held, ...stopFindings.slice(1)] };
   }
 
   const now = new Date().toISOString();
   const reads: SheetRead[] = readOnes.map((r) => ({ index: r.index, layout: r.layout, label: labels[r.index]!, reading: r.reading, items: r.items, readAt: now, editedAt: r.edited, columns: r.columns }));
-  const stoppedSheets: SheetStopped[] = stops.map((r) => ({ index: r.index, label: labels[r.index]!, cause: r.finding!.code, line: r.finding!.line.slice(0, 300) }));
-  const merged = mergeSheets(reads, stoppedSheets, cfg, o.today);
+  const merged = mergeSheets(reads, [], cfg, o.today);
   const r = merged.reading;
 
   const warns: Finding[] = [];
-  if (stops.length) warns.push(FINDINGS.one_sheet_stopped(stops.map((s) => ({ label: labels[s.index]!, cause: s.finding!.code })), readOnes.map((x) => labels[x.index]!)));
   if (merged.merge.conflicts.length || merged.merge.couldBeSame.length) warns.push(FINDINGS.sheets_disagree(merged.merge.conflicts.length, merged.merge.couldBeSame.length));
   if (r.problems.length) warns.push(FINDINGS.rows_refused(r.problems));
   if (r.otherStatus) warns.push(FINDINGS.other_status(r.otherStatus));
   for (const x of readOnes) if (x.accessLevel && !["VIEWER", "COMMENTER"].includes(x.accessLevel.toUpperCase())) { warns.push(FINDINGS.access_too_wide(x.accessLevel)); break; }
 
   for (const s of merged.sheets) {
-    if (s.state === "stopped") { console.log(`${s.label}: not read (${s.cause}).`); continue; }
     console.log(`${s.label}: ${s.rows} rows, ${s.ourRows} ours, ${s.wins} won in the combined figure (${s.onBoth} also on the other sheet), ${s.held} held as could-be-the-same, ${s.pending} pending, ${s.refused} refused. ${s.sheetEditedAt ? `Last modified ${s.sheetEditedAt}.` : "Modified time not available."}`);
   }
   console.log(`Merged: ${merged.merge.sameOnBoth} deal${merged.merge.sameOnBoth === 1 ? "" : "s"} on both sheets counted once, ${merged.merge.inSeed} already in the entered figure, ${merged.merge.conflicts.length} with different amounts or dates, ${merged.merge.couldBeSame.length} held as could-be-the-same.`);
