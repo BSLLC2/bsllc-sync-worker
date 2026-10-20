@@ -82,6 +82,14 @@ export interface TrackerConfig {
    * numeric id or a link (parseSheetRef). Not printed in any log.
    */
   sheetId: string | null;
+  /**
+   * Every sheet this client's tracker reads, in the order given (the first is `sheetId`). One entry, or none, is
+   * today's one-sheet behaviour exactly. More than one makes a merged read (src/tracker/merge.ts). Set by
+   * resolveConfig from the repository variables; never committed.
+   */
+  sheetIds?: readonly string[];
+  /** What the sheets are called together in a sentence, when there are several. Null: the single label is used. */
+  multiSheetLabel?: string | null;
   /** Google tab name; unused for Smartsheet. */
   tab: string | null;
   /** Who keeps and updates the sheet. Unknown for Franklin, so it is "us" until somebody says. */
@@ -121,6 +129,7 @@ export const FRANKLIN: TrackerConfig = {
   clientSlug: "franklin-brazing",
   clientName: "Franklin Brazing",
   sheetLabel: "Franklin Brazing's RFQ and quote log",
+  multiSheetLabel: "Franklin Brazing's quote log and ad form sheet",
   source: "smartsheet",
   sheetId: null,
   tab: null,
@@ -132,7 +141,7 @@ export const FRANKLIN: TrackerConfig = {
     {
       name: "form_submissions",
       ourSourceValues: [],
-      requireAny: ["form name", "form id", "entry id", "submission id", "form entry id", "timestamp", "submitted at", "submission time", "date submitted", "submission date", "form submitted"],
+      requireAny: ["form name", "form id", "entry id", "submission id", "form entry id", "timestamp", "submitted at", "submission time", "date submitted", "submission date", "form submitted", "gclid", "google click id", "click id", "google ads click id", "created", "created date", "date created", "created on"],
       refuseIfAny: ["rfq", "rfq number", "rfq no", "rfq id", "rfq date", "rfq status", "rfq source", "quote number", "quote no", "quote id", "quote status", "lead source", "source", "campaign", "origin", "award date", "po date", "po amount"],
       roles: {
         status: { required: true, aliases: ["status", "outcome", "result", "won", "closed won", "won lost", "converted", "deal status", "disposition"] },
@@ -259,16 +268,36 @@ export function resolveConfig(base: TrackerConfig, env: Env = process.env): Trac
   const k = upper(base.key);
   const src = env[`TRACKER_${k}_SOURCE`]?.trim().toLowerCase();
   const kept = env[`TRACKER_${k}_KEPT_BY`]?.trim().toLowerCase();
+  const first = (env[`TRACKER_${k}_SHEET_ID`] ?? env[`${k}_TRACKER_SHEET`])?.trim() || "";
+  const sheetIds = sheetRefsFromEnv(k, first, env);
   return {
     ...base,
     source: src === "smartsheet" || src === "google_sheet" ? src : base.source,
-    sheetId: (env[`TRACKER_${k}_SHEET_ID`] ?? env[`${k}_TRACKER_SHEET`])?.trim() || base.sheetId,
+    sheetId: first || base.sheetId,
+    sheetIds: sheetIds.length ? sheetIds : base.sheetId ? [base.sheetId] : [],
     tab: env[`TRACKER_${k}_TAB`]?.trim() || base.tab,
     keptBy: kept === "client" || kept === "us" ? kept : base.keptBy,
     rowLimit: /^\d{2,6}$/.test(env[`TRACKER_${k}_ROW_LIMIT`]?.trim() ?? "") ? Number(env[`TRACKER_${k}_ROW_LIMIT`]) : base.rowLimit,
     countedFrom: countedFromOf(base, env),
   };
 }
+
+/**
+ * Every sheet the deployment names, first sheet first, no repeats. Sources, in order: the first-sheet variable, then
+ * <KEY>_TRACKER_SHEET_2, then a comma (or space) separated <KEY>_TRACKER_SHEETS list. With only the first set this is
+ * exactly [first], which is today's one-sheet behaviour.
+ */
+export function sheetRefsFromEnv(upperKey: string, first: string, env: Env): string[] {
+  const out: string[] = [];
+  const add = (v: string | undefined) => { const t = (v ?? "").trim(); if (t && !out.includes(t)) out.push(t); };
+  add(first);
+  add(env[`${upperKey}_TRACKER_SHEET_2`]);
+  for (const part of (env[`${upperKey}_TRACKER_SHEETS`] ?? "").split(/[\s,]+/)) add(part);
+  return out;
+}
+/** The sheet values a config names, whichever way they were set. */
+export const sheetRefsOf = (cfg: Pick<TrackerConfig, "sheetId" | "sheetIds">): string[] =>
+  cfg.sheetIds && cfg.sheetIds.length ? [...cfg.sheetIds] : cfg.sheetId ? [cfg.sheetId] : [];
 
 /** The first counted day. A typed start on or before the seed's last day would count the same wins twice, so it is ignored. */
 function countedFromOf(base: TrackerConfig, env: Env): string {

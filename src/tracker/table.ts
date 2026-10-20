@@ -141,3 +141,31 @@ export function safeLabel(v: string): string | null {
   if (!t || t.length > 20 || !/\d/.test(t) || t.split(" ").length > 2) return null;
   return /^[A-Za-z0-9#._\-/ ]+$/.test(t) ? t : null;
 }
+
+// ── Identifiers, for matching one deal across two sheets ─────────────────────
+// These exist only so the same deal on two sheets is counted once. They are
+// compared in memory and never stored, printed or sent anywhere.
+
+/** An email, lower-cased and trimmed; null unless it has an @ and a dot after it. */
+export function normEmail(v: unknown): string | null {
+  let s = String(v ?? "").trim().toLowerCase();
+  s = s.replace(/^mailto:/, "").replace(/^<|>$/g, "").trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s) ? s : null;
+}
+/** The last ten digits of a phone number; null with fewer than ten digits or a run of one digit. */
+export function phoneKey(v: unknown): string | null {
+  const d = String(v ?? "").replace(/\D+/g, "");
+  if (d.length < 10) return null;
+  const last = d.slice(-10);
+  return /^(\d)\1{9}$/.test(last) ? null : last;
+}
+/** A quote or RFQ number, letters and digits only; null without a digit. */
+export function quoteKey(v: unknown): string | null {
+  const s = String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return s && /\d/.test(s) ? s : null;
+}
+/** A name folded for comparison; null under four letters. Used only to FLAG a possible repeat, never to merge. */
+export function nameKey(v: unknown): string | null {
+  const s = String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return s.replace(/ /g, "").length >= 4 ? s : null;
+}

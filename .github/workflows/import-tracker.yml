@@ -39,6 +39,10 @@ on:
         description: "Optional: the sheet's link or id, for this run only. Normally leave blank and set the FRANKLIN_TRACKER_SHEET variable."
         required: false
         default: ""
+      sheet2:
+        description: "Optional: the second sheet's link or id, for this run only. Normally leave blank and set the FRANKLIN_TRACKER_SHEET_2 variable."
+        required: false
+        default: ""
 
 concurrency:
   group: import-tracker
@@ -82,6 +86,10 @@ jobs:
           DASHBOARD_DIR: ${{ github.workspace }}/dashboard
           # The sheet is a variable (or, if you prefer, a secret of the same name), never a committed value.
           FRANKLIN_TRACKER_SHEET: ${{ inputs.sheet || vars.FRANKLIN_TRACKER_SHEET || secrets.FRANKLIN_TRACKER_SHEET }}
+          # A client with a second sheet (Franklin: the ad form sheet): its own variable, read after the first.
+          # List the quote log first. FRANKLIN_TRACKER_SHEETS (a comma list) also works for three or more.
+          FRANKLIN_TRACKER_SHEET_2: ${{ inputs.sheet2 || vars.FRANKLIN_TRACKER_SHEET_2 || secrets.FRANKLIN_TRACKER_SHEET_2 }}
+          FRANKLIN_TRACKER_SHEETS: ${{ vars.FRANKLIN_TRACKER_SHEETS || secrets.FRANKLIN_TRACKER_SHEETS }}
           TRACKER_FRANKLIN_SOURCE: ${{ vars.TRACKER_FRANKLIN_SOURCE }}
           TRACKER_FRANKLIN_KEPT_BY: ${{ vars.TRACKER_FRANKLIN_KEPT_BY }}
           TRACKER_FRANKLIN_COUNTED_FROM: ${{ vars.TRACKER_FRANKLIN_COUNTED_FROM }}
@@ -92,6 +100,8 @@ jobs:
         run: |
           # Keep the sheet value out of the log even if something prints it.
           if [ -n "$FRANKLIN_TRACKER_SHEET" ]; then echo "::add-mask::$FRANKLIN_TRACKER_SHEET"; fi
+          if [ -n "$FRANKLIN_TRACKER_SHEET_2" ]; then echo "::add-mask::$FRANKLIN_TRACKER_SHEET_2"; fi
+          for S in $(echo "$FRANKLIN_TRACKER_SHEETS" | tr ',' ' '); do echo "::add-mask::$S"; done
           ARGS=""
           case "$CLIENT" in *[!a-z0-9-]*) echo "The client must be lowercase letters, digits and dashes."; exit 1 ;; esac
           if [ -n "$CLIENT" ]; then ARGS="$ARGS --client=$CLIENT"; fi

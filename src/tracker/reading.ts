@@ -23,13 +23,30 @@
  */
 import { type RoleName, type TrackerConfig } from "./config.js";
 import { normHeader } from "./config.js";
-import { isClickId, parseAmountCents, parseDay, safeLabel, type RoleFound, type Table } from "./table.js";
+import { isClickId, nameKey, normEmail, parseAmountCents, parseDay, phoneKey, quoteKey, safeLabel, type RoleFound, type Table } from "./table.js";
 
-export interface Deal { row: number; label: string; closed: string; cents: number; gclid: string | null; clickOn: string | null }
-export type PendingWhy = "no_status" | "window_flag_missing" | "source_blank";
-export interface PendingRow extends Deal { why: PendingWhy }
+export interface Deal {
+  row: number; label: string; closed: string; cents: number; gclid: string | null; clickOn: string | null;
+  /** Merged reads only: which sheet (0-based, in the order configured) this row is on, and any other sheet it is also on. */
+  sheet?: number; alsoOn?: number[];
+}
+export type PendingWhy = "no_status" | "window_flag_missing" | "source_blank" | "could_be_same";
+export interface PendingRow extends Deal { why: PendingWhy; /** could_be_same only: the label of the counted row it looks like. */ like?: string }
 export type ProblemWhy = "won_no_amount" | "won_no_date" | "won_before_window" | "won_future_date";
-export interface Problem { row: number; why: ProblemWhy }
+export interface Problem { row: number; why: ProblemWhy; /** Merged reads only: the sheet (0-based) the row is on. */ sheet?: number }
+
+/**
+ * One row that matters when two sheets are read together. Held in memory for the merge and NEVER written or printed:
+ * it carries the identifiers the rows are matched on.
+ */
+export type ItemKind = "counted" | "pending" | "no_amount" | "no_date" | "before_feed";
+export interface RowItem {
+  sheet: number; row: number; label: string; kind: ItemKind; layout: string;
+  closed: string | null; cents: number | null; gclid: string | null; first: string | null;
+  pendingWhy: PendingWhy | null;
+  email: string | null; phone: string | null; quote: string | null; name: string | null;
+  hasEmail: boolean; hasPhone: boolean; hasFormId: boolean; badClick: boolean;
+}
 
 export interface FunnelMonth { month: string; leads: number; adClickLeads: number | null; calls: number | null; forms: number | null; won: number; wonCents: number }
 export interface ClosedMonth { month: string; deals: number; cents: number; feeDeals: number; feeCents: number }
@@ -80,7 +97,7 @@ export function leadKind(v: string): "call" | "form" | "other" {
   return "other";
 }
 
-export function readRows(table: Table, found: Partial<Record<RoleName, RoleFound>>, cfg: TrackerConfig, opts: { today: string }): Reading {
+export function readRows(table: Table, found: Partial<Record<RoleName, RoleFound>>, cfg: TrackerConfig, opts: { today: string; collect?: { sheet: number; items: RowItem[] } }): Reading {
   const won = new Set(cfg.wonValues.map(normHeader));
   const notWon = new Set(cfg.knownNotWonValues.map(normHeader));
   const ours = new Set(cfg.ourSourceValues.map(normHeader));
@@ -137,6 +154,17 @@ export function readRows(table: Table, found: Partial<Record<RoleName, RoleFound
     const gclid = rawClick && isClickId(rawClick) ? rawClick : null;
     const flagOk = found.confirmFlag ? normHeader(cellOf(row, found.confirmFlag)) === "yes" : true;
     const mk = (): Deal => ({ row: n, label, closed: closed as string, cents: cents as number, gclid, clickOn: first });
+    // For a merged read of several sheets: keep what the merge matches on, in memory only.
+    const item = (kind: ItemKind, pendingWhy: PendingWhy | null = null) => {
+      const c = opts.collect;
+      if (!c) return;
+      const email = cellOf(row, found.email), phone = cellOf(row, found.phone);
+      c.items.push({
+        sheet: c.sheet, row: n, label, kind, layout: cfg.layoutName, closed, cents, gclid, first, pendingWhy,
+        email: normEmail(email), phone: phoneKey(phone), quote: cfg.layoutName === "rfq_log" ? quoteKey(labelCell) : null, name: nameKey(cellOf(row, found.name)),
+        hasEmail: !!email, hasPhone: !!phone, hasFormId: !!cellOf(row, found.formId), badClick: !gclid && !!rawClick,
+      });
+    };
 
     if (isWon) {
       if (seed != null) {
@@ -146,28 +174,30 @@ export function readRows(table: Table, found: Partial<Record<RoleName, RoleFound
             beforeFeed.deals++;
             if (cents == null) beforeFeed.noAmount++; else beforeFeed.cents += cents;
             if (!beforeFeed.newest || closed > beforeFeed.newest) beforeFeed.newest = closed;
+            item("before_feed");
           } else beforeSeed++;
           continue;
         }
-        if (cents == null) { problems.push({ row: n, why: "won_no_amount" }); continue; }
-        if (!closed) { problems.push({ row: n, why: "won_no_date" }); continue; }
+        if (cents == null) { problems.push({ row: n, why: "won_no_amount" }); item("no_amount"); continue; }
+        if (!closed) { problems.push({ row: n, why: "won_no_date" }); item("no_date"); continue; }
         if (closed > opts.today) { problems.push({ row: n, why: "won_future_date" }); continue; }
       } else {
-        if (cents == null) { problems.push({ row: n, why: "won_no_amount" }); continue; }
-        if (!closed) { problems.push({ row: n, why: "won_no_date" }); continue; }
+        if (cents == null) { problems.push({ row: n, why: "won_no_amount" }); item("no_amount"); continue; }
+        if (!closed) { problems.push({ row: n, why: "won_no_date" }); item("no_date"); continue; }
         if (closed > opts.today) { problems.push({ row: n, why: "won_future_date" }); continue; }
         if (closed < cfg.countedFrom) { problems.push({ row: n, why: "won_before_window" }); continue; }
       }
-      if (hasSource && !sourceOk) { pending.push({ ...mk(), why: "source_blank" }); continue; }
-      if (!flagOk) { pending.push({ ...mk(), why: "window_flag_missing" }); continue; }
+      if (hasSource && !sourceOk) { pending.push({ ...mk(), why: "source_blank" }); item("pending", "source_blank"); continue; }
+      if (!flagOk) { pending.push({ ...mk(), why: "window_flag_missing" }); item("pending", "window_flag_missing"); continue; }
       counted.push(mk());
+      item("counted");
       if (gclid) keys.withClickId++; else if (rawClick) keys.badClickId++;
       if (cellOf(row, found.email)) keys.withEmail++;
       if (cellOf(row, found.phone)) keys.withPhone++;
       if (cellOf(row, found.formId)) keys.withFormId++;
       if (!gclid && !cellOf(row, found.email) && !cellOf(row, found.phone) && !cellOf(row, found.formId) && cellOf(row, found.name)) keys.nameOnly++;
     } else if (statusNorm === "") {
-      if (cfg.blankStatusPending && sourceOk && closed && cents != null && closed >= cfg.countedFrom && closed <= opts.today) pending.push({ ...mk(), why: "no_status" });
+      if (cfg.blankStatusPending && sourceOk && closed && cents != null && closed >= cfg.countedFrom && closed <= opts.today) { pending.push({ ...mk(), why: "no_status" }); item("pending", "no_status"); }
     } else if (!notWon.has(statusNorm)) otherStatus++;
   }
 
@@ -202,8 +232,46 @@ export function readRows(table: Table, found: Partial<Record<RoleName, RoleFound
 /** Counted rows kept in the stored summary. A sheet with more keeps the newest. */
 export const COUNTED_LISTED_MAX = 1_500;
 
+/** What one sheet contributed to a merged read. Counts, labels and headings only. */
+export interface SheetSummary {
+  index: number;
+  /** "Quote / RFQ sheet", "Ad form sheet" or "Sheet 2". */
+  label: string;
+  layout: string | null;
+  state: "read" | "stopped";
+  /** A cause code, when stopped. */
+  cause: string | null;
+  /** The worker's own sentence, when stopped. */
+  line: string | null;
+  readAt: string | null;
+  sheetEditedAt: string | null;
+  rows: number;
+  ourRows: number;
+  /** Counted deals in the combined figure that this sheet carries, including the ones also on another sheet. */
+  wins: number;
+  /** Of those, the ones also on another sheet. */
+  onBoth: number;
+  /** Rows held as "could be the same deal as a row on the other sheet". */
+  held: number;
+  pending: number;
+  refused: number;
+  newestClosed: string | null;
+  columns: Record<string, string>;
+}
+export interface MergeSummary {
+  /** Deals proved to be the same sale on two sheets and counted once. */
+  sameOnBoth: number;
+  /** The same sale on another sheet as one the entered figure already holds: not counted again. */
+  inSeed: number;
+  /** Matched deals whose sheets disagree: counted at the lower amount and the later date. */
+  conflicts: { label: string; sheet: number; kind: "amount" | "date" | "both" }[];
+  /** Rows held pending: they look like a row on an earlier sheet and nothing proves it. Labels only. */
+  couldBeSame: { label: string; sheet: number; like: string; likeSheet: number }[];
+}
+
 export interface FeedSummary {
-  v: 1;
+  /** 1: one sheet. 2: several sheets read together (sheets and merge are present). */
+  v: 1 | 2;
   kind: "feed";
   key: string;
   readAt: string;
@@ -238,6 +306,9 @@ export interface FeedSummary {
   keys: KeyCoverage;
   /** Which heading each role was read from. Headings only, never a cell. */
   columns: Partial<Record<RoleName, string>>;
+  /** v2 only. */
+  sheets?: SheetSummary[];
+  merge?: MergeSummary;
 }
 
 export function buildFeedSummary(
