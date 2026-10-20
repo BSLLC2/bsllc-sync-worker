@@ -233,7 +233,8 @@
     "verify-alert-reminder": "tsx src/verify-alert-reminder.ts",
     "verify-reply-to": "tsx src/verify-reply-to.ts",
     "integrus-research": "tsx src/integrus-research.ts",
-    "pcc-research": "tsx src/pcc-research.ts"
+    "pcc-research": "tsx src/pcc-research.ts",
+    "dfs-ranked-urls": "tsx src/dfs-ranked-urls.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
