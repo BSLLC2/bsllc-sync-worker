@@ -81,6 +81,27 @@ async function main() {
   console.log("\nQuote log rows by status, tag and form match (count, total quote value):");
   for (const k of [...table.keys()].sort()) { const b = table.get(k)!; console.log(`  ${k}: ${b.n} rows, $${Math.round(b.amt)}`); }
 
+
+  // The form sheet's own columns: outcomes, spam, months, sources. Aggregates only, never a cell of free text.
+  const fc = (name: string) => fH.indexOf(fold(name));
+  const cnt = (vals: string[]) => { const m = new Map<string, number>(); for (const v of vals) { const k = v.trim() || "(blank)"; m.set(k, (m.get(k) ?? 0) + 1); } return [...m].sort((a, b) => b[1] - a[1]); };
+  const fStatus = fc("status"), fSpam = fc("spam"), fSub = fc("submitted on"), fVal = fc("notes value"), fSrc = fc("utm source"), fMed = fc("utm medium");
+  console.log("\nForm sheet columns:");
+  if (fStatus >= 0) console.log(`  Status values: ${cnt(f.rows.map((r) => r[fStatus] ?? "")).slice(0, 12).map(([k, v]) => `${k}=${v}`).join(" | ")}`);
+  if (fSpam >= 0) console.log(`  SPAM column: ${cnt(f.rows.map((r) => r[fSpam] ?? "")).slice(0, 6).map(([k, v]) => `${k}=${v}`).join(" | ")}`);
+  if (fSrc >= 0) console.log(`  utm_source: ${cnt(f.rows.map((r) => r[fSrc] ?? "")).slice(0, 8).map(([k, v]) => `${k}=${v}`).join(" | ")}`);
+  if (fMed >= 0) console.log(`  utm_medium: ${cnt(f.rows.map((r) => r[fMed] ?? "")).slice(0, 8).map(([k, v]) => `${k}=${v}`).join(" | ")}`);
+  if (fVal >= 0) { const filled = f.rows.filter((r) => (r[fVal] ?? "").trim() !== ""); const nums = filled.map((r) => num(r[fVal] ?? "")).filter((x): x is number => x != null); console.log(`  Notes/Value: filled ${filled.length}/${f.rows.length}, readable as a number ${nums.length}, total ${Math.round(nums.reduce((a, b) => a + b, 0))}`); }
+  if (fSub >= 0) { const mm = new Map<string, number>(); const gm = new Map<string, number>(); f.rows.forEach((r) => { const m = month(r[fSub] ?? ""); if (!m) return; mm.set(m, (mm.get(m) ?? 0) + 1); if (fClick.some((c) => (r[c] ?? "").trim() !== "")) gm.set(m, (gm.get(m) ?? 0) + 1); }); console.log(`  Leads by month: ${[...mm].sort().map(([m, n]) => `${m}:${n}`).join(" ")}`); console.log(`  with a click id by month: ${[...gm].sort().map(([m, n]) => `${m}:${n}`).join(" ")}`); }
+  // Outcome recorded on the form sheet itself, split by whether the same person is in the quote log as won.
+  if (fStatus >= 0) {
+    const qWonEmails = new Set<string>();
+    q.rows.forEach((r) => { if (stat(r) === "won") for (const c of qEmail) { const k = emailKey(r[c] ?? ""); if (k) qWonEmails.add(k); } });
+    const won = f.rows.filter((r) => /won|closed|sold|customer/.test(fold(r[fStatus] ?? "")));
+    const wonIn = won.filter((r) => fEmail.some((c) => { const k = emailKey(r[c] ?? ""); return !!k && qWonEmails.has(k); }));
+    console.log(`  Form rows whose Status reads won/closed/sold/customer: ${won.length}; of those the same email is a won row in the quote log: ${wonIn.length}.`);
+  }
+
   const cand = [...table].filter(([k]) => /not tagged \| matches/.test(k) && /^(won|verbally awarded|quote sent)/.test(k));
   console.log("\nCANDIDATES (a person in the form sheet who is in the quote log but not tagged as ours):");
   for (const [k, b] of cand) console.log(`  ${k}: ${b.n} rows, $${Math.round(b.amt)}; RFQ months ${[...b.months].sort().map(([m, n]) => `${m}:${n}`).join(" ") || "n/a"}`);
