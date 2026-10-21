@@ -483,6 +483,10 @@ function contract() {
   check("package: the importer and this guard are npm scripts", /"import-tracker"/.test(pkg) && /"verify-tracker"/.test(pkg));
   const seed = readFileSync(new URL("./oneoff-seed-franklin-revenue.ts", import.meta.url), "utf8");
   check("seed: the one-off imports its figures from the tracker config, so the two cannot disagree", /from "\.\/tracker\/config\.js"/.test(seed) && /const AS_OF = FRANKLIN_SEED_AS_OF;/.test(seed) && !/"2025-12-30"/.test(seed.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")));
+  const cs = readFileSync(new URL("./oneoff-set-franklin-contract-start.ts", import.meta.url), "utf8");
+  const csWf = readFileSync(join(wfDir, "oneoff-set-franklin-contract-start.yml"), "utf8");
+  check("contract start: the one-off takes its date from the tracker config, defaults to a dry run, finds the account by exact name and changes it only if unchanged since it was read", /FRANKLIN_CONTRACT_START/.test(cs) && !/"2023-12-15"/.test(cs.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")) && /arg\("dry-run", "true"\) !== "false"/.test(cs) && /lower\(btrim\(name\)\) = 'franklin brazing'/.test(cs) && /IS NOT DISTINCT FROM/.test(cs) && /visible_to_client[\s\S]*false/.test(cs));
+  check("contract start: its workflow defaults to a dry run and holds the database secret only", /default: "true"/.test(csWf) && /DATABASE_URL: \$\{\{ secrets\.DATABASE_URL \}\}/.test(csWf) && /oneoff-set-franklin-contract-start/.test(csWf) && !/GOOGLE|SMARTSHEET/.test(csWf));
   check("seed: the evidence note is written only if absent", /revenue_basis_note/.test(seed) && /COALESCE\(NULLIF\(btrim\(revenue_basis_note\)/.test(seed) && !/revenue_basis_note = \$3 WHERE/.test(seed));
 }
 

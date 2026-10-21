@@ -102,6 +102,7 @@
     "debug-och-unnamed-inquiries": "tsx src/debug-och-unnamed-inquiries.ts",
     "debug-och-monthly-check": "tsx src/debug-och-monthly-check.ts",
     "oneoff-seed-franklin-revenue": "tsx src/oneoff-seed-franklin-revenue.ts",
+    "oneoff-set-franklin-contract-start": "tsx src/oneoff-set-franklin-contract-start.ts",
     "oneoff-seed-dpg-tracker": "tsx src/oneoff-seed-dpg-tracker.ts",
     "debug-d365-won-deal-stats": "tsx src/debug-d365-won-deal-stats.ts",
     "seed-data-readiness-project": "tsx src/seed-data-readiness-project.ts",
