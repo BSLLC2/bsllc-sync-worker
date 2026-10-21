@@ -18,7 +18,7 @@
     "verify-och-sheet": "tsx src/verify-och-sheet.ts",
     "import-dpg-tracker": "tsx src/import-dpg-tracker.ts",
     "import-tracker": "tsx src/import-tracker.ts",
-    "verify-tracker": "tsx src/verify-tracker.ts && tsx src/verify-tracker-merge.ts",
+    "verify-tracker": "tsx src/verify-tracker.ts && tsx src/verify-tracker-merge.ts && tsx src/verify-tracker-leads.ts",
     "verify-dpg-tracker": "tsx src/verify-dpg-tracker.ts",
     "verify-och-e2e": "tsx src/verify-och-e2e.ts",
     "import-web-inquiries": "tsx src/import-web-inquiries.ts",

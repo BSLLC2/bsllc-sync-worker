@@ -19,6 +19,23 @@
  * the sheet has and which role found its column.
  */
 
+/** What the lead (ad form) sheet's headings are called. Compared folded. */
+export interface LeadMatchSpec {
+  roles: { submittedOn: readonly string[]; email: readonly string[]; spam: readonly string[]; clickIds: readonly string[] };
+  /** Status words (folded) that mean the quote is still open. A status in none of the lists is not a candidate. */
+  openStatuses: readonly string[];
+}
+
+export const FRANKLIN_LEAD_MATCH: LeadMatchSpec = {
+  roles: {
+    submittedOn: ["submitted on", "submitted at", "submission date", "date submitted", "timestamp", "created at", "created on", "date created", "form submitted"],
+    email: ["email", "e mail", "email address", "contact email"],
+    spam: ["spam", "spam flag", "is spam", "marked spam", "spam check"],
+    clickIds: ["gclid", "gbraid", "wbraid", "fbclid", "msclkid", "google click id", "click id"],
+  },
+  openStatuses: ["quote sent", "quoted", "open", "pending", "in progress", "submitted", "new", "active", "rfq received", "quote in progress"],
+};
+
 export type SourceKind = "smartsheet" | "google_sheet";
 export type KeptBy = "us" | "client";
 
@@ -90,6 +107,14 @@ export interface TrackerConfig {
   sheetIds?: readonly string[];
   /** What the sheets are called together in a sentence, when there are several. Null: the single label is used. */
   multiSheetLabel?: string | null;
+  /**
+   * An optional LEAD sheet (Franklin: the ad form sheet), read ONLY to find quote-log rows that match a real lead but are not
+   * tagged ours (src/tracker/lead-match.ts). It is not one of `sheetIds`: it is never merged and never counts a sale, and a
+   * lead sheet that cannot be read stops nothing. Set by resolveConfig from <KEY>_TRACKER_LEAD_SHEET; never committed.
+   */
+  leadSheetId?: string | null;
+  /** The lead sheet's heading names. Absent: this client has no lead-match reading. */
+  leadMatch?: LeadMatchSpec;
   /** Google tab name; unused for Smartsheet. */
   tab: string | null;
   /** Who keeps and updates the sheet. Franklin's is the client's own record, and the client has confirmed it. */
@@ -144,6 +169,7 @@ export const FRANKLIN: TrackerConfig = {
   clientName: "Franklin Brazing",
   sheetLabel: "Franklin Brazing's RFQ and quote log",
   multiSheetLabel: "Franklin Brazing's quote log and ad form sheet",
+  leadMatch: FRANKLIN_LEAD_MATCH,
   source: "smartsheet",
   sheetId: null,
   tab: null,
@@ -294,8 +320,10 @@ export function resolveConfig(base: TrackerConfig, env: Env = process.env): Trac
   const kept = env[`TRACKER_${k}_KEPT_BY`]?.trim().toLowerCase();
   const first = (env[`TRACKER_${k}_SHEET_ID`] ?? env[`${k}_TRACKER_SHEET`])?.trim() || "";
   const sheetIds = sheetRefsFromEnv(k, first, env);
+  const lead = env[`${k}_TRACKER_LEAD_SHEET`]?.trim() || "";
   return {
     ...base,
+    leadSheetId: lead || base.leadSheetId || null,
     source: src === "smartsheet" || src === "google_sheet" ? src : base.source,
     sheetId: first || base.sheetId,
     sheetIds: sheetIds.length ? sheetIds : base.sheetId ? [base.sheetId] : [],

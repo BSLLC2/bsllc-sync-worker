@@ -24,6 +24,7 @@
  *    "Row N", or by a number-bearing reference column the config declares.
  */
 import { type RoleName, type TrackerConfig } from "./config.js";
+import type { LeadMatchSummary } from "./lead-match.js";
 import { normHeader } from "./config.js";
 import { isClickId, nameKey, normEmail, parseAmountCents, parseDay, phoneKey, quoteKey, safeLabel, type RoleFound, type Table } from "./table.js";
 
@@ -313,6 +314,11 @@ export interface FeedSummary {
   /** v2 only. */
   sheets?: SheetSummary[];
   merge?: MergeSummary;
+  /**
+   * Untagged quote-log rows that match a real ad lead (src/tracker/lead-match.ts). Present only for a client with a lead sheet.
+   * A list apart: nothing in it is in any counted figure, pending list, month or fee.
+   */
+  leadMatch?: LeadMatchSummary;
 }
 
 export function buildFeedSummary(

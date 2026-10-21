@@ -8,6 +8,11 @@ import { buildMergedSummary, mergeSheets, sheetLabels, type SheetRead } from "./
 import { resolveLayouts } from "./tracker/table.js";
 import { openSource } from "./tracker/source.js";
 import { diagnoseLines } from "./tracker/diagnose.js";
+import { findCandidates, indexLeads, leadMatchLine, noMatch, resolveLeadColumns, type LeadMatchSummary } from "./tracker/lead-match.js";
+import type { FeedSummary } from "./tracker/reading.js";
+import type { Table } from "./tracker/table.js";
+import type { RoleFound } from "./tracker/table.js";
+import type { RoleName } from "./tracker/config.js";
 
 /**
  * Closed-deal trackers for clients other than DPG (whose importer is
@@ -33,6 +38,52 @@ const arg = (name: string): string | undefined => { const hit = process.argv.sli
 const flag = (name: string) => process.argv.slice(2).includes(`--${name}`);
 const whoSays = (w: Finding["who"]) => (w === "us" ? "ours to fix" : w === "client" ? "the client's to fix" : w === "provider" ? "the platform's" : "find out first");
 
+
+/**
+ * The lead match: untagged quote-log rows that match a real ad lead. READ ONLY and ADDITIVE. It reads the lead sheet through the
+ * same door, adds one list to the summary and changes nothing else: the counted wins, the months, the fee and the pending rows
+ * are computed before this runs and are not touched by it. A lead sheet that cannot be read is recorded in the summary and
+ * stops nothing, because it contributes no counted sale. Null: this client has no lead sheet, so the summary is as it was.
+ */
+async function leadMatchFor(
+  base: TrackerConfig,
+  quote: { table: Table; found: Partial<Record<RoleName, RoleFound>>; cfg: TrackerConfig } | null,
+  today: string,
+): Promise<LeadMatchSummary | null> {
+  const spec = base.leadMatch;
+  if (!spec) return null;
+  const readAt = new Date().toISOString();
+  try {
+    // Only a lead sheet somebody NAMED is read. The second merged sheet is never borrowed for this: naming it here as well is one
+    // more variable, and it keeps a merged read's summary exactly what it was for a client with no lead sheet.
+    if (!base.leadSheetId) return null;
+    const o = await openSource({ ...base, sheetId: base.leadSheetId }, process.env, { headersOnly: false });
+    if (o.kind === "stop") return noMatch("stopped", readAt, o.finding.line, o.finding.code);
+    const table = o.table;
+    if (!quote) return noMatch("no_quote_log", readAt, "The main sheet is not laid out as a quote log, so there is nothing to compare the leads against.");
+    const cols = resolveLeadColumns(table.headers, spec);
+    if (!cols.ok) {
+      const bits = [cols.missing.length ? `no heading for ${cols.missing.join(", ")}` : "", cols.duplicate.length ? `more than one heading for ${cols.duplicate.join(", ")}` : ""].filter(Boolean).join("; ");
+      return noMatch("headings", readAt, `The lead sheet has ${bits}, so no lead was compared.`);
+    }
+    const idx = indexLeads(table, cols.cols, { countedFrom: base.countedFrom, today });
+    return findCandidates(quote, idx, spec, { today, readAt });
+  } catch (e) {
+    return noMatch("stopped", readAt, `The lead sheet could not be compared (${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 100)}).`, "check_crashed");
+  }
+}
+/** Diagnose for the lead sheet: its name, its headings and which of them each job found. Headings only, never a cell. */
+async function diagnoseLead(cfg: TrackerConfig) {
+  if (!cfg.leadMatch || !cfg.leadSheetId) return;
+  const o = await openSource({ ...cfg, sheetId: cfg.leadSheetId }, process.env, { headersOnly: true });
+  if (o.kind === "stop") { console.log(`\nLead sheet: stopped (${o.finding.code}). ${o.finding.line}`); return; }
+  const cols = resolveLeadColumns(o.table.headers, cfg.leadMatch);
+  console.log(`\nLead sheet${o.sheetName ? ` "${o.sheetName}"` : ""}: ${o.table.headers.length} headings: ${o.table.headers.join(" | ")}`);
+  if (cols.ok) console.log(`Lead sheet columns found: email "${cols.cols.headers.email}", submitted "${cols.cols.headers.submittedOn}", spam "${cols.cols.headers.spam}", click id ${cols.cols.headers.clickIds.length ? cols.cols.headers.clickIds.map((h) => `"${h}"`).join(", ") : "none"}.`);
+  else console.log(`Lead sheet columns NOT found: ${[...cols.missing.map((m) => `no heading for ${m}`), ...cols.duplicate.map((m) => `more than one heading for ${m}`)].join("; ")}. Add the heading as an alias in FRANKLIN_LEAD_MATCH (src/tracker/config.ts).`);
+}
+const withLeadMatch = (s: FeedSummary, lm: LeadMatchSummary | null): FeedSummary => (lm ? { ...s, leadMatch: lm } : s);
+
 function printFindings(findings: Finding[]) {
   for (const f of findings) {
     console.log(`\n[${f.level}] ${f.code} (${whoSays(f.who)}): ${f.line}`);
@@ -45,6 +96,7 @@ async function one(base: TrackerConfig, o: { dryRun: boolean; diagnose: boolean;
   const ignored = countedFromNote(base);
   if (ignored) console.log(ignored);
   const refs = sheetRefsOf(resolved);
+  if (o.diagnose) await diagnoseLead(resolved);
   // Several sheets are a merged read. One (or none) is exactly the single-sheet path below, unchanged.
   if (refs.length > 1) return many(resolved, refs, o);
   return single(refs.length === 1 ? { ...resolved, sheetId: refs[0]! } : resolved, o);
@@ -55,7 +107,7 @@ async function many(cfg: TrackerConfig, refs: string[], o: { dryRun: boolean; di
   console.log(`\n-- ${cfg.key} (${cfg.source}) ${refs.length} sheets${o.diagnose ? " diagnose" : o.dryRun ? " dry-run" : ""}: counted from ${cfg.countedFrom}, kept by ${cfg.keptBy}, today ${o.today}`);
   type Opened = { index: number; layout: string | null; finding: Finding | null; read?: SheetRead; warns: Finding[]; layoutName: string | null };
   const results: Opened[] = [];
-  const readOnes: { index: number; layout: string; reading: ReturnType<typeof readRows>; items: RowItem[]; edited: string | null; columns: Record<string, string>; accessLevel: string | null; resolvedFromLink: boolean; found: ReturnType<typeof resolveLayouts> }[] = [];
+  const readOnes: { index: number; layout: string; reading: ReturnType<typeof readRows>; items: RowItem[]; edited: string | null; columns: Record<string, string>; accessLevel: string | null; resolvedFromLink: boolean; found: ReturnType<typeof resolveLayouts>; table: Table }[] = [];
   for (let i = 0; i < refs.length; i++) {
     const scfg: TrackerConfig = { ...cfg, sheetId: refs[i]! };
     console.log(`\nSheet ${i + 1} of ${refs.length}:`);
@@ -73,7 +125,7 @@ async function many(cfg: TrackerConfig, refs: string[], o: { dryRun: boolean; di
     const reading = readRows(opened.table, lr.res.found, lr.cfg, { today: o.today, collect });
     const columns: Record<string, string> = {};
     for (const [k, v] of Object.entries(lr.res.found)) if (v) columns[k] = v.header;
-    readOnes.push({ index: i, layout: lr.layout, reading, items: collect.items, edited: opened.sheetEditedAt, columns, accessLevel: opened.accessLevel, resolvedFromLink: opened.resolvedFromLink, found: lr });
+    readOnes.push({ index: i, layout: lr.layout, reading, items: collect.items, edited: opened.sheetEditedAt, columns, accessLevel: opened.accessLevel, resolvedFromLink: opened.resolvedFromLink, found: lr, table: opened.table });
     results.push({ index: i, layout: lr.layout, layoutName: lr.layout, finding: null, warns: [] });
   }
 
@@ -121,7 +173,14 @@ async function many(cfg: TrackerConfig, refs: string[], o: { dryRun: boolean; di
   console.log(`Closed before the feed starts (${cfg.countedFrom}): ${r.beforeFeed.deals} in the entered figure's window, ${dollars(r.beforeFeed.cents)}${r.beforeFeed.noAmount ? `, ${r.beforeFeed.noAmount} with no amount` : ""}; ${r.beforeSeed} earlier still. None of these is counted by the feed.`);
   console.log(`Click id on ${r.keys.withClickId} of ${r.counted.length} counted wins${r.keys.badClickId ? ` (${r.keys.badClickId} not a usable id)` : ""}; email ${r.keys.withEmail}, phone ${r.keys.withPhone}, form id ${r.keys.withFormId}, name only ${r.keys.nameOnly}.`);
 
-  const summary = buildMergedSummary(merged, cfg, now);
+  const quoteOne = readOnes.find((x) => x.layout === "rfq_log" && x.found.res.ok);
+  const lm = await leadMatchFor(
+    cfg,
+    quoteOne && quoteOne.found.res.ok ? { table: quoteOne.table, found: quoteOne.found.res.found, cfg: quoteOne.found.cfg } : null,
+    o.today,
+  );
+  if (lm) console.log(leadMatchLine(lm));
+  const summary = withLeadMatch(buildMergedSummary(merged, cfg, now), lm);
   const entries = buildFeedEntries(cfg.clientSlug, r, summary, cfg, o.today);
   for (const e of entries) {
     if (e.external_id.endsWith("-summary")) continue;
@@ -174,7 +233,9 @@ async function single(cfg: TrackerConfig, o: { dryRun: boolean; diagnose: boolea
   console.log(`Click id on ${r.keys.withClickId} of ${r.counted.length} counted wins${r.keys.badClickId ? ` (${r.keys.badClickId} not a usable id)` : ""}; email ${r.keys.withEmail}, phone ${r.keys.withPhone}, form id ${r.keys.withFormId}, name only ${r.keys.nameOnly}.`);
   console.log(opened.sheetEditedAt ? `Sheet last modified ${opened.sheetEditedAt}.` : "Sheet modified time not available.");
 
-  const summary = buildFeedSummary(r, lr.cfg, lr.res.found, new Date().toISOString(), opened.sheetEditedAt);
+  const lm = await leadMatchFor(cfg, lr.layout === "rfq_log" ? { table: opened.table, found: lr.res.found, cfg: lr.cfg } : null, o.today);
+  if (lm) console.log(leadMatchLine(lm));
+  const summary = withLeadMatch(buildFeedSummary(r, lr.cfg, lr.res.found, new Date().toISOString(), opened.sheetEditedAt), lm);
   const entries = buildFeedEntries(cfg.clientSlug, r, summary, lr.cfg, o.today);
   for (const e of entries) {
     if (e.external_id.endsWith("-summary")) continue;

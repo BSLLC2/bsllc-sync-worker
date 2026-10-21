@@ -43,6 +43,10 @@ on:
         description: "Optional: the second sheet's link or id, for this run only. Normally leave blank and set the FRANKLIN_TRACKER_SHEET_2 variable."
         required: false
         default: ""
+      lead_sheet:
+        description: "Optional: the lead sheet's link or id (Franklin: the ad form sheet), for this run only. It is read only to find quote-log rows that match a real lead and are not tagged ours, and counts nothing. Normally leave blank and set the FRANKLIN_TRACKER_LEAD_SHEET variable."
+        required: false
+        default: ""
 
 concurrency:
   group: import-tracker
@@ -90,6 +94,9 @@ jobs:
           # List the quote log first. FRANKLIN_TRACKER_SHEETS (a comma list) also works for three or more.
           FRANKLIN_TRACKER_SHEET_2: ${{ inputs.sheet2 || vars.FRANKLIN_TRACKER_SHEET_2 || secrets.FRANKLIN_TRACKER_SHEET_2 }}
           FRANKLIN_TRACKER_SHEETS: ${{ vars.FRANKLIN_TRACKER_SHEETS || secrets.FRANKLIN_TRACKER_SHEETS }}
+          # The lead sheet (Franklin: the ad form sheet) is NOT one of the sheets above: it is never merged and counts no sale.
+          # It is read only to find untagged quote-log rows that match a real lead, and a lead sheet that cannot be read stops nothing.
+          FRANKLIN_TRACKER_LEAD_SHEET: ${{ inputs.lead_sheet || vars.FRANKLIN_TRACKER_LEAD_SHEET || secrets.FRANKLIN_TRACKER_LEAD_SHEET }}
           TRACKER_FRANKLIN_SOURCE: ${{ vars.TRACKER_FRANKLIN_SOURCE }}
           TRACKER_FRANKLIN_KEPT_BY: ${{ vars.TRACKER_FRANKLIN_KEPT_BY }}
           TRACKER_FRANKLIN_COUNTED_FROM: ${{ vars.TRACKER_FRANKLIN_COUNTED_FROM }}
@@ -101,6 +108,7 @@ jobs:
           # Keep the sheet value out of the log even if something prints it.
           if [ -n "$FRANKLIN_TRACKER_SHEET" ]; then echo "::add-mask::$FRANKLIN_TRACKER_SHEET"; fi
           if [ -n "$FRANKLIN_TRACKER_SHEET_2" ]; then echo "::add-mask::$FRANKLIN_TRACKER_SHEET_2"; fi
+          if [ -n "$FRANKLIN_TRACKER_LEAD_SHEET" ]; then echo "::add-mask::$FRANKLIN_TRACKER_LEAD_SHEET"; fi
           for S in $(echo "$FRANKLIN_TRACKER_SHEETS" | tr ',' ' '); do echo "::add-mask::$S"; done
           ARGS=""
           case "$CLIENT" in *[!a-z0-9-]*) echo "The client must be lowercase letters, digits and dashes."; exit 1 ;; esac
