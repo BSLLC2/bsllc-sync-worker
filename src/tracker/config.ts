@@ -179,18 +179,22 @@ export const FRANKLIN: TrackerConfig = {
   ],
   roles: {
     status: { required: true, aliases: ["status", "rfq status", "quote status", "stage", "outcome", "result", "won lost", "won", "deal status", "disposition"] },
-    amount: { required: true, aliases: ["amount", "won amount", "order amount", "order value", "po amount", "po value", "deal value", "sale amount", "revenue", "invoice amount"] },
-    closedDate: { required: true, aliases: ["closed date", "close date", "date closed", "won date", "date won", "order date", "award date", "po date", "closed on", "date awarded"] },
+    amount: { required: true, aliases: ["amount", "won amount", "order amount", "order value", "po amount", "po value", "deal value", "sale amount", "revenue", "invoice amount", "quote $ value", "quote value"] },
+    // Franklin's quote log records no closing date (checked 2026-10-21: "Launch Date" is filled on 16 of 182 won rows,
+    // and every other date column falls within days of the request). The last alias is therefore the month the quote was
+    // REQUESTED, and the dashboard says so on the card (shared/tracker-feed.ts closedRowsOf). A real closing date still wins
+    // if the sheet ever gets one: aliases are tried in order.
+    closedDate: { required: true, aliases: ["closed date", "close date", "date closed", "won date", "date won", "order date", "award date", "po date", "closed on", "date awarded", "date of rfq"] },
     source: { required: true, aliases: ["rfq source", "lead source", "source", "campaign", "origin"] },
-    firstContact: { required: false, aliases: ["rfq date", "date received", "received date", "rfq received", "first contact", "submission date", "date submitted"] },
+    firstContact: { required: false, aliases: ["rfq date", "date received", "received date", "rfq received", "first contact", "submission date", "date submitted", "date of rfq"] },
     gclid: { required: false, aliases: ["gclid", "google click id", "click id", "google ads click id"] },
     rowLabel: { required: false, aliases: ["rfq", "rfq number", "rfq no", "rfq id", "quote number", "quote no", "quote id"] },
-    email: { required: false, aliases: ["email", "e mail", "email address", "contact email", "customer email", "primary email", "work email"] },
+    email: { required: false, aliases: ["email", "e mail", "email address", "contact email", "customer email", "primary email", "work email", "customer contact email"] },
     phone: { required: false, aliases: ["phone", "phone number", "telephone", "contact phone", "customer phone", "mobile", "cell"] },
     formId: { required: false, aliases: ["form id", "entry id", "submission id", "form entry id"] },
     name: { required: false, aliases: ["customer", "customer name", "company", "company name", "account", "contact name", "name"] },
   },
-  wonValues: ["won", "closed won", "awarded", "order received", "po received", "yes", "true", "checked"],
+  wonValues: ["won", "closed won", "awarded", "order received", "po received", "yes", "true", "checked", "won production start"],
   knownNotWonValues: ["lost", "closed lost", "declined", "no bid", "no quote", "cancelled", "canceled", "expired", "quoted", "open", "pending", "in progress", "not awarded", "withdrawn", "submitted", "new", "active", "no response", "dead", "on hold", "no", "false"],
   ourSourceValues: ["BS LLC AD CAMPAIGN"],
   // The feed counts from the contract start. The seed (entered once, through 2025-12-30) is superseded where the feed

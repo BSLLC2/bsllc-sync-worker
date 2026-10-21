@@ -136,6 +136,26 @@ function pure() {
   const shuffled = { ...t, headers: [...t.headers].reverse(), rows: t.rows.map((r) => [...r].reverse()) };
   const lr2 = resolveLayouts(shuffled.headers, cfgAt());
   check("pure: reordered columns resolve to the same headings", lr2.res.ok && lr2.res.found.status?.header === "Status");
+
+  // Franklin's real quote log (headings read by the profile run on 2026-10-21; every row here is invented).
+  {
+    const H = ["Automation Assistant ", "Status", "Customer", "Quote Numbers", "Date of RFQ", "RFQ Source", "Will FB Quote This?", "Owner", "Complexity", "Quote $ Value", "Quote Status Notes", "Customer Contact Email", "Industry", "Approval Needed", "Date -All Info to Quote", "Quote Due Date", "Response Sent Date", "Time to Quote (TEMP)", "Reason for Loss", "No Quote Reason (Optional)", "No Quote Notes", "Sale Owner", "Launch Date", "Created"];
+    const row = (status: string, source: string, amount: string, rfq: string, email = ""): string[] => H.map((h) => (h === "Status" ? status : h === "RFQ Source" ? source : h === "Quote $ Value" ? amount : h === "Date of RFQ" || h === "Created" ? rfq : h === "Customer Contact Email" ? email : h === "Customer" ? "Invented Co" : h === "Quote Numbers" ? "Q-1" : ""));
+    const rows = [
+      row("Won (Production Start)", "BS LLC AD CAMPAIGN", "12500", "2025-03-10", "a@example.test"),
+      row("Won (Production Start)", "Referral", "9000", "2025-03-11"),
+      row("Verbally Awarded", "BS LLC AD CAMPAIGN", "7000", "2025-04-02"),
+      row("Quote Sent", "BS LLC AD CAMPAIGN", "3000", "2025-04-05"),
+      row("Won (Production Start)", "BS LLC AD CAMPAIGN", "4000", "2024-01-15"),
+    ];
+    const tbl: Table = { headers: H, types: H.map(() => null), hidden: H.map(() => false), options: H.map(() => null), rows, rowNumbers: rows.map((_, i) => i + 1), totalRows: rows.length };
+    const rl = resolveLayouts(tbl.headers, cfgAt({ countedFrom: "2023-12-15" }));
+    check("real log: the quote log's own headings resolve as the RFQ layout", rl.res.ok && rl.layout === "rfq_log", rl.res.ok ? null : rl.res);
+    check("real log: amount is the quoted value, the date is the month the quote was requested, the email is the contact email", rl.res.ok && rl.res.found.amount?.header === "Quote $ Value" && rl.res.found.closedDate?.header === "Date of RFQ" && rl.res.found.email?.header === "Customer Contact Email", rl.res.ok ? { a: rl.res.found.amount?.header, d: rl.res.found.closedDate?.header, e: rl.res.found.email?.header } : null);
+    const rr = readRows(tbl, rl.res.ok ? rl.res.found : {}, rl.cfg, { today: "2026-10-21" });
+    check("real log: only 'Won (Production Start)' from our source counts; an award not yet in production and a sent quote do not", rr.counted.length === 2 && rr.counted.every((d) => [1, 5].includes(d.row)) && rr.counted.reduce((a, d) => a + d.cents, 0) === 1_650_000, rr.counted);
+    check("real log: another source's win is not ours and nothing before the contract start is counted", rr.notOurs === 1 && rr.counted.every((d) => d.closed >= "2023-12-15"));
+  }
   check("pure: case, spacing and punctuation do not decide a heading", resolveLayouts(["status", "  AMOUNT ", "closed-date", "rfq_source"], cfgAt()).res.ok);
   const renamed = resolveLayouts(t.headers.map((h) => (h === "Amount" ? "Deal total" : h)), cfgAt());
   check("pure: a renamed required heading is a refusal naming the role", !renamed.res.ok && renamed.res.reason === "missing" && renamed.res.missing.includes("amount"), renamed.res);
