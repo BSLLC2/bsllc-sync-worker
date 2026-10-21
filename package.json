@@ -236,7 +236,8 @@
     "integrus-research": "tsx src/integrus-research.ts",
     "pcc-research": "tsx src/pcc-research.ts",
     "dfs-ranked-urls": "tsx src/dfs-ranked-urls.ts",
-    "tracker-profile": "tsx src/tracker-profile.ts"
+    "tracker-profile": "tsx src/tracker-profile.ts",
+    "tracker-crossmatch": "tsx src/tracker-crossmatch.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

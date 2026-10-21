@@ -1,0 +1,28 @@
+name: Cross-check the quote log against the ad form sheet (aggregates only, writes nothing)
+
+on:
+  workflow_dispatch:
+    inputs:
+      quote:
+        description: "Quote log link"
+        required: true
+      form:
+        description: "Ad form sheet link (blank = the FRANKLIN_TRACKER_SHEET variable)"
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Cross-check
+        env:
+          SMARTSHEET_API_TOKEN: ${{ secrets.SMARTSHEET_API_TOKEN }}
+          QUOTE_SHEET: ${{ inputs.quote }}
+          FORM_SHEET: ${{ inputs.form || vars.FRANKLIN_TRACKER_SHEET }}
+        run: npm run tracker-crossmatch -- --client=franklin
