@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeSmartsheet, type FakeColumn, type FakeSheet, type PagingMode } from "./fake-smartsheet.js";
 import { FakeGoogle } from "./fake-google.js";
-import { FRANKLIN, FRANKLIN_SEED_CENTS, dpgParityConfig, normHeader, parseSheetRef, resolveConfig, countedFromNote, type TrackerConfig } from "./tracker/config.js";
+import { FRANKLIN, FRANKLIN_CONTRACT_START, FRANKLIN_SEED_CENTS, dpgParityConfig, normHeader, parseSheetRef, resolveConfig, countedFromNote, type TrackerConfig } from "./tracker/config.js";
 import { parseAmountCents, parseDay, resolveLayouts, resolveRoles, safeLabel, isClickId, type Table } from "./tracker/table.js";
 import { buildFeedEntries, buildFeedSummary, feedMonths, readRows, type FeedSummary } from "./tracker/reading.js";
 import { CAUSE_CODES, FINDINGS, lineFor, worstLine } from "./tracker/causes.js";
@@ -180,12 +180,14 @@ function pure() {
   check("pure: one entry for every month from the first through this one, including empty months", months.length === feedMonths(FEED_FROM, etToday).length && months.length >= 2);
   check("pure: the monthly revenue adds to exactly the counted total (no seed money in it)", months.reduce((s, m) => s + Number(m.metrics["manual.revenue_system_cents"]), 0) === R.countedCents);
   check("pure: the seed's $1.8M win is in no monthly revenue figure (the summary only NAMES the seed's largest win, to say so)", e.filter((x) => !x.external_id.endsWith("-summary")).every((x) => x.metrics["manual.revenue_system_cents"] !== 180000000 && !JSON.stringify(x).includes("180000000")) && JSON.stringify(e.find((x) => x.external_id.endsWith("-summary"))?.metrics ?? {}).includes('largestCents'));
-  check("pure: while BS LLC keeps the sheet, the marker and the pending figures are written", months.every((m) => "manual.tracker_won_deals" in m.metrics) && "manual.tracker_pending_cents" in e[e.length - 1]!.metrics);
-  const eClient = buildFeedEntries("franklin-brazing", R, sum, { ...lr.cfg, keptBy: "client" }, etToday);
-  check("pure: where the CLIENT keeps the sheet the marker is not written, so the figure stands as the client's records", eClient.every((x) => !("manual.tracker_won_deals" in x.metrics) && !("manual.tracker_pending_deals" in x.metrics)) && eClient[0]!.metrics["manual.revenue_system_cents"] === months[0]!.metrics["manual.revenue_system_cents"]);
+  check("pure: FRANKLIN'S DEFAULT: the client keeps the sheet, so no marker and no pending figures are written and the figure stands as the client's own record", FRANKLIN.keptBy === "client" && months.every((m) => !("manual.tracker_won_deals" in m.metrics) && !("manual.tracker_pending_cents" in m.metrics)) && !("manual.tracker_pending_cents" in e[e.length - 1]!.metrics));
+  const eUs = buildFeedEntries("franklin-brazing", R, sum, { ...lr.cfg, keptBy: "us" }, etToday);
+  const usMonths = eUs.filter((x) => !x.external_id.endsWith("-summary"));
+  check("pure: while BS LLC keeps a sheet (the setting, not Franklin's default) the marker and the pending figures are written and the revenue is the same", usMonths.every((m) => "manual.tracker_won_deals" in m.metrics) && "manual.tracker_pending_cents" in eUs[eUs.length - 1]!.metrics && usMonths[0]!.metrics["manual.revenue_system_cents"] === months[0]!.metrics["manual.revenue_system_cents"]);
   check("pure: un-marking a win brings its month back to nought, not silence", (() => { const gone = readRows({ ...t, rows: t.rows.map((r) => (r[6] === "Won" ? r.map((c, i) => (i === 6 ? "" : c)) : r)) }, lr.res.ok ? lr.res.found : {}, lr.cfg, { today: etToday }); const ee = buildFeedEntries("franklin-brazing", gone, sum, lr.cfg, etToday).filter((x) => !x.external_id.endsWith("-summary")); return ee.length === months.length && ee.every((x) => x.metrics["manual.revenue_system_cents"] === 0); })());
   const parsed = JSON.parse(String(e[e.length - 1]!.metrics["manual.tracker_feed_summary"])) as FeedSummary;
-  check("pure: the summary round-trips and says what was read", parsed.v === 1 && parsed.kind === "feed" && parsed.countedDeals === 4 && parsed.seed?.cents === FRANKLIN_SEED_CENTS && parsed.columns.amount === "Amount" && parsed.keptBy === "us");
+  check("pure: the summary round-trips and says what was read", parsed.v === 1 && parsed.kind === "feed" && parsed.countedDeals === 4 && parsed.seed?.cents === FRANKLIN_SEED_CENTS && parsed.columns.amount === "Amount" && parsed.keptBy === "client");
+  check("pure: the summary carries the earliest counted closed day, so the card can say when the sheet's first sale is after the first day counted", parsed.oldestClosed === R.counted.map((d) => d.closed).sort()[0] && parsed.oldestClosed != null && parsed.oldestClosed >= FEED_FROM);
   check("pure: nothing in the stored payload is a customer's name, email or phone", !SECRETS.some((s) => JSON.stringify(e).includes(s)) && !/@|555-010/.test(JSON.stringify(e)), JSON.stringify(e).slice(0, 200));
   check("pure: every entry is for the client slug and the manual source", e.every((x) => x.client_id === "franklin-brazing" && x.source === "manual"));
 
@@ -204,10 +206,14 @@ function pure() {
   // Configs
   const live = resolveConfig(FRANKLIN, { FRANKLIN_TRACKER_SHEET: PERMALINK, TRACKER_FRANKLIN_KEPT_BY: "client", TRACKER_FRANKLIN_SOURCE: "google_sheet", TRACKER_FRANKLIN_COUNTED_FROM: "2026-02-01", TRACKER_FRANKLIN_ROW_LIMIT: "500" });
   check("pure: repository variables apply: sheet, who keeps it, source, first day, row limit", live.sheetId === PERMALINK && live.keptBy === "client" && live.source === "google_sheet" && live.countedFrom === "2026-02-01" && live.rowLimit === 500);
-  check("pure: a typed start on or before the seed's last day is ignored, so no day is counted twice", resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2025-06-01" }).countedFrom === FRANKLIN.countedFrom && resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: FRANKLIN.seed!.through }).countedFrom === FRANKLIN.countedFrom);
-  check("pure: the ignored start is said in the log, and a good one is not", /ignored/.test(countedFromNote(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2025-06-01" }) ?? "") && countedFromNote(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2026-02-01" }) === null);
-  check("pure: a nonsense variable changes nothing", resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_KEPT_BY: "maybe", TRACKER_FRANKLIN_SOURCE: "excel", TRACKER_FRANKLIN_COUNTED_FROM: "soon" }).keptBy === "us");
-  check("pure: Franklin's default is that BS LLC keeps the sheet (unconfirmed wording) and the feed starts the day after the seed", FRANKLIN.keptBy === "us" && FRANKLIN.seed?.through === "2025-12-30" && FRANKLIN.countedFrom === "2025-12-31");
+  check("pure: a typed start INSIDE the window the entered figure covers is ignored, so part of it is never counted twice", resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2025-06-01" }).countedFrom === FRANKLIN.countedFrom && resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: FRANKLIN.seed!.through }).countedFrom === FRANKLIN.countedFrom && resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2024-01-02" }).countedFrom === FRANKLIN.countedFrom);
+  check("pure: a typed start at or before the entered figure's first day, or after its last day, is accepted", resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2023-12-01" }).countedFrom === "2023-12-01" && resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2024-01-01" }).countedFrom === "2024-01-01" && resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2025-12-31" }).countedFrom === "2025-12-31");
+  check("pure: the ignored start is said in the log, and a good one is not", /ignored/.test(countedFromNote(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2025-06-01" }) ?? "") && countedFromNote(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2026-02-01" }) === null && countedFromNote(FRANKLIN, { TRACKER_FRANKLIN_COUNTED_FROM: "2023-12-01" }) === null);
+  check("pure: a nonsense variable changes nothing", (() => { const c = resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_KEPT_BY: "maybe", TRACKER_FRANKLIN_SOURCE: "excel", TRACKER_FRANKLIN_COUNTED_FROM: "soon" }); return c.keptBy === "client" && c.source === "smartsheet" && c.countedFrom === FRANKLIN.countedFrom; })());
+  check("pure: the repository variable can still say BS LLC keeps the sheet (the setting stays)", resolveConfig(FRANKLIN, { TRACKER_FRANKLIN_KEPT_BY: "us" }).keptBy === "us");
+  check("pure: FRANKLIN'S DEFAULTS: the client keeps the sheet (confirmed), the feed counts from the CONTRACT START (2023-12-15), which is before the entered figure's first day", FRANKLIN.keptBy === "client" && FRANKLIN_CONTRACT_START === "2023-12-15" && FRANKLIN.countedFrom === "2023-12-15" && FRANKLIN.seed?.from === "2024-01-01" && FRANKLIN.seed?.through === "2025-12-30" && FRANKLIN.countedFrom < FRANKLIN.seed.from);
+  check("pure: DPG is untouched: the parity config still holds the figure back for BS LLC", dpgParityConfig("2026-07-01").keptBy === "us");
+  check("pure: the first feed month, at the default, starts on the contract start", (() => { const ms = feedMonths(FRANKLIN.countedFrom, "2024-02-10"); return ms[0] === "2023-12" && ms.length === 3; })(), JSON.stringify(feedMonths(FRANKLIN.countedFrom, "2024-02-10")));
   check("pure: the committed config holds no sheet link or id", FRANKLIN.sheetId === null);
   check("pure: the seed total in the config is the seed script's ($18,994 plus $1.8M)", FRANKLIN_SEED_CENTS === 181_899_400);
 
@@ -315,7 +321,7 @@ async function e2e() {
     check("e2e: the first month starts on the feed's first day and no month is earlier", months[0]?.period_start === FEED_FROM && months.every((m: any) => m.period_start >= FEED_FROM), months.map((m: any) => m.period_start));
     const sum = syncs.find((s: any) => s.external_id === "franklin-tracker-summary");
     const parsed = sum ? (JSON.parse(sum.metrics["manual.tracker_feed_summary"]) as FeedSummary) : null;
-    check("e2e: the summary says what was read, when, who keeps it and which headings", !!parsed && parsed.countedDeals === 4 && parsed.pending.length === 1 && parsed.keptBy === "us" && parsed.columns.status === "Status" && !!parsed.readAt && parsed.sheetEditedAt === "2026-10-14T12:00:00.000Z", parsed);
+    check("e2e: the summary says what was read, when, who keeps it and which headings", !!parsed && parsed.countedDeals === 4 && parsed.pending.length === 1 && parsed.keptBy === "client" && parsed.columns.status === "Status" && !!parsed.readAt && parsed.sheetEditedAt === "2026-10-14T12:00:00.000Z", parsed);
     check("e2e: the click id is on the counted row that has one, and the seed-window win's is not stored", !!parsed && parsed.counted.some((d) => d.gclid === GCLID_OK) && !JSON.stringify(parsed).includes(GCLID_OK + "x"));
     check("e2e: the summary is the only place a click id appears, and no name, email or phone is in the payload", !SECRETS.some((s) => JSON.stringify(healthy.payload).includes(s)) && !/@example|555-010/.test(JSON.stringify(healthy.payload)));
     check("e2e: it asked Smartsheet only with GET and always sent the bearer token", ss.calls.every((c) => c.method === "GET") && ss.authHeaders.every((h) => h === `Bearer ${TOKEN}`));
@@ -393,8 +399,12 @@ async function e2e() {
     ss.reset([sheetOf(BASE_ROWS())]);
     const r = await run({}, ["--client=franklin"]);
     check("e2e: a real (not dry) run hands the dashboard the entries with the dry flag off", r.payload != null && r.code === 0 && r.syncArgs != null && !r.syncArgs.includes("--dry-run"), r.syncArgs);
-    const k = await run({ TRACKER_FRANKLIN_KEPT_BY: "client" });
-    check("e2e: the repository variable can say the client keeps the sheet: no tracker marker is written", k.payload != null && k.payload.syncs.every((s: any) => !("manual.tracker_won_deals" in s.metrics)));
+    check("e2e: by default (the client keeps the sheet) no tracker marker is written", r.payload != null && r.payload.syncs.every((s: any) => !("manual.tracker_won_deals" in s.metrics)));
+    const k = await run({ TRACKER_FRANKLIN_KEPT_BY: "us" });
+    check("e2e: the repository variable can still say BS LLC keeps the sheet: the tracker marker is written", k.payload != null && k.payload.syncs.some((s: any) => "manual.tracker_won_deals" in s.metrics));
+    const d = await run({ TRACKER_FRANKLIN_COUNTED_FROM: undefined });
+    const dm = d.payload?.syncs.filter((s: any) => !s.external_id.endsWith("-summary")) ?? [];
+    check("e2e: with no start variable the first month starts on the contract start (2023-12-15)", dm[0]?.period_start === "2023-12-15", dm.slice(0, 2).map((m: any) => m.period_start));
   }
   {
     ss.reset([sheetOf(BASE_ROWS())]);

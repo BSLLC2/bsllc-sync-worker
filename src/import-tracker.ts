@@ -118,7 +118,7 @@ async function many(cfg: TrackerConfig, refs: string[], o: { dryRun: boolean; di
   }
   console.log(`Merged: ${merged.merge.sameOnBoth} deal${merged.merge.sameOnBoth === 1 ? "" : "s"} on both sheets counted once, ${merged.merge.inSeed} already in the entered figure, ${merged.merge.conflicts.length} with different amounts or dates, ${merged.merge.couldBeSame.length} held as could-be-the-same.`);
   console.log(`Counted since ${cfg.countedFrom}: ${r.counted.length} won, ${dollars(r.countedCents)}. Pending (not counted): ${r.pending.length}, ${dollars(r.pendingCents)}. Refused: ${r.problems.length}. Unrecognised status: ${r.otherStatus}.`);
-  console.log(`Before the feed (the seed holds these): ${r.beforeFeed.deals} won in the seed window, ${dollars(r.beforeFeed.cents)}${r.beforeFeed.noAmount ? `, ${r.beforeFeed.noAmount} with no amount` : ""}; ${r.beforeSeed} won before the seed window.`);
+  console.log(`Closed before the feed starts (${cfg.countedFrom}): ${r.beforeFeed.deals} in the entered figure's window, ${dollars(r.beforeFeed.cents)}${r.beforeFeed.noAmount ? `, ${r.beforeFeed.noAmount} with no amount` : ""}; ${r.beforeSeed} earlier still. None of these is counted by the feed.`);
   console.log(`Click id on ${r.keys.withClickId} of ${r.counted.length} counted wins${r.keys.badClickId ? ` (${r.keys.badClickId} not a usable id)` : ""}; email ${r.keys.withEmail}, phone ${r.keys.withPhone}, form id ${r.keys.withFormId}, name only ${r.keys.nameOnly}.`);
 
   const summary = buildMergedSummary(merged, cfg, now);
@@ -170,7 +170,7 @@ async function single(cfg: TrackerConfig, o: { dryRun: boolean; diagnose: boolea
 
   console.log(`Read layout ${lr.layout}${opened.resolvedFromLink ? " (sheet found from its link)" : ""}: ${r.rows} rows, ${r.ourRows} ours, ${r.notOurs} not ours (${r.wonNotOurs} of them marked Won), ${r.sourceBlank} with no source.`);
   console.log(`Counted since ${cfg.countedFrom}: ${r.counted.length} won, ${dollars(r.countedCents)}. Pending (not counted): ${r.pending.length}, ${dollars(r.pendingCents)}. Refused: ${r.problems.length}. Unrecognised status: ${r.otherStatus}.`);
-  console.log(`Before the feed (the seed holds these): ${r.beforeFeed.deals} won in the seed window, ${dollars(r.beforeFeed.cents)}${r.beforeFeed.noAmount ? `, ${r.beforeFeed.noAmount} with no amount` : ""}; ${r.beforeSeed} won before the seed window.`);
+  console.log(`Closed before the feed starts (${cfg.countedFrom}): ${r.beforeFeed.deals} in the entered figure's window, ${dollars(r.beforeFeed.cents)}${r.beforeFeed.noAmount ? `, ${r.beforeFeed.noAmount} with no amount` : ""}; ${r.beforeSeed} earlier still. None of these is counted by the feed.`);
   console.log(`Click id on ${r.keys.withClickId} of ${r.counted.length} counted wins${r.keys.badClickId ? ` (${r.keys.badClickId} not a usable id)` : ""}; email ${r.keys.withEmail}, phone ${r.keys.withPhone}, form id ${r.keys.withFormId}, name only ${r.keys.nameOnly}.`);
   console.log(opened.sheetEditedAt ? `Sheet last modified ${opened.sheetEditedAt}.` : "Sheet modified time not available.");
 

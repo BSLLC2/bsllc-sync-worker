@@ -14,7 +14,9 @@
  *    is PENDING: shown apart, never counted.
  *  - A row that is not ours is not a deal here at all. It is counted and named
  *    as "not ours" and nothing else.
- *  - Wins closed BEFORE `countedFrom` belong to the one-time seed that already
+ *  - Wins closed BEFORE `countedFrom` are never counted by the feed. For Franklin
+ *    `countedFrom` is the contract start, so these are sales from before the
+ *    engagement; where a client's `countedFrom` is later than the one-time seed they belong to the seed that already
  *    holds them. They are read, summed and shown beside the seed so the two can
  *    be reconciled, and they are NEVER written as revenue: that would count them
  *    twice.
@@ -286,6 +288,8 @@ export interface FeedSummary {
   leadRows: number;
   newestFirstContact: string | null;
   newestClosed: string | null;
+  /** The earliest closed day among the counted wins: the card says so when it is after the first day counted, instead of inventing earlier sales. */
+  oldestClosed: string | null;
   countedDeals: number;
   countedCents: number;
   /** The newest counted rows (all of them up to COUNTED_LISTED_MAX). */
@@ -321,6 +325,7 @@ export function buildFeedSummary(
     v: 1, kind: "feed", key: cfg.key, readAt, sheetEditedAt, sourceKind: cfg.source, keptBy: cfg.keptBy, sheetLabel: cfg.sheetLabel,
     countedFrom: cfg.countedFrom, seed: cfg.seed ? { from: cfg.seed.from, through: cfg.seed.through, cents: cfg.seed.cents, label: cfg.seed.label, largestCents: cfg.seed.largestCents ?? null } : null,
     rows: r.rows, ourRows: r.ourRows, leadRows: r.leadRows, newestFirstContact: r.newestFirstContact, newestClosed: r.newestClosed,
+    oldestClosed: r.counted.reduce<string | null>((m, d) => (m == null || d.closed < m ? d.closed : m), null),
     countedDeals: r.counted.length, countedCents: r.countedCents, counted: listed, countedListed: listed.length,
     pending: r.pending, pendingCents: r.pendingCents, problems: r.problems, otherStatus: r.otherStatus,
     notOurs: r.notOurs, wonNotOurs: r.wonNotOurs, sourceBlank: r.sourceBlank, beforeFeed: r.beforeFeed, beforeSeed: r.beforeSeed,
