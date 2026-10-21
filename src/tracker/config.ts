@@ -82,9 +82,17 @@ export interface TrackerConfig {
    * numeric id or a link (parseSheetRef). Not printed in any log.
    */
   sheetId: string | null;
+  /**
+   * Every sheet this client's tracker reads, in the order given (the first is `sheetId`). One entry, or none, is
+   * today's one-sheet behaviour exactly. More than one makes a merged read (src/tracker/merge.ts). Set by
+   * resolveConfig from the repository variables; never committed.
+   */
+  sheetIds?: readonly string[];
+  /** What the sheets are called together in a sentence, when there are several. Null: the single label is used. */
+  multiSheetLabel?: string | null;
   /** Google tab name; unused for Smartsheet. */
   tab: string | null;
-  /** Who keeps and updates the sheet. Unknown for Franklin, so it is "us" until somebody says. */
+  /** Who keeps and updates the sheet. Franklin's is the client's own record, and the client has confirmed it. */
   keptBy: KeptBy;
   /** Name of the layout `roles` describes. */
   layoutName: string;
@@ -97,7 +105,11 @@ export interface TrackerConfig {
   knownNotWonValues: readonly string[];
   /** Source words (folded) that mean the deal came from our work. Empty: every row is ours. */
   ourSourceValues: readonly string[];
-  /** The first closed day the FEED counts. Wins closed before it belong to the seed. */
+  /**
+   * The first closed day the FEED counts. For Franklin it is the contract start, which is before the one-off seed
+   * begins, so the feed covers the whole engagement and the app counts the sheet in place of the entered figure.
+   * A start AFTER the seed's last day leaves the seed in force and the feed adds only what follows it.
+   */
   countedFrom: string;
   seed: SeedSpec | null;
   /** DPG-style per-deal fee. Null: no fee model. */
@@ -111,6 +123,16 @@ const norm = (s: unknown): string => String(s ?? "").toLowerCase().replace(/[^a-
 export const normHeader = norm;
 
 export const FRANKLIN_SEED_AS_OF = "2025-12-30";
+/** The first day of the window the one-off seed covers, and the stored row it wrote (src/oneoff-seed-franklin-revenue.ts). */
+export const FRANKLIN_SEED_FROM = "2024-01-01";
+export const FRANKLIN_SEED_EXTERNAL_ID = "franklin-rfq-log-2024-2025-other-wins";
+/**
+ * The day Franklin Brazing's contract was signed (DocuSign "FranklinBrazing_BSLLC_Contract_121423", completed
+ * 2023-12-15; the kickoff call was offered for the week of 18 December 2023). It is when our engagement began, so it
+ * is the first day the feed counts. The app declares the same date (shared/tracker-feed-who.ts) and
+ * `npm run verify:wiring` fails when the two differ. A sale on the sheet dated earlier than this is counted nowhere.
+ */
+export const FRANKLIN_CONTRACT_START = "2023-12-15";
 /** The seed's own figures (src/oneoff-seed-franklin-revenue.ts): $18,994 of ordinary wins plus the $1.8M named win. */
 export const FRANKLIN_SEED_OTHER_CENTS = 18_994_00;
 export const FRANKLIN_SEED_NAMED_CENTS = 1_800_000_00;
@@ -121,10 +143,16 @@ export const FRANKLIN: TrackerConfig = {
   clientSlug: "franklin-brazing",
   clientName: "Franklin Brazing",
   sheetLabel: "Franklin Brazing's RFQ and quote log",
+  multiSheetLabel: "Franklin Brazing's quote log and ad form sheet",
   source: "smartsheet",
   sheetId: null,
   tab: null,
-  keptBy: "us",
+  // Franklin keeps its own sheets and has confirmed the rows (the owner, 2026-10-21). The worker therefore writes no
+  // tracker marker and no pending figures, and the app reads the revenue as the client's own record. DPG's tracker
+  // is BS LLC's own matching and stays held (src/dpg-tracker.ts, its own code). To hold Franklin's figure again set
+  // the repository variable TRACKER_FRANKLIN_KEPT_BY to "us" AND change `keptBy` in the dashboard's
+  // shared/tracker-feed-who.ts; `npm run verify:wiring` fails when the two differ.
+  keptBy: "client",
   layoutName: "rfq_log",
   altLayouts: [
     // "Google Ads Form Submissions": one row per form fill, every row ours. Wins can only be counted
@@ -132,7 +160,7 @@ export const FRANKLIN: TrackerConfig = {
     {
       name: "form_submissions",
       ourSourceValues: [],
-      requireAny: ["form name", "form id", "entry id", "submission id", "form entry id", "timestamp", "submitted at", "submission time", "date submitted", "submission date", "form submitted"],
+      requireAny: ["form name", "form id", "entry id", "submission id", "form entry id", "timestamp", "submitted at", "submission time", "date submitted", "submission date", "form submitted", "gclid", "google click id", "click id", "google ads click id", "created", "created date", "date created", "created on"],
       refuseIfAny: ["rfq", "rfq number", "rfq no", "rfq id", "rfq date", "rfq status", "rfq source", "quote number", "quote no", "quote id", "quote status", "lead source", "source", "campaign", "origin", "award date", "po date", "po amount"],
       roles: {
         status: { required: true, aliases: ["status", "outcome", "result", "won", "closed won", "won lost", "converted", "deal status", "disposition"] },
@@ -165,9 +193,10 @@ export const FRANKLIN: TrackerConfig = {
   wonValues: ["won", "closed won", "awarded", "order received", "po received", "yes", "true", "checked"],
   knownNotWonValues: ["lost", "closed lost", "declined", "no bid", "no quote", "cancelled", "canceled", "expired", "quoted", "open", "pending", "in progress", "not awarded", "withdrawn", "submitted", "new", "active", "no response", "dead", "on hold", "no", "false"],
   ourSourceValues: ["BS LLC AD CAMPAIGN"],
-  // The seed covers closed days through 2025-12-30. The feed starts the next day, so no month is in both.
-  countedFrom: "2025-12-31",
-  seed: { from: "2024-01-01", through: FRANKLIN_SEED_AS_OF, cents: FRANKLIN_SEED_CENTS, label: "the RFQ log", largestCents: FRANKLIN_SEED_NAMED_CENTS },
+  // The feed counts from the contract start. The seed (entered once, through 2025-12-30) is superseded where the feed
+  // covers its window: the dashboard reads the sheet in its place and shows both figures side by side, so no sale is in both.
+  countedFrom: FRANKLIN_CONTRACT_START,
+  seed: { from: FRANKLIN_SEED_FROM, through: FRANKLIN_SEED_AS_OF, cents: FRANKLIN_SEED_CENTS, label: "the RFQ log", largestCents: FRANKLIN_SEED_NAMED_CENTS },
   fee: null,
   blankStatusPending: false,
   rowLimit: 20_000,
@@ -259,10 +288,13 @@ export function resolveConfig(base: TrackerConfig, env: Env = process.env): Trac
   const k = upper(base.key);
   const src = env[`TRACKER_${k}_SOURCE`]?.trim().toLowerCase();
   const kept = env[`TRACKER_${k}_KEPT_BY`]?.trim().toLowerCase();
+  const first = (env[`TRACKER_${k}_SHEET_ID`] ?? env[`${k}_TRACKER_SHEET`])?.trim() || "";
+  const sheetIds = sheetRefsFromEnv(k, first, env);
   return {
     ...base,
     source: src === "smartsheet" || src === "google_sheet" ? src : base.source,
-    sheetId: (env[`TRACKER_${k}_SHEET_ID`] ?? env[`${k}_TRACKER_SHEET`])?.trim() || base.sheetId,
+    sheetId: first || base.sheetId,
+    sheetIds: sheetIds.length ? sheetIds : base.sheetId ? [base.sheetId] : [],
     tab: env[`TRACKER_${k}_TAB`]?.trim() || base.tab,
     keptBy: kept === "client" || kept === "us" ? kept : base.keptBy,
     rowLimit: /^\d{2,6}$/.test(env[`TRACKER_${k}_ROW_LIMIT`]?.trim() ?? "") ? Number(env[`TRACKER_${k}_ROW_LIMIT`]) : base.rowLimit,
@@ -270,19 +302,41 @@ export function resolveConfig(base: TrackerConfig, env: Env = process.env): Trac
   };
 }
 
-/** The first counted day. A typed start on or before the seed's last day would count the same wins twice, so it is ignored. */
+/**
+ * Every sheet the deployment names, first sheet first, no repeats. Sources, in order: the first-sheet variable, then
+ * <KEY>_TRACKER_SHEET_2, then a comma (or space) separated <KEY>_TRACKER_SHEETS list. With only the first set this is
+ * exactly [first], which is today's one-sheet behaviour.
+ */
+export function sheetRefsFromEnv(upperKey: string, first: string, env: Env): string[] {
+  const out: string[] = [];
+  const add = (v: string | undefined) => { const t = (v ?? "").trim(); if (t && !out.includes(t)) out.push(t); };
+  add(first);
+  add(env[`${upperKey}_TRACKER_SHEET_2`]);
+  for (const part of (env[`${upperKey}_TRACKER_SHEETS`] ?? "").split(/[\s,]+/)) add(part);
+  return out;
+}
+/** The sheet values a config names, whichever way they were set. */
+export const sheetRefsOf = (cfg: Pick<TrackerConfig, "sheetId" | "sheetIds">): string[] =>
+  cfg.sheetIds && cfg.sheetIds.length ? [...cfg.sheetIds] : cfg.sheetId ? [cfg.sheetId] : [];
+
+/**
+ * The first counted day. A typed start (the repository variable TRACKER_<KEY>_COUNTED_FROM) is accepted when it is on or
+ * before the seed's first day (the feed then still covers the whole seed, and a date before the contract is simply
+ * counted nowhere by the dashboard's own contract gate) or after the seed's last day (the seed stays in force). A date
+ * INSIDE the seed's window would count part of the entered figure twice, so it is ignored.
+ */
 function countedFromOf(base: TrackerConfig, env: Env): string {
   const typed = env[`TRACKER_${upper(base.key)}_COUNTED_FROM`]?.trim() ?? "";
   if (!/^\d{4}-\d{2}-\d{2}$/.test(typed)) return base.countedFrom;
-  if (base.seed && typed <= base.seed.through) return base.countedFrom;
+  if (base.seed && typed > base.seed.from && typed <= base.seed.through) return base.countedFrom;
   return typed;
 }
 
-/** A sentence for the log when a typed start was ignored because it overlaps the seed. Null when nothing was ignored. */
+/** A sentence for the log when a typed start was ignored because it falls inside the seed's window. Null when nothing was ignored. */
 export function countedFromNote(base: TrackerConfig, env: Env = process.env): string | null {
   const typed = env[`TRACKER_${upper(base.key)}_COUNTED_FROM`]?.trim() ?? "";
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(typed) || !base.seed || typed > base.seed.through) return null;
-  return `NOTE: TRACKER_${upper(base.key)}_COUNTED_FROM (${typed}) is on or before the day the entered figure ends (${base.seed.through}), so it was ignored and ${base.countedFrom} is used. Counting those days twice would overstate revenue.`;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(typed) || !base.seed || !(typed > base.seed.from && typed <= base.seed.through)) return null;
+  return `NOTE: TRACKER_${upper(base.key)}_COUNTED_FROM (${typed}) falls inside the window the entered figure covers (${base.seed.from} to ${base.seed.through}), so it was ignored and ${base.countedFrom} is used. Counting part of that window twice would overstate revenue.`;
 }
 
 export const configByKey = (key: string): TrackerConfig | null => TRACKER_CONFIGS.find((c) => c.key === key || c.clientSlug === key) ?? null;

@@ -2,7 +2,7 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { FRANKLIN_SEED_AS_OF, FRANKLIN_SEED_NAMED_CENTS, FRANKLIN_SEED_OTHER_CENTS } from "./tracker/config.js";
+import { FRANKLIN_SEED_AS_OF, FRANKLIN_SEED_EXTERNAL_ID, FRANKLIN_SEED_FROM, FRANKLIN_SEED_NAMED_CENTS, FRANKLIN_SEED_OTHER_CENTS } from "./tracker/config.js";
 
 /**
  * One-off: seed Franklin Brazing's revenue attribution from the RFQ & quote
@@ -23,11 +23,14 @@ import { FRANKLIN_SEED_AS_OF, FRANKLIN_SEED_NAMED_CENTS, FRANKLIN_SEED_OTHER_CEN
  * against our leads (basis c) instead of context. Without that note the
  * figure is shown as "context: total company revenue" and excluded from ROI.
  *
+ * THE FEED NOW COVERS THIS WINDOW (2026-10-21). The live feed (src/import-tracker.ts) counts every closed sale on the
+ * sheets from the CONTRACT START (2023-12-15), which is before this seed's first day. Once it has read, the dashboard
+ * counts the sheet in place of the figures below (it never deletes or rewrites them) and shows the two side by side as
+ * a reconciliation. Nothing here needs to be re-run; running it again is harmless.
+ *
  * Idempotent: the named win is keyed on name, the snapshot on external_id.
  * The evidence note and the close rate are written ONLY IF ABSENT: a note or a
- * rate somebody typed since is never overwritten. (The live sheet feed,
- * src/import-tracker.ts, reads closed days from the day after AS_OF; this seed
- * holds everything up to and including AS_OF. The two never overlap.)
+ * rate somebody typed since is never overwritten.
  *
  *   npm run oneoff-seed-franklin-revenue -- --dry-run=true
  */
@@ -35,14 +38,14 @@ function env(n: string): string { const v = process.env[n]; if (!v?.trim()) thro
 const arg = (k: string, d = "") => (process.argv.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3) ?? process.env[k.toUpperCase().replace(/-/g, "_")] ?? d).trim();
 
 // The seed's as-of day and its two figures live in the tracker config, so the seed and the live feed
-// (which starts the next day) can never disagree about where one ends and the other begins.
+// (which now starts at the contract start) cannot disagree about what the seed holds.
 const AS_OF = FRANKLIN_SEED_AS_OF;
-const WINDOW_START = "2024-01-01";
+const WINDOW_START = FRANKLIN_SEED_FROM;
 const SOURCE = `Franklin Brazing RFQ & quote log export, as of ${AS_OF}`;
 const NAMED_WIN = { name: "Amerex Fire", valueCents: FRANKLIN_SEED_NAMED_CENTS, wonOn: "2025-04-01", notes: "RFQ Source: BS LLC AD CAMPAIGN. Awarded April 2025 per the RFQ log; day of month not recorded in the export." };
 const OTHER_WINS_CENTS = FRANKLIN_SEED_OTHER_CENTS;
 const CLOSE_RATE_PCT = 1.8;
-const BASIS_NOTE = `Franklin Brazing RFQ & quote log (Smartsheet "Case Study Numbers", 694 rows), RFQ Source = "BS LLC AD CAMPAIGN", Jan 2024 – Dec 2025, as of ${AS_OF}`;
+const BASIS_NOTE = `Franklin Brazing's own sales sheets (the RFQ & quote log and the Google Ads form sheet), RFQ Source = "BS LLC AD CAMPAIGN". The log was first entered once, Jan 2024 - Dec 2025, as of ${AS_OF}; the live sheet read replaces that entry`;
 
 async function main() {
   const dryRun = arg("dry-run", "true") !== "false";
@@ -63,7 +66,7 @@ async function main() {
     console.log(`${client.name} (${client.id}) — customer value ${client.customer_value_cents != null ? `$${(client.customer_value_cents / 100).toLocaleString()}` : "unset"}, close rate ${client.close_rate_pct ?? "unset"}%`);
 
     const { rows: [win] } = await c.query<{ id: string }>(`SELECT id FROM client_named_wins WHERE client_id = $1 AND name = $2`, [client.id, NAMED_WIN.name]);
-    const { rows: [snap] } = await c.query<{ id: string }>(`SELECT id FROM metric_snapshots WHERE client_id = $1 AND external_id = $2`, [client.id, "franklin-rfq-log-2024-2025-other-wins"]);
+    const { rows: [snap] } = await c.query<{ id: string }>(`SELECT id FROM metric_snapshots WHERE client_id = $1 AND external_id = $2`, [client.id, FRANKLIN_SEED_EXTERNAL_ID]);
     console.log(`named win "${NAMED_WIN.name}": ${win ? "already present" : "will insert"}; other-wins snapshot: ${snap ? "already present" : "will insert"}`);
     const noteAbsent = !client.revenue_basis_note?.trim();
     const rateAbsent = client.close_rate_pct == null;
@@ -80,7 +83,7 @@ async function main() {
       await c.query(
         `INSERT INTO metric_snapshots (client_id, source, metric_key, value_numeric, value_text, period_start, period_end, data_state, error_message, synced_at, external_id)
          VALUES ($1, 'manual', 'manual.revenue_system_cents', $2, NULL, $3::date, $4::date, 'live', NULL, $4::timestamptz, $5)`,
-        [client.id, OTHER_WINS_CENTS, WINDOW_START, AS_OF, "franklin-rfq-log-2024-2025-other-wins"]);
+        [client.id, OTHER_WINS_CENTS, WINDOW_START, AS_OF, FRANKLIN_SEED_EXTERNAL_ID]);
     }
     // Only if absent: a figure or a note somebody typed since is never overwritten.
     await c.query(`UPDATE clients SET close_rate_pct = COALESCE(close_rate_pct, $2), revenue_basis_note = COALESCE(NULLIF(btrim(revenue_basis_note), ''), $3) WHERE id = $1`, [client.id, CLOSE_RATE_PCT, BASIS_NOTE]);

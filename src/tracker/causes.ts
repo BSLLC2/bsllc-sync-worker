@@ -16,6 +16,7 @@ export const CAUSE_CODES = [
   "key_missing", "key_unreadable", "key_rejected", "access_removed", "sheet_in_bin", "tab_missing",
   "headers_missing", "headers_duplicate", "lead_list_only", "sheet_empty", "sheet_too_long", "rows_incomplete",
   "rate_limited", "source_unavailable", "rows_refused", "other_status", "access_too_wide", "check_crashed",
+  "sheets_disagree",
 ] as const;
 export type CauseCode = (typeof CAUSE_CODES)[number];
 export type Level = "stop" | "warn";
@@ -100,6 +101,12 @@ export const FINDINGS = {
   },
   other_status: (n: number): Finding => ({ code: "other_status", level: "warn", who: "us", line: `${n} row${n === 1 ? " has" : "s have"} a status this job does not recognise, so ${n === 1 ? "it is" : "they are"} counted nowhere.`, steps: ["Use Won for a win, or add the new status word to the known words in src/tracker/config.ts."] }),
   access_too_wide: (level: string): Finding => ({ code: "access_too_wide", level: "warn", who: "us", line: `The integration user has ${level.toLowerCase()} access to this sheet. Viewer is enough, and this job only reads.`, steps: ["Change the share to Viewer so a mistake here could never edit the sheet."] }),
+  /** Two sheets hold rows that may be the same sale and the sheets do not prove it. */
+  sheets_disagree: (conflicts: number, held: number): Finding => ({
+    code: "sheets_disagree", level: "warn", who: "either",
+    line: `${[conflicts ? `${conflicts} deal${conflicts === 1 ? " is" : "s are"} on both sheets with a different amount or date (counted at the lower amount and the later date)` : "", held ? `${held} row${held === 1 ? "" : "s"} could be the same deal as a row on the other sheet (held, not counted)` : ""].filter(Boolean).join("; ")}.`,
+    steps: ["Put the same email or click id on both rows if they are the same deal. A held row counts the day the sheets show it is a different deal.", "Fix the amount or date on whichever sheet is wrong."],
+  }),
   check_crashed: (why: string): Finding => ({ code: "check_crashed", level: "stop", who: "us", line: `The import itself failed (${why.replace(/\s+/g, " ").slice(0, 150)}).`, steps: ["Open the run log in GitHub Actions."] }),
 };
 
@@ -107,10 +114,10 @@ export const hasStop = (fs: readonly Finding[]): boolean => fs.some((f) => f.lev
 const RANK: Record<string, number> = { stop: 2, warn: 1, ok: 0 };
 
 /** One heartbeat line for one client. */
-export function lineFor(slug: string, findings: readonly Finding[], ok: { sourceKind: string; rows: number; counted: number; pending: number } | null): string {
+export function lineFor(slug: string, findings: readonly Finding[], ok: { sourceKind: string; rows: number; counted: number; pending: number; sheetsRead?: number } | null): string {
   const first = findings.find((f) => f.level === "stop") ?? findings[0];
   if (first) return `TRACKER-FEED ${slug} ${first.level} ${first.code}: ${first.line}`.slice(0, 295);
-  const bits = [ok ? `read ${ok.sourceKind === "smartsheet" ? "Smartsheet" : "the Google sheet"}` : "read the sheet", ok ? `${ok.rows.toLocaleString("en-US")} rows` : null, ok ? `${ok.counted} won since the feed began` : null, ok ? `${ok.pending} pending` : null].filter(Boolean);
+  const bits = [ok && ok.sheetsRead && ok.sheetsRead > 1 ? `read ${ok.sheetsRead} sheets` : ok ? `read ${ok.sourceKind === "smartsheet" ? "Smartsheet" : "the Google sheet"}` : "read the sheet", ok ? `${ok.rows.toLocaleString("en-US")} rows` : null, ok ? `${ok.counted} won since the feed began` : null, ok ? `${ok.pending} pending` : null].filter(Boolean);
   return `TRACKER-FEED ${slug} ok: ${bits.join(", ")}.`.slice(0, 295);
 }
 
