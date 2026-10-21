@@ -235,7 +235,8 @@
     "verify-reply-to": "tsx src/verify-reply-to.ts",
     "integrus-research": "tsx src/integrus-research.ts",
     "pcc-research": "tsx src/pcc-research.ts",
-    "dfs-ranked-urls": "tsx src/dfs-ranked-urls.ts"
+    "dfs-ranked-urls": "tsx src/dfs-ranked-urls.ts",
+    "tracker-profile": "tsx src/tracker-profile.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

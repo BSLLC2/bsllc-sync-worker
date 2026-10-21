@@ -1,0 +1,43 @@
+name: Profile the sales sheets (aggregates only, writes nothing)
+
+on:
+  workflow_dispatch:
+    inputs:
+      sheet:
+        description: "Quote log link (optional)"
+        required: false
+        default: ""
+      sheet2:
+        description: "Second sheet link (optional)"
+        required: false
+        default: ""
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the worker
+        uses: actions/checkout@v4
+        with:
+          path: worker
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Profile
+        working-directory: worker
+        env:
+          SMARTSHEET_API_TOKEN: ${{ secrets.SMARTSHEET_API_TOKEN }}
+          FRANKLIN_TRACKER_SHEET: ${{ inputs.sheet || vars.FRANKLIN_TRACKER_SHEET }}
+          FRANKLIN_TRACKER_SHEET_2: ${{ inputs.sheet2 || vars.FRANKLIN_TRACKER_SHEET_2 }}
+        run: |
+          if [ -n "$FRANKLIN_TRACKER_SHEET" ]; then echo "::add-mask::$FRANKLIN_TRACKER_SHEET"; fi
+          if [ -n "$FRANKLIN_TRACKER_SHEET_2" ]; then echo "::add-mask::$FRANKLIN_TRACKER_SHEET_2"; fi
+          npm run tracker-profile -- --client=franklin
+
