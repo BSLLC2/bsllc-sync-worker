@@ -36,6 +36,14 @@ uses).
    | `group_page` | landingPage (BEGINS_WITH prefix) | same as sessions | the prefix | normalised path | 300 per group |
    | `group_form` | pagePath (BEGINS_WITH prefix AND eventName = form event) | eventCount -> `events` | the prefix | normalised path | 300 per group |
 
+   | `group_visits` | pagePath (BEGINS_WITH prefix) | sessions | the prefix | normalised path | 300 per group |
+   | `channel_sessions` | sessionDefaultChannelGroup | sessions | '' | the channel group | 40 |
+   | `channel_forms` | sessionDefaultChannelGroup (filter eventName = form event) | eventCount -> `events` | '' | the channel group | 40 |
+
+   `group_visits` counts any visit that touched the page; `group_page` counts engagement on
+   visits that started there. `channel_sessions` and `channel_forms` are ALWAYS read without
+   any channel exclusion, so the app can show what an exclusion removes.
+
    `(not set)` is kept as its own key for regions and sources; a path that is
    not a real path is dropped. Several spellings of one path (query string,
    trailing slash, host) are summed.
@@ -45,7 +53,7 @@ uses).
 ## The settings it applies
 
 `app_settings` row `web_report_config:<clientId>`, JSON
-`{ excludeCountries, groups: [{name, prefix}], formEvent, by, at }`. Sanitised:
+`{ excludeCountries, excludeChannels, groups: [{name, prefix}], formEvent, by, at }`. Sanitised:
 a missing or unparseable value means no exclusions, no groups, form event
 `form_submit`; countries max 25 (trimmed, case-insensitive duplicates dropped);
 groups max 5 (prefix must start with `/`, at most 120 characters, no spaces);
@@ -56,7 +64,10 @@ the daily one included, carries a `notExpression` over an `inListFilter` on
 `country`, combined with any other filter in an `andGroup`. So the totals, the
 trend and every list leave out the same traffic. The applied list is stored on the
 run row (`excluded_countries`, a JSON array) so the app can say exactly what was
-left out. No other bot filter is applied and none is invented.
+left out. **Channels.** `excludeChannels` (max 6, each one of `CHANNEL_GROUPS`, Google's own names, matched
+case-insensitively and sent in Google's spelling) is applied the same way on `sessionDefaultChannelGroup`
+to every request EXCEPT the two channel kinds; the applied list is stored on the run row
+(`excluded_channels`, schema v264). None is left out by default. No other bot filter is applied and none is invented.
 
 ## What is written (the contract)
 
