@@ -238,7 +238,8 @@
     "dfs-ranked-urls": "tsx src/dfs-ranked-urls.ts",
     "tracker-profile": "tsx src/tracker-profile.ts",
     "tracker-crossmatch": "tsx src/tracker-crossmatch.ts",
-    "brownell-dash-audit": "tsx src/brownell-dash-audit.ts"
+    "brownell-dash-audit": "tsx src/brownell-dash-audit.ts",
+    "brownell-dash-audit2": "tsx src/brownell-dash-audit2.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
