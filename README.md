@@ -113,6 +113,9 @@ Force the file-based account list instead of the DB: `-- --accounts=accounts.jso
 
 - **`incremental.yml`** — runs daily at 06:00 UTC (and on demand).
 - **`backfill.yml`** — manual only, with `weeks` and `dry_run` inputs.
+- **`read-ga4-report.yml`** — daily 07:40 UTC (and on demand, dry run by default): the
+  Website performance report read from Google Analytics 4 into three dashboard tables.
+  See `docs/GA4-REPORT.md`.
 
 Both check out this repo *and* the dashboard repo (to run `npm run sync`), then
 execute the worker with credentials injected from encrypted repository secrets.

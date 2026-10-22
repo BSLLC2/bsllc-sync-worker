@@ -492,7 +492,13 @@ hr("8. nothing secret or per-row in an error, a detail or a log");
   console.log = oldLog; console.error = oldErr;
   const allText = [...live.lines, ...live.casualties, live.summary, ...dry.lines, dry.summary, ...out].join("\n");
   ok("no run output contains the token", !allText.includes(SECRET));
-  ok("a live run prints no key at all (no path, region or source)", !live.lines.join("\n").includes("/plan-your-trip") && !live.lines.join("\n").includes("Ohio") && !live.lines.join("\n").includes("google /"));
+  const everyKey = new Set<string>();
+  {
+    const full = await readClientReport(CTX, cfg({ groups: [GROUP] }), deps(property(dataset()).fetch));
+    for (const list of Object.values(full.kinds)) for (const row of list ?? []) { everyKey.add(row.key); if (row.parent) everyKey.add(row.parent); }
+  }
+  const liveText = live.lines.join("\n");
+  ok("a live run prints no key at all (no path, region, source or event name)", everyKey.size > 20 && Array.from(everyKey).every((k) => !liveText.includes(k)), `${everyKey.size} keys checked`);
   ok("a dry run prints at most five keys per list", dry.lines.filter((l) => /first keys:/.test(l)).every((l) => l.split("first keys: ")[1]!.split(" | ").length <= 5) && dry.lines.some((l) => /first keys:/.test(l)));
   ok("a dry run prints counts per kind", REPORT_KINDS.every((k) => dry.lines.some((l) => l.includes(`  ${k}: `))));
   ok("a dry run prints no metric value or per-row numbers beyond counts", !dry.lines.some((l) => /sessions=|engaged|\b445\b/.test(l)));
@@ -597,7 +603,10 @@ hr("10. the workflow, the scripts and CI");
   ok("the run does not overlap itself", /concurrency:[\s\S]{0,120}cancel-in-progress: false/.test(wf));
   ok("it needs only the two existing secrets", /DATABASE_URL: \$\{\{ secrets\.DATABASE_URL \}\}/.test(wf) && /GOOGLE_SERVICE_ACCOUNT_JSON: \$\{\{ secrets\.GOOGLE_SERVICE_ACCOUNT_JSON \}\}/.test(wf) && (wf.match(/secrets\.[A-Z_]+/g) ?? []).every((s) => /DATABASE_URL|GOOGLE_SERVICE_ACCOUNT_JSON/.test(s)));
   ok("npm scripts exist", pkg.scripts["read-ga4-report"] === "tsx src/read-ga4-report.ts" && pkg.scripts["verify-ga4-report"] === "tsx src/verify-ga4-report.ts");
-  ok("CI runs the guard, and the real-database section runs in the store job", /npm run verify-ga4-report/.test(ci));
+  {
+    const cut = ci.indexOf("ads-store:");
+    ok("CI runs the guard in the main job and again, against a real database, in the store job", cut > 0 && /npm run verify-ga4-report/.test(ci.slice(0, cut)) && /npm run verify-ga4-report/.test(ci.slice(cut)));
+  }
   ok("the command sums the summary to the workflow output", /GITHUB_OUTPUT/.test(cli) && /summary=/.test(cli));
   ok("the command exits non-zero only when no client with a property could be read", /if \(pipe\.allFailed\)/.test(cli) && fs.readFileSync(path.join(here, "ga4-report/pipeline.ts"), "utf8").includes("res.attempted > 0 && res.answered === 0"));
   ok("the command creates no table", ![cli, ...fs.readdirSync(path.join(here, "ga4-report")).map((f) => fs.readFileSync(path.join(here, "ga4-report", f), "utf8"))].some((t) => /CREATE\s+TABLE|ALTER\s+TABLE|CREATE\s+(UNIQUE\s+)?INDEX/i.test(t)));
