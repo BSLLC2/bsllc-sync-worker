@@ -237,7 +237,8 @@
     "pcc-research": "tsx src/pcc-research.ts",
     "dfs-ranked-urls": "tsx src/dfs-ranked-urls.ts",
     "tracker-profile": "tsx src/tracker-profile.ts",
-    "tracker-crossmatch": "tsx src/tracker-crossmatch.ts"
+    "tracker-crossmatch": "tsx src/tracker-crossmatch.ts",
+    "brownell-dash-audit": "tsx src/brownell-dash-audit.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",
