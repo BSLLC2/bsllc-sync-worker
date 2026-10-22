@@ -14,20 +14,21 @@
  * because GA4 sends no row for a day with no sessions.
  */
 import type { FetchLike } from "../page-behaviour/types.js";
-export type { FetchLike };
+import type { GroupMatch } from "./groups.js";
+export type { FetchLike, GroupMatch };
 
 /** What a client's run can end as. Same words as the sibling readers. */
 export const RUN_STATUSES = ["ok", "off", "no_key", "error", "no_data", "capped"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** The report kinds written to ga4_report_rows. */
-export const REPORT_KINDS = ["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form", "group_visits", "group_sessions", "channel_sessions", "channel_forms"] as const;
+export const REPORT_KINDS = ["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form", "group_visits", "group_sessions", "channel_sessions", "channel_forms", "month_raw"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
 
 /** Rows kept per month per kind. The ceiling cuts the smallest. OURS. */
 export const TOP_N: Record<ReportKind, number> = {
   region: 100, source_medium: 100, landing_page: 100, form_page: 100, event_name: 100, group_page: 300, group_form: 300, group_visits: 300, group_sessions: 5,
-  channel_sessions: 40, channel_forms: 40,
+  channel_sessions: 40, channel_forms: 40, month_raw: 1,
 };
 
 /** Months of history read by default, and the most a run may be asked for. */
@@ -61,7 +62,8 @@ export const CHANNEL_GROUPS = [
   "Audio", "SMS", "Mobile Push Notifications", "Paid Other",
 ] as const;
 
-export interface ReportGroup { name: string; prefix: string }
+/** A page group: a name, an address and how the address picks pages (groups.ts). A stored group with no mode is "starts with". */
+export interface ReportGroup { name: string; prefix: string; match: GroupMatch }
 /** What the dashboard's `web_report_config:<clientId>` setting holds, after sanitising. */
 export interface ReportConfig {
   excludeCountries: string[];
