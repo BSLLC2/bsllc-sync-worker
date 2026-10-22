@@ -162,14 +162,14 @@ export function harborFacts(end: string): FactRow[] {
 export interface GscFake { read: GscReader; queries: GscQuery[] }
 
 /** Clicks track organic sessions at a steady ratio; the first day is the stated start. */
-export function fakeGsc(opt: { firstDay: string; lastDay: string; ratio?: number }): GscFake {
+export function fakeGsc(opt: { firstDay: string; lastDay: string; ratio?: number; factor?: (day: string) => number }): GscFake {
   const queries: GscQuery[] = [];
   const ratio = opt.ratio ?? 1.2;
   const read: GscReader = async (q) => {
     queries.push(q);
     const rows: GscRow[] = [];
     const dayRows: Array<{ d: string; clicks: number }> = [];
-    for (const d of eachDay(q.range.start, q.range.end)) { if (d < opt.firstDay || d > opt.lastDay) continue; dayRows.push({ d, clicks: Math.round(((new Date(`${d}T00:00:00Z`).getUTCDay() + 6) % 7 >= 5 ? 0.8 : 1) * 80 / ratio) }); }
+    for (const d of eachDay(q.range.start, q.range.end)) { if (d < opt.firstDay || d > opt.lastDay) continue; dayRows.push({ d, clicks: Math.round((opt.factor ? opt.factor(d) : 1) * ((new Date(`${d}T00:00:00Z`).getUTCDay() + 6) % 7 >= 5 ? 0.8 : 1) * 80 / ratio) }); }
     const total = dayRows.reduce((n, r) => n + r.clicks, 0);
     const mk = (keys: string[], clicks: number, impr: number, pos: number): GscRow => ({ keys, clicks, impressions: impr, ctr: impr ? clicks / impr : 0, position: pos });
     const dim = q.dimensions.join(",");
