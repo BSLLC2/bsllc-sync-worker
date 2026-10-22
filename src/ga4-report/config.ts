@@ -6,7 +6,7 @@
  * A missing, unparseable or hostile value means NO exclusions, NO groups and the
  * default form event. A bad single entry is dropped; it never fails the run.
  */
-import { CONFIG_LIMITS, DEFAULT_FORM_EVENT, type ReportConfig, type ReportGroup } from "./types.js";
+import { CHANNEL_GROUPS, CONFIG_LIMITS, DEFAULT_FORM_EVENT, type ReportConfig, type ReportGroup } from "./types.js";
 
 export const CONFIG_KEY_PREFIX = "web_report_config:";
 export const configKey = (clientId: string) => `${CONFIG_KEY_PREFIX}${clientId}`;
@@ -16,7 +16,7 @@ const EVENT_NAME = /^[a-z][a-z0-9_]{0,39}$/;
 const hasControl = (s: string) => /[\u0000-\u001f\u007f]/.test(s);
 
 export function defaultConfig(): ReportConfig {
-  return { excludeCountries: [], groups: [], formEvent: DEFAULT_FORM_EVENT };
+  return { excludeCountries: [], excludeChannels: [], groups: [], formEvent: DEFAULT_FORM_EVENT };
 }
 
 export function sanitiseConfig(raw: unknown): ReportConfig {
@@ -39,6 +39,16 @@ export function sanitiseConfig(raw: unknown): ReportConfig {
       seen.add(k);
       out.excludeCountries.push(t);
       if (out.excludeCountries.length >= CONFIG_LIMITS.countries) break;
+    }
+  }
+
+  if (Array.isArray(o.excludeChannels)) {
+    // Only a channel group name GA4 defines can reach a request, matched whatever its case, and written as GA4 spells it.
+    for (const c of o.excludeChannels) {
+      if (typeof c !== "string") continue;
+      const hit = CHANNEL_GROUPS.find((g) => g.toLowerCase() === c.trim().toLowerCase());
+      if (hit && !out.excludeChannels.includes(hit)) out.excludeChannels.push(hit);
+      if (out.excludeChannels.length >= CONFIG_LIMITS.channels) break;
     }
   }
 

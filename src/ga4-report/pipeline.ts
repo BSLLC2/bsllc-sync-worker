@@ -32,7 +32,8 @@ export function dryRunLines(name: string, r: ClientReportResult): string[] {
   const out = [`(dry run) ${name}: ${r.status}${r.daily ? `, ${r.daily.length} daily rows ${r.firstDay}..${r.lastDay}` : ""}${r.failedKinds.length ? `, failed: ${r.failedKinds.join(",")}` : ""}`];
   if (r.detail) out.push(`  ${r.detail}`);
   const excl = r.config.excludeCountries.length;
-  out.push(`  applied: ${excl} countr${excl === 1 ? "y" : "ies"} left out, ${r.config.groups.length} group${r.config.groups.length === 1 ? "" : "s"}, form event ${r.config.formEvent}`);
+  const exch = r.config.excludeChannels.length;
+  out.push(`  applied: ${excl} countr${excl === 1 ? "y" : "ies"} left out, ${exch} channel${exch === 1 ? "" : "s"} left out, ${r.config.groups.length} group${r.config.groups.length === 1 ? "" : "s"}, form event ${r.config.formEvent}`);
   for (const kind of REPORT_KINDS) {
     const rows = r.kinds[kind];
     if (!rows) continue;

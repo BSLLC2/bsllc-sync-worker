@@ -63,13 +63,13 @@ CREATE TABLE ga4_report_runs (
   id text PRIMARY KEY, client_id text NOT NULL UNIQUE REFERENCES clients(id), status text NOT NULL, detail text,
   first_day text, last_day text, first_month text, last_month text, rows integer NOT NULL DEFAULT 0,
   capped_kinds text, failed_kinds text, excluded_countries text, form_event text, groups_json text,
-  ran_at timestamptz NOT NULL DEFAULT now());
+  ran_at timestamptz NOT NULL DEFAULT now(), excluded_channels text);
 `;
 
 /* ───────────────────────── a pretend property ───────────────────────── */
 
 interface SRow { date: string; country: string; region: string; sm: string; landing: string; sessions: number; engaged: number; secs: number; users: number; keyEvents: number }
-interface ERow { date: string; country: string; page: string; event: string; count: number }
+interface ERow { date: string; country: string; page: string; event: string; count: number; channel: string }
 interface Dataset { sessions: SRow[]; events: ERow[] }
 
 interface Opts {
@@ -101,6 +101,10 @@ function matches(f: unknown, rec: Record<string, string | undefined>): boolean {
   return true;
 }
 
+/** The channel group GA4 would file a source and medium under, for the pretend property. */
+const channelOf = (sm: string): string =>
+  sm.startsWith("(direct)") ? "Direct" : sm.endsWith("/ organic") ? "Organic Search" : sm.endsWith("/ cpc") ? "Paid Search" : sm.endsWith("/ paid_social") ? "Paid Social" : "Unassigned";
+
 function property(data: Dataset, opts: Opts = {}): { fetch: FetchLike; calls: Call[] } {
   const calls: Call[] = [];
   const f: FetchLike = async (url, init) => {
@@ -116,9 +120,9 @@ function property(data: Dataset, opts: Opts = {}): { fetch: FetchLike; calls: Ca
     const isEvents = metrics.includes("eventCount");
     const groups = new Map<string, { dv: string[]; sums: Record<string, number> }>();
     const rowsIn: Array<{ f: Record<string, string | undefined>; m: Record<string, number> }> = isEvents
-      ? data.events.map((e) => ({ f: { date: e.date, country: e.country, pagePath: e.page, eventName: e.event }, m: { eventCount: e.count } }))
+      ? data.events.map((e) => ({ f: { date: e.date, country: e.country, pagePath: e.page, eventName: e.event, sessionDefaultChannelGroup: e.channel }, m: { eventCount: e.count } }))
       : data.sessions.map((s) => ({
-          f: { date: s.date, country: s.country, region: s.region, sessionSourceMedium: s.sm, landingPage: s.landing },
+          f: { date: s.date, country: s.country, region: s.region, sessionSourceMedium: s.sm, landingPage: s.landing, pagePath: s.landing, sessionDefaultChannelGroup: channelOf(s.sm) },
           m: { sessions: s.sessions, engagedSessions: s.engaged, userEngagementDuration: s.secs, totalUsers: s.users, keyEvents: s.keyEvents, conversions: s.keyEvents },
         }));
     for (const r of rowsIn) {
@@ -150,7 +154,7 @@ const TODAY = "2026-10-14";
 const MONTHS = 4;                               // window 2026-06-01 .. 2026-10-12
 const S = (date: string, country: string, region: string, sm: string, landing: string, sessions: number, engaged = Math.floor(sessions / 2), secs = sessions * 30, users = sessions, keyEvents = 0): SRow =>
   ({ date, country, region, sm, landing, sessions, engaged, secs, users, keyEvents });
-const E = (date: string, country: string, page: string, event: string, count: number): ERow => ({ date, country, page, event, count });
+const E = (date: string, country: string, page: string, event: string, count: number, channel = "Organic Search"): ERow => ({ date, country, page, event, count, channel });
 
 function dataset(): Dataset {
   const sessions: SRow[] = [
@@ -174,7 +178,7 @@ function dataset(): Dataset {
     E("20260610", "United States", "/plan-your-trip/advisor/ohio/", "form_submit", 1),
     E("20260610", "United States", "/contact", "page_view", 99),
     E("20260705", "United States", "/plan-your-trip/advisor/cincinnati", "form_submit", 2),
-    E("20260705", "India", "/contact", "form_submit", 30),
+    E("20260705", "India", "/contact", "form_submit", 30, "Direct"),
     E("20261010", "United States", "/contact", "form_submit", 4),
     E("20260801", "United States", "/lp/spring", "lead_form", 5),
   ];
@@ -252,7 +256,7 @@ hr("3. what is asked: the country exclusion rides on every request");
   // Every request of a real run, with and without the exclusion.
   const run = async (config: ReturnType<typeof cfg>) => { const p = property(dataset()); await readClientReport(CTX, config, deps(p.fetch)); return p.calls; };
   const full = await run(cfg({ excludeCountries: India, groups: [GROUP, { name: "Lps", prefix: "/lp/" }] }));
-  ok("a configured run makes the daily, the five reports and two requests per group", full.length === 1 + 5 + 2 * 2, `${full.length} requests`);
+  ok("a configured run makes the daily, the seven reports and three requests per group", full.length === 1 + 7 + 3 * 2, `${full.length} requests`);
   ok("EVERY request of the run carries the exclusion", full.every((c) => JSON.stringify(c.body.dimensionFilter ?? {}).includes("inListFilter") && JSON.stringify(c.body.dimensionFilter).includes("Russia")));
   const plain = await run(cfg({ groups: [GROUP] }));
   ok("with nothing excluded no request names a country filter", plain.every((c) => !JSON.stringify(c.body).includes("inListFilter")));
@@ -261,7 +265,7 @@ hr("3. what is asked: the country exclusion rides on every request");
 
   const specs = kindSpecs([GROUP], "form_submit");
   const kinds = specs.map((s) => s.kind);
-  ok("one spec per kind, plus a page and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form"]));
+  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "group_page", "group_visits", "group_form"]));
   const byKind = Object.fromEntries(specs.map((s) => [s.kind, reportRequest(w, s, s.ladder[0]!, [])])) as Record<string, any>;
   ok("region asks for country and region", byKind.region.dimensions.map((d: any) => d.name).join() === "yearMonth,country,region");
   ok("sources ask for sessionSourceMedium", byKind.source_medium.dimensions[1].name === "sessionSourceMedium");
@@ -424,7 +428,7 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
 
   const failAll = property(dataset(), { fail: (b) => ((b.dimensions as any[]).length > 1 ? { status: 403, body: "denied" } : null) });
   const all = await readClientReport(CTX, defaultConfig(), deps(failAll.fetch));
-  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 5);
+  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 7);
 
   // Retries.
   let n = 0;
@@ -467,7 +471,7 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
     return endless(u, init);
   };
   const hb = await readClientReport(CTX, defaultConfig(), deps(halfEndless));
-  ok("reports past the ceiling are `capped`, named failed and left untouched, never written cut", hb.status === "capped" && hb.failedKinds.length === 5 && hb.daily!.length > 0 && hb.kinds.region === undefined);
+  ok("reports past the ceiling are `capped`, named failed and left untouched, never written cut", hb.status === "capped" && hb.failedKinds.length === 7 && hb.daily!.length > 0 && hb.kinds.region === undefined);
 }
 
 /* ═════════════════════════ 8. no secret and no row text in anything said ═════════════════════════ */
@@ -576,7 +580,7 @@ const kindOf = (sql: string) => (/^INSERT INTO ga4_site_days/.test(sql) ? "day" 
   const colsOf = (sql: string) => /\(([^)]*)\)\s*VALUES/s.exec(sql)![1]!.split(",").map((c) => c.trim());
   ok("the day columns are the contract's", colsOf(INSERT_SITE_DAY).join() === "id,client_id,day,sessions,engaged_sessions,engagement_seconds,users,key_events,synced_at");
   ok("the row columns are the contract's", colsOf(INSERT_REPORT_ROW).join() === "id,client_id,month,kind,parent,key,sessions,engaged_sessions,engagement_seconds,events,synced_at");
-  ok("the run columns are the contract's", colsOf(INSERT_RUN).join() === "id,client_id,status,detail,first_day,last_day,first_month,last_month,rows,capped_kinds,failed_kinds,excluded_countries,form_event,groups_json,ran_at");
+  ok("the run columns are the contract's", colsOf(INSERT_RUN).join() === "id,client_id,status,detail,first_day,last_day,first_month,last_month,rows,capped_kinds,failed_kinds,excluded_countries,form_event,groups_json,ran_at,excluded_channels");
 }
 
 /* ═════════════════════════ 10. the workflow and the wiring ═════════════════════════ */
@@ -617,7 +621,7 @@ hr("10. the workflow, the scripts and CI");
     const p = property(dataset());
     await readClientReport(CTX, cfg({ groups: [GROUP], excludeCountries: ["India"] }), deps(p.fetch));
     const used = new Set(p.calls.flatMap((c) => (c.body.dimensions as Array<{ name: string }>).map((d) => d.name)));
-    const allowed = new Set(["date", "yearMonth", "country", "region", "sessionSourceMedium", "landingPage", "pagePath", "eventName"]);
+    const allowed = new Set(["date", "yearMonth", "country", "region", "sessionSourceMedium", "landingPage", "pagePath", "eventName", "sessionDefaultChannelGroup"]);
     ok("no visitor-level dimension is ever requested (only dates, places, sources and pages)", Array.from(used).every((n) => allowed.has(n)), Array.from(used).join());
     const metricsUsed = new Set(p.calls.flatMap((c) => (c.body.metrics as Array<{ name: string }>).map((m) => m.name)));
     ok("and only counts are asked for", Array.from(metricsUsed).every((n) => ["sessions", "engagedSessions", "userEngagementDuration", "totalUsers", "keyEvents", "eventCount"].includes(n)), Array.from(metricsUsed).join());
@@ -734,6 +738,49 @@ async function storeSection(url: string) {
     await c.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => {});
     await c.end();
   }
+}
+
+/* ═════════════════════════ 12. channels left out, channel reports, visits to a group's pages ═════════════════════════ */
+hr("12. channels left out of the report, the two channel reports, and visits that looked at a group's pages");
+{
+  ok("no channel configured: none left out", defaultConfig().excludeChannels.length === 0);
+  const c1 = cfg({ excludeChannels: ["direct", " Unassigned ", "Unassigned", "(not set)", "Made Up", 7, null, "paid social"] });
+  ok("channels: only GA4's own names, matched whatever the case, written as GA4 spells them, once each", JSON.stringify(c1.excludeChannels) === JSON.stringify(["Direct", "Unassigned", "Paid Social"]), JSON.stringify(c1.excludeChannels));
+  ok("a channel list that is not a list reads as none", cfg({ excludeChannels: "Direct" }).excludeChannels.length === 0);
+  ok(`at most ${CONFIG_LIMITS.channels} channels`, cfg({ excludeChannels: ["Direct", "Unassigned", "Email", "Display", "Affiliates", "Audio", "SMS", "Referral"] }).excludeChannels.length === CONFIG_LIMITS.channels);
+
+  const CH = ["Direct", "Unassigned"];
+  const w = readWindow(TODAY, MONTHS)!;
+  const withCh = dailyRequest(w, ["sessions"], [], CH) as Record<string, any>;
+  ok("the daily request leaves the channels out through the channel group dimension", JSON.stringify(withCh.dimensionFilter).includes("sessionDefaultChannelGroup") && JSON.stringify(withCh.dimensionFilter).includes("Unassigned") && "notExpression" in withCh.dimensionFilter);
+  ok("with country and channel both, the two filters are ANDed", (dailyRequest(w, ["sessions"], ["India"], CH) as any).dimensionFilter.andGroup.expressions.length === 2);
+
+  const specs = kindSpecs([GROUP], "form_submit");
+  const kindOf = (k: string) => specs.find((x) => x.kind === k)!;
+  ok("the two channel reports ask for the channel group and ignore the channel exclusion", ["channel_sessions", "channel_forms"].every((k) => {
+    const req = reportRequest(w, kindOf(k), kindOf(k).ladder[0]!, [], CH) as Record<string, any>;
+    return (req.dimensions as any[])[1].name === "sessionDefaultChannelGroup" && !JSON.stringify(req.dimensionFilter ?? {}).includes("Unassigned");
+  }));
+  ok("the channel form report counts only the form event", JSON.stringify(reportRequest(w, kindOf("channel_forms"), ["eventCount"], [], CH)).includes('"value":"form_submit"'));
+  ok("every other report carries the channel exclusion", specs.filter((x) => !x.ignoreChannels).every((x) => JSON.stringify(reportRequest(w, x, x.ladder[0]!, [], CH)).includes("Unassigned")));
+  ok("the visits report for a group asks pagePath, sessions and the prefix", (() => { const sp = kindOf("group_visits"); const r = reportRequest(w, sp, sp.ladder[0]!, [], []) as Record<string, any>; return (r.dimensions as any[])[1].name === "pagePath" && JSON.stringify(r.dimensionFilter).includes("BEGINS_WITH") && (r.metrics as any[]).some((m) => m.name === "sessions"); })());
+
+  const run = await readClientReport(CTX, cfg({ groups: [GROUP], excludeChannels: CH }), deps(property(dataset()).fetch));
+  ok("the run is ok with channels left out", run.status === "ok" && run.failedKinds.length === 0, `${run.status} ${run.detail ?? ""}`);
+  ok("the channel left out is absent from the daily total and from the lists", run.daily![0]!.sessions === 65, String(run.daily![0]!.sessions));
+  const cs = run.kinds.channel_sessions!;
+  ok("channel sessions: unfiltered by channel, so the left-out channels are counted", cs.some((x) => x.key === "Direct" && x.month === "2026-06" && x.sessions === 4) && cs.some((x) => x.key === "Organic Search"));
+  ok("channel sessions: keyed by the channel group, month by month", cs.every((x) => /^\d{4}-\d{2}$/.test(x.month) && x.parent === ""));
+  const cf = run.kinds.channel_forms!;
+  ok("channel forms: the form event only, by channel, events not sessions", cf.some((x) => x.key === "Organic Search" && x.month === "2026-06" && x.events === 4) && cf.every((x) => x.sessions === null && (x.events ?? 0) > 0) && !cf.some((x) => x.key === "Paid Social"));
+  ok("the sources list leaves the excluded channels' traffic out", !run.kinds.source_medium!.some((x) => x.key.startsWith("(direct)")));
+  const gv = run.kinds.group_visits!;
+  ok("group visits: pages under the prefix, query gone, parent is the prefix", gv.length > 0 && gv.every((x) => x.parent === GROUP.prefix && x.key.startsWith("/plan-your-trip/advisor/") && !x.key.includes("?")));
+  ok("the applied channel list is on the result", run.config.excludeChannels.join() === "Direct,Unassigned");
+  const none = await readClientReport(CTX, defaultConfig(), deps(property(dataset()).fetch));
+  ok("with no groups the visits kind clears as nothing, like the other group kinds", Array.isArray(none.kinds.group_visits) && none.kinds.group_visits!.length === 0);
+  ok("the channel kinds have a row cap", TOP_N.channel_sessions > 0 && TOP_N.channel_forms > 0 && TOP_N.group_visits > 0);
+  ok("the run row stores the channels it applied", INSERT_RUN.includes("excluded_channels") && INSERT_RUN_KEEP.includes("excluded_channels") && !/excluded_channels = EXCLUDED/.test(INSERT_RUN_KEEP.split("DO UPDATE SET")[1] ?? ""));
 }
 
 console.log("\n" + "─".repeat(72));

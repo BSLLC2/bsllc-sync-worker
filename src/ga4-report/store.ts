@@ -38,14 +38,14 @@ export const DELETE_KIND_MONTHS = `DELETE FROM ga4_report_rows WHERE client_id =
 
 export const INSERT_RUN = `INSERT INTO ga4_report_runs
   (id, client_id, status, detail, first_day, last_day, first_month, last_month, rows, capped_kinds, failed_kinds,
-   excluded_countries, form_event, groups_json, ran_at)
- VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+   excluded_countries, form_event, groups_json, ran_at, excluded_channels)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
  ON CONFLICT (client_id) DO UPDATE SET
    status = EXCLUDED.status, detail = EXCLUDED.detail, first_day = EXCLUDED.first_day, last_day = EXCLUDED.last_day,
    first_month = EXCLUDED.first_month, last_month = EXCLUDED.last_month, rows = EXCLUDED.rows,
    capped_kinds = EXCLUDED.capped_kinds, failed_kinds = EXCLUDED.failed_kinds,
    excluded_countries = EXCLUDED.excluded_countries, form_event = EXCLUDED.form_event,
-   groups_json = EXCLUDED.groups_json, ran_at = EXCLUDED.ran_at`;
+   groups_json = EXCLUDED.groups_json, ran_at = EXCLUDED.ran_at, excluded_channels = EXCLUDED.excluded_channels`;
 
 /**
  * The run row of a run that wrote no rows (off, error, no_data, too big). The rows
@@ -55,8 +55,8 @@ export const INSERT_RUN = `INSERT INTO ga4_report_runs
  */
 export const INSERT_RUN_KEEP = `INSERT INTO ga4_report_runs
   (id, client_id, status, detail, first_day, last_day, first_month, last_month, rows, capped_kinds, failed_kinds,
-   excluded_countries, form_event, groups_json, ran_at)
- VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+   excluded_countries, form_event, groups_json, ran_at, excluded_channels)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
  ON CONFLICT (client_id) DO UPDATE SET
    status = EXCLUDED.status, detail = EXCLUDED.detail,
    capped_kinds = EXCLUDED.capped_kinds, failed_kinds = EXCLUDED.failed_kinds, ran_at = EXCLUDED.ran_at`;
@@ -81,6 +81,7 @@ async function writeKind(c: Queryable, clientId: string, kind: ReportKind, month
 function appliedConfig(r: ClientReportResult) {
   return {
     excluded: JSON.stringify(r.config.excludeCountries),
+    channels: JSON.stringify(r.config.excludeChannels),
     event: r.config.formEvent,
     groups: JSON.stringify(r.config.groups),
   };
@@ -90,7 +91,7 @@ export async function writeRun(c: Queryable, clientId: string, r: ClientReportRe
   const cfg = appliedConfig(r);
   await c.query(r.daily ? INSERT_RUN : INSERT_RUN_KEEP, [
     id("run", clientId), clientId, r.status, r.detail, r.firstDay, r.lastDay, r.firstMonth, r.lastMonth, r.rows,
-    r.cappedKinds.join(","), r.failedKinds.join(","), cfg.excluded, cfg.event, cfg.groups, at,
+    r.cappedKinds.join(","), r.failedKinds.join(","), cfg.excluded, cfg.event, cfg.groups, at, cfg.channels,
   ]);
 }
 

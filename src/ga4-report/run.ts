@@ -60,7 +60,7 @@ export async function readClientReport(ctx: ClientCtx, config: ReportConfig, dep
 
   /* ── the daily totals are the gate ── */
   let daily;
-  try { daily = await readDaily(io, w, config.excludeCountries); }
+  try { daily = await readDaily(io, w, config.excludeCountries, config.excludeChannels); }
   catch (e) { return result(config, "error", `The daily totals could not be read, so nothing was written. ${say(e)}`); }
   if (daily.kind === "too_big") {
     return result(config, "capped", "The daily totals were more rows than one read allows, so nothing was written for this account.");
@@ -85,7 +85,7 @@ export async function readClientReport(ctx: ClientCtx, config: ReportConfig, dep
     if (ofKind.length === 0) { kinds[kind] = []; continue; }
     attempted += 1;
     try {
-      const r = await readKind(io, w, ofKind, config.excludeCountries, monthSet);
+      const r = await readKind(io, w, ofKind, config.excludeCountries, monthSet, config.excludeChannels);
       if (r.tooBig) { failed.push(kind); tooBig.push(kind); continue; }
       kinds[kind] = r.rows;
       if (r.cut) capped.push(kind);
