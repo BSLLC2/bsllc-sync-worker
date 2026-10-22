@@ -9,7 +9,15 @@
  */
 import { addDays } from "../page-behaviour/paths.js";
 
-export interface Window { start: string; end: string }
+export interface Window {
+  start: string;
+  end: string;
+  /**
+   * A comparison range the person chose. When set it REPLACES "the period of the same length
+   * straight before"; the same dates a year earlier is still worked out. Never part of a request.
+   */
+  compare?: { start: string; end: string };
+}
 export interface Periods { current: Window; prior: Window; priorYear: Window }
 
 export const isYmd = (s: unknown): s is string => {
@@ -30,12 +38,32 @@ export function yearEarlier(ymd: string): string {
   return md === "02-29" ? `${y}-02-28` : `${y}-${md}`;
 }
 
+/** A reason a chosen comparison range cannot be used, or null. It may not overlap the window: a day in both would be counted on both sides. */
+export function compareProblem(w: Window): string | null {
+  const c = w.compare;
+  if (!c) return null;
+  if (!isYmd(c.start) || !isYmd(c.end)) return "The comparison range needs two real dates (YYYY-MM-DD).";
+  if (c.start > c.end) return "The comparison range starts after it ends.";
+  if (c.start <= w.end && w.start <= c.end) return "The comparison range overlaps the window, so some days would be counted on both sides.";
+  return null;
+}
+
+/** How a sentence names the comparison period. */
+export const priorName = (w: Window): string => (w.compare ? "the comparison period" : "the period before");
+
+export const hasCustomCompare = (w: Window): boolean => !!w.compare;
+
+/** The window without its comparison range: what a request is built from. */
+export const plain = (w: Window): Window => ({ start: w.start, end: w.end });
+
 export function periodsFor(w: Window): Periods {
   const n = daysIn(w);
   const priorEnd = addDays(w.start, -1);
+  const bad = compareProblem(w);
+  if (bad) throw new Error(bad);
   return {
-    current: w,
-    prior: { start: addDays(priorEnd, -(n - 1)), end: priorEnd },
+    current: plain(w),
+    prior: w.compare ? { start: w.compare.start, end: w.compare.end } : { start: addDays(priorEnd, -(n - 1)), end: priorEnd },
     priorYear: { start: yearEarlier(w.start), end: yearEarlier(w.end) },
   };
 }

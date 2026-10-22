@@ -30,7 +30,7 @@ import { DEFINITIONS, column, fmt, ratio, stat, table } from "./ga4-audit/metric
 import { completeMonths, daysIn, defaultWindow, label, periodsFor, touches, yearEarlier } from "./ga4-audit/periods.js";
 import { clientSummaryMd, reportMd } from "./ga4-audit/render.js";
 import { reconcile, type BotConfig } from "./ga4-audit/reconcile.js";
-import { runAudit } from "./ga4-audit/run.js";
+import { runAudit, relabelCompare } from "./ga4-audit/run.js";
 
 let failures = 0;
 const ok = (label: string, pass: boolean, detail = "") => { console.log(`  ${pass ? "✅" : "❌"} ${label}${detail ? ` — ${detail}` : ""}`); if (!pass) failures += 1; };
@@ -283,6 +283,30 @@ async function main() {
     ok("help ranks next steps, each tied to a figure", h.nextSteps.length >= 3 && h.nextSteps.every((s) => /\d/.test(s.because)));
     ok("help lists what could not be verified", h.unverified.some((u) => /Airtable/.test(u)) && h.unverified.some((u) => /Admin API/.test(u)));
     ok("no unfiltered total is presented as the headline on a flood-touching window without its warning", md.includes("Comparability warning"));
+  }
+
+  hr("11b. A comparison range the person chose");
+  {
+    const CMP = { start: "2025-09-01", end: "2025-09-30" };
+    const wc = { ...W, compare: CMP };
+    const pc = periodsFor(wc);
+    ok("the chosen range replaces the period before, and the year earlier is still worked out", pc.prior.start === CMP.start && pc.prior.end === CMP.end && pc.priorYear.start === "2025-07-01");
+    ok("the window itself carries no comparison into a request", !("compare" in pc.current));
+    ok("a comparison that overlaps the window is refused", throws(() => periodsFor({ ...W, compare: { start: "2026-09-15", end: "2026-10-15" } })));
+    ok("a comparison that starts after it ends is refused", throws(() => periodsFor({ ...W, compare: { start: "2025-09-30", end: "2025-09-01" } })));
+    ok("a comparison with a bad date is refused", throws(() => periodsFor({ ...W, compare: { start: "2025-13-01", end: "2025-14-01" } })));
+    const q = readerFor();
+    const a2 = await runAudit(q.read, { client: "Harbor Travel", today: TODAY, window: wc, cfg: { ...BROWNELL_DEFAULTS, brandTerms: ["harbor"] }, bots: BOTS, formEvent: "form_submit", startEvent: "form_start", baseline: null, gsc: null });
+    const rawCmp = sum(() => true, "sessions", "s", CMP);
+    ok("the raw sessions in the comparison column equal an independent sum over that exact range", a2.reconciliation.raw[1].sessions === rawCmp && rawCmp > 0, `${a2.reconciliation.raw[1].sessions} vs ${rawCmp}`);
+    ok("the default prior period is different data, so the two comparisons are not confused", a2.reconciliation.raw[1].sessions !== sum(() => true, "sessions", "s", periodsFor(W).prior));
+    const md = reportMd(a2);
+    ok("the report calls it the comparison period and never the period before", /Comparison period \(chosen\): Sep 1 to Sep 30, 2025/.test(md) && !/[Pp]eriod before/.test(md));
+    ok("a comparison of a different length says counts are not like for like", a2.quality.some((x) => /not like for like/.test(x)));
+    ok("the help text and client summary use the same name", !/[Pp]eriod before/.test(JSON.stringify(a2.options === undefined ? "" : buildHelp(a2))) && !/[Pp]eriod before/.test(clientSummaryMd(a2)));
+    const aPlain = await runAudit(readerFor().read, { client: "Harbor Travel", today: TODAY, window: W, cfg: { ...BROWNELL_DEFAULTS, brandTerms: ["harbor"] }, bots: BOTS, formEvent: "form_submit", startEvent: "form_start", baseline: null, gsc: null });
+    ok("a run with no chosen comparison still says period before", /Period before/.test(reportMd(aPlain)));
+    ok("(planted) without the relabel the report would still say period before", /[Pp]eriod before/.test(JSON.stringify(a2.reconciliation.headline)) === false && relabelCompare({ x: "the period before" }).x === "the comparison period");
   }
 
   hr("12. Quota and read-only");

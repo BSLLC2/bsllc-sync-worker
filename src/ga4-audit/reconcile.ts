@@ -136,7 +136,7 @@ export function effectTable(r: Reconciliation): Table {
 
 export function headlineTable(r: Reconciliation, p = periodsFor(r.window)): Table {
   const cols: Array<[string, Window, Headline, boolean]> = [
-    ["Chosen window", p.current, r.headline[0], r.comparable.current], ["Period before", p.prior, r.headline[1], r.comparable.prior], ["Same dates a year earlier", p.priorYear, r.headline[2], r.comparable.priorYear],
+    ["Chosen window", p.current, r.headline[0], r.comparable.current], [r.window.compare ? "Comparison period" : "Period before", p.prior, r.headline[1], r.comparable.prior], ["Same dates a year earlier", p.priorYear, r.headline[2], r.comparable.priorYear],
   ];
   return table({
     id: "headline", title: "Headline, filtered basis", range: `${label(p.current)} against ${label(p.prior)} and ${label(p.priorYear)}`, filter: r.headlineFilter,

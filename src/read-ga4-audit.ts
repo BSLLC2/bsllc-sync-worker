@@ -11,7 +11,7 @@ import { sanitiseConfig, configKey } from "./ga4-report/config.js";
 import { ga4Reader } from "./ga4-audit/ga4.js";
 import { BROWNELL_DEFAULTS, type AuditConfig } from "./ga4-audit/classify.js";
 import { BROWNELL_BASELINE } from "./ga4-audit/baseline.js";
-import { defaultWindow, isYmd, type Window } from "./ga4-audit/periods.js";
+import { compareProblem, defaultWindow, isYmd, type Window } from "./ga4-audit/periods.js";
 import { gscReader, listSites, pickProperty } from "./ga4-audit/gsc.js";
 import { runAudit, type Audit } from "./ga4-audit/run.js";
 import { clientSummaryMd, reportMd } from "./ga4-audit/render.js";
@@ -22,6 +22,7 @@ import { DEFAULT_FLOOD_PATHS } from "./ga4-audit/reconcile.js";
  * and Search Console, prints and writes a report and a one-page client summary.
  *
  *   npm run read-ga4-audit -- --client=<id-or-slug> [--start=YYYY-MM-DD --end=YYYY-MM-DD]
+ *                             [--compare-start=YYYY-MM-DD --compare-end=YYYY-MM-DD]   (replaces "the period before")
  *                             [--out=audit-out] [--cache=.ga4-audit-cache] [--json]
  *
  * READ-ONLY. Google: the analytics and Search Console read scopes only. Database: three
@@ -92,6 +93,9 @@ async function main() {
   const today = ymd(new Date());
   const win: Window = { start: arg("start") ?? defaultWindow(today, LAG_DAYS).start, end: arg("end") ?? defaultWindow(today, LAG_DAYS).end };
   if (!isYmd(win.start) || !isYmd(win.end) || win.start > win.end) throw new Error("--start and --end must be dates (YYYY-MM-DD), start not after end.");
+  const cs = arg("compare-start"), ce = arg("compare-end");
+  if ((cs && !ce) || (!cs && ce)) throw new Error("Pass --compare-start and --compare-end together.");
+  if (cs && ce) { win.compare = { start: cs, end: ce }; const bad = compareProblem(win); if (bad) throw new Error(bad); }
   if (win.end > addDays(today, -LAG_DAYS)) console.log(`Note: the window ends after ${addDays(today, -LAG_DAYS)}; the newest days may still change.`);
 
   const facts = await readClient(want);
@@ -124,7 +128,7 @@ async function main() {
   const report = reportMd(audit), summary = clientSummaryMd(audit);
   const out = arg("out") ?? "audit-out";
   mkdirSync(out, { recursive: true });
-  const stem = `${facts.slug}-${win.start}-to-${win.end}`;
+  const stem = `${facts.slug}-${win.start}-to-${win.end}${win.compare ? `-vs-${win.compare.start}-to-${win.compare.end}` : ""}`;
   writeFileSync(join(out, `${stem}.report.md`), report);
   writeFileSync(join(out, `${stem}.client-summary.md`), summary);
   if (process.argv.includes("--json")) writeFileSync(join(out, `${stem}.audit.json`), JSON.stringify(audit, (_k, v) => (v instanceof Map ? Object.fromEntries(v) : v), 2));

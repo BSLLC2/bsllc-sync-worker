@@ -4,7 +4,7 @@
  * every column header carries its label ("confirmed from data" or "inference").
  */
 import { DEFINITIONS, fmt, fmtChange, change, type Table } from "./metrics.js";
-import { label, periodsFor } from "./periods.js";
+import { label, periodsFor, priorName } from "./periods.js";
 import { effectTable, headlineTable } from "./reconcile.js";
 import { buildHelp } from "./help.js";
 import type { Audit } from "./run.js";
@@ -22,7 +22,7 @@ export function reportMd(a: Audit): string {
   const h = buildHelp(a);
   const p = periodsFor(a.window);
   const out: string[] = [];
-  out.push(`# ${a.client}: GA4 and Search Console audit`, "", `Run on ${a.generatedOn}. Window: ${label(a.window)}. Period before: ${label(p.prior)}. Same dates a year earlier: ${label(p.priorYear)}.`, "", "Read-only. Nothing here writes to Google Analytics, Search Console or any database. Every figure is labelled \"confirmed from data\" or \"inference\". An inference says what the data suggests and is never proof.", "");
+  out.push(`# ${a.client}: GA4 and Search Console audit`, "", `Run on ${a.generatedOn}. Window: ${label(a.window)}. ${a.window.compare ? "Comparison period (chosen)" : "Period before"}: ${label(p.prior)}. Same dates a year earlier: ${label(p.priorYear)}.`, "", "Read-only. Nothing here writes to Google Analytics, Search Console or any database. Every figure is labelled \"confirmed from data\" or \"inference\". An inference says what the data suggests and is never proof.", "");
   const changed = a.checks.filter((c) => c.status === "changed");
   out.push("## 0. Stored facts, re-checked", "");
   if (changed.length) out.push(`**${changed.length} stored fact${changed.length > 1 ? "s" : ""} no longer hold.** Everything below may rest on them. Read these first.`, ""); else if (a.checks.length) out.push("Every stored fact that could be checked still holds. Facts that cannot be checked are listed in section 10.", "");
@@ -59,7 +59,7 @@ export function clientSummaryMd(a: Audit): string {
   const hd = a.reconciliation.headline;
   const lines: string[] = [];
   lines.push(`# ${a.client}: website summary`, "", `Dates: ${label(a.window)}. Compared with ${label(p.prior)}${a.reconciliation.comparable.priorYear ? ` and ${label(p.priorYear)}` : ""}.`, "");
-  lines.push(`- **Visits:** ${fmt(hd[0].sessions, "count")}${a.reconciliation.comparable.prior ? ` (${fmtChange(change(hd[0].sessions, hd[1].sessions))} on the period before)` : ""}. A visit is one session, not one person.`);
+  lines.push(`- **Visits:** ${fmt(hd[0].sessions, "count")}${a.reconciliation.comparable.prior ? ` (${fmtChange(change(hd[0].sessions, hd[1].sessions))} on ${priorName(a.window)})` : ""}. A visit is one session, not one person.`);
   lines.push(`- **Engaged visits:** ${fmt(hd[0].rate, "percent")}. A visit counts as engaged when it lasts at least 10 seconds, views two pages, or submits a form.`);
   lines.push(`- **Average time engaged per visit:** ${fmt(hd[0].avgSeconds, "seconds")}.`);
   lines.push(`- **Form submit events:** ${fmt(a.funnel.submitRequestLike[0], "count")} on pages other than the homepage and directory. This is how often the form event fired. It is not a count of enquiries.`);

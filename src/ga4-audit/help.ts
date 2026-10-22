@@ -5,7 +5,7 @@
  * the audit read; nothing is written from memory.
  */
 import { fmt, fmtChange, change, ratio } from "./metrics.js";
-import { label, periodsFor } from "./periods.js";
+import { label, periodsFor, priorName } from "./periods.js";
 import type { Audit } from "./run.js";
 
 export interface Help {
@@ -24,17 +24,17 @@ export function buildHelp(a: Audit): Help {
   const tp: Help["talkingPoints"] = [];
   const range = label(a.window);
   tp.push({
-    point: `${range}: ${n(h[0].sessions)} visits, ${fmt(h[0].rate, "percent")} of them engaged${comparable.prior ? `, ${fmtChange(change(h[0].sessions, h[1].sessions))} on the period before` : ""}${comparable.priorYear ? ` and ${fmtChange(change(h[0].sessions, h[2].sessions))} on the same dates a year earlier` : ""}.`,
+    point: `${range}: ${n(h[0].sessions)} visits, ${fmt(h[0].rate, "percent")} of them engaged${comparable.prior ? `, ${fmtChange(change(h[0].sessions, h[1].sessions))} on ${priorName(a.window)}` : ""}${comparable.priorYear ? ` and ${fmtChange(change(h[0].sessions, h[2].sessions))} on the same dates a year earlier` : ""}.`,
     caveat: `Counted with this rule: ${a.reconciliation.headlineFilter}.${a.reconciliation.warning ? " " + a.reconciliation.warning : ""} A "visit" is one session, not a person.`,
   });
   if (a.gsc?.available[0]) {
     const ov = a.gsc.tables[0]!.rows[0]!;
-    tp.push({ point: `Google search sent ${n(ov.clicks as number)} clicks in the same dates${a.gsc.available[1] ? `, ${fmtChange(change(ov.clicks as number, a.gsc.tables[0]!.rows[1]!.clicks as number))} on the period before` : ""}.`, caveat: "From Search Console, which automated visits do not touch. It reports a query for only part of the clicks." });
+    tp.push({ point: `Google search sent ${n(ov.clicks as number)} clicks in the same dates${a.gsc.available[1] ? `, ${fmtChange(change(ov.clicks as number, a.gsc.tables[0]!.rows[1]!.clicks as number))} on ${priorName(a.window)}` : ""}.`, caveat: "From Search Console, which automated visits do not touch. It reports a query for only part of the clicks." });
   }
   const adv = a.advisors.tables.leaders.rows;
   if (adv.length) tp.push({ point: `${a.advisors.advisors.length} advisor microsites had visits. The busiest, ${adv[0]!.name}, had ${n(adv[0]!.sessions as number)}.`, caveat: "A visit counts once on an advisor's main page, and one visit can count for two advisors. The directory and the homepage are not counted as advisors." });
   const fl = a.funnel;
-  tp.push({ point: `The site recorded ${n(fl.submitRequestLike[0])} form submit events on pages other than the homepage and directory${comparable.prior ? `, ${fmtChange(change(fl.submitRequestLike[0], fl.submitRequestLike[1]))} on the period before` : ""}.`, caveat: `A submit event is not an enquiry. It also fires on searches and counts repeats. ${n(fl.submitAll[0])} events in all, of which ${n(fl.searchSubmits[0])} came from advisor searches.` });
+  tp.push({ point: `The site recorded ${n(fl.submitRequestLike[0])} form submit events on pages other than the homepage and directory${comparable.prior ? `, ${fmtChange(change(fl.submitRequestLike[0], fl.submitRequestLike[1]))} on ${priorName(a.window)}` : ""}.`, caveat: `A submit event is not an enquiry. It also fires on searches and counts repeats. ${n(fl.submitAll[0])} events in all, of which ${n(fl.searchSubmits[0])} came from advisor searches.` });
   const ai = a.sources.tables.ai.rows[0];
   if (ai && (ai.s0 as number) > 0) tp.push({ point: `AI assistants sent ${n(ai.s0 as number)} visits.`, caveat: "A floor: an assistant that passes no address lands in Direct." });
 

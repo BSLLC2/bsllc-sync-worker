@@ -15,7 +15,7 @@ import { readGsc, type GscReader, type GscReading } from "./gsc.js";
 import { column, ratio, table, type Table } from "./metrics.js";
 import { FLOOD_WINDOW, headlineFilter, reconcile, type BotConfig, type Reconciliation } from "./reconcile.js";
 import { addDays } from "../page-behaviour/paths.js";
-import { label, periodsFor, touches, type Window } from "./periods.js";
+import { daysIn, hasCustomCompare, label, periodsFor, touches, type Window } from "./periods.js";
 import { readMovers, readSources, type MoverReading, type SourceReading } from "./traffic.js";
 
 export interface AuditOptions {
@@ -57,7 +57,24 @@ async function daily(read: Reader, range: Window, metric: string, filter: Return
   return { days, truncated: res.truncated };
 }
 
+/** The name of the comparison period when a person chose it: it is not "the period before" anything. */
+export function relabelCompare<T>(v: T): T {
+  const swap = (t: string) => t.replace(/Period before/g, "Comparison period").replace(/period before/g, "comparison period").replace(/Comparison period: straight before/g, "Comparison period");
+  const walk = (x: unknown): unknown => {
+    if (typeof x === "string") return swap(x);
+    if (Array.isArray(x)) return x.map(walk);
+    if (x && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype) return Object.fromEntries(Object.entries(x as Record<string, unknown>).map(([k, val]) => [k, walk(val)]));
+    return x;
+  };
+  return walk(v) as T;
+}
+
 export async function runAudit(read: Reader, o: AuditOptions): Promise<Audit> {
+  const audit = await runAuditInner(read, o);
+  return hasCustomCompare(o.window) ? relabelCompare(audit) : audit;
+}
+
+async function runAuditInner(read: Reader, o: AuditOptions): Promise<Audit> {
   const quality: string[] = [];
   const hf = headlineFilter(o.bots);
   const countriesOnly = notCountries(o.bots.excludeCountries) ?? undefined;
@@ -131,6 +148,7 @@ export async function runAudit(read: Reader, o: AuditOptions): Promise<Audit> {
 
   const checks = o.baseline ? orderChecks(await verifyBaseline(read, o.baseline, { gscFirstDay: gsc?.firstDay ?? null, gscCoverage: gsc?.branded.coverage[0] ?? null, formEvent: o.formEvent })) : [];
   if (reconciliation.warning) quality.push(reconciliation.warning);
+  if (hasCustomCompare(o.window) && daysIn(o.window.compare!) !== daysIn(o.window)) quality.push(`The comparison period is ${daysIn(o.window.compare!)} days and the chosen window is ${daysIn(o.window)}. Counts are not like for like; rates and shares are.`);
   quality.push("form_submit is the only conversion-like event Analytics holds for this site, and it counts searches and repeats. No count of enquiries can be taken from this data.");
   if (!o.baseline) quality.push("No stored baseline was supplied, so the stored facts were not re-checked.");
   return { generatedOn: o.today, client: o.client, window: o.window, options: o, checks, reconciliation, bots, advisors, funnel, sources, movers, series, projection, gsc, cross, quality };

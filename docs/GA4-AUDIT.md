@@ -6,9 +6,16 @@ A read-only report that answers the questions Brownell Travel's marketing direct
 
     npm run read-ga4-audit -- --client=brownell-travel
     npm run read-ga4-audit -- --client=brownell-travel --start=2026-07-01 --end=2026-09-30
+    npm run read-ga4-audit -- --client=brownell-travel --start=2026-07-01 --end=2026-09-30 --compare-start=2025-09-01 --compare-end=2025-09-30
     npm run verify-ga4-audit            (the checks; no network, invented data)
 
 Or Actions, "GA4 and Search Console audit". It uploads the full report and a one-page client summary as an artifact. Needs `GOOGLE_SERVICE_ACCOUNT_JSON` and `DATABASE_URL`. The service account must be a user on the GA4 property and on the Search Console property.
+
+## Comparisons
+
+Standard: the period of the same length straight before the window, and the same dates a year earlier. Default window is 1 Jan to three days ago, so by default this is year to date against last year to date.
+
+Custom: `--compare-start` and `--compare-end` (both, or neither) replace "the period before" with a range you choose; the year-earlier comparison is still worked out. Everything that would say "period before" says "comparison period". A range that overlaps the window is refused, because a day on both sides would be counted twice. A range of a different length is allowed and the report says counts are not like for like (rates and shares are).
 
 ## What it answers, for the window, the period before and the same dates a year earlier
 

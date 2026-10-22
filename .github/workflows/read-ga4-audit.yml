@@ -27,6 +27,15 @@ on:
         required: false
         default: ""
 
+      compare_start:
+        description: "Optional custom comparison start, YYYY-MM-DD (use with compare_end)."
+        required: false
+        default: ""
+      compare_end:
+        description: "Optional custom comparison end, YYYY-MM-DD."
+        required: false
+        default: ""
+
 concurrency:
   group: read-ga4-audit-${{ inputs.client || 'brownell-travel' }}
   cancel-in-progress: false
@@ -56,10 +65,14 @@ jobs:
           CLIENT: ${{ inputs.client || 'brownell-travel' }}
           START: ${{ inputs.start }}
           END: ${{ inputs.end }}
+          CMP_START: ${{ inputs.compare_start }}
+          CMP_END: ${{ inputs.compare_end }}
         run: |
           ARGS="--client=$CLIENT --out=audit-out --json"
           [ -n "$START" ] && ARGS="$ARGS --start=$START"
           [ -n "$END" ] && ARGS="$ARGS --end=$END"
+          [ -n "$CMP_START" ] && ARGS="$ARGS --compare-start=$CMP_START"
+          [ -n "$CMP_END" ] && ARGS="$ARGS --compare-end=$CMP_END"
           npm run read-ga4-audit -- $ARGS
       - name: Keep the report
         uses: actions/upload-artifact@v4
