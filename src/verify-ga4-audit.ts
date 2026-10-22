@@ -31,6 +31,8 @@ import { completeMonths, daysIn, defaultWindow, label, periodsFor, touches, year
 import { clientSummaryMd, reportMd } from "./ga4-audit/render.js";
 import { reconcile, type BotConfig } from "./ga4-audit/reconcile.js";
 import { runAudit, relabelCompare } from "./ga4-audit/run.js";
+import { compareDirections, direction, readGroup, FINDING_FLOORS, NOT_JOINED } from "./ga4-audit/findings.js";
+import { findingsMd } from "./ga4-audit/findings-render.js";
 
 let failures = 0;
 const ok = (label: string, pass: boolean, detail = "") => { console.log(`  ${pass ? "✅" : "❌"} ${label}${detail ? ` — ${detail}` : ""}`); if (!pass) failures += 1; };
@@ -307,6 +309,59 @@ async function main() {
     const aPlain = await runAudit(readerFor().read, { client: "Harbor Travel", today: TODAY, window: W, cfg: { ...BROWNELL_DEFAULTS, brandTerms: ["harbor"] }, bots: BOTS, formEvent: "form_submit", startEvent: "form_start", baseline: null, gsc: null });
     ok("a run with no chosen comparison still says period before", /Period before/.test(reportMd(aPlain)));
     ok("(planted) without the relabel the report would still say period before", /[Pp]eriod before/.test(JSON.stringify(a2.reconciliation.headline)) === false && relabelCompare({ x: "the period before" }).x === "the comparison period");
+  }
+
+  hr("11c. Where the sources agree and disagree");
+  {
+    ok("a base under the floor is not read", direction(60, 50) === "unread" && direction(null, 500) === "unread");
+    ok("a move under 5% is held; up and down are named", direction(1020, 1000) === "held" && direction(1200, 1000) === "up" && direction(800, 1000) === "down");
+    ok("same direction agrees", compareDirections({ now: 1200, before: 1000 }, { now: 700, before: 500 }) === "agree");
+    ok("opposite ways by at least 10% each disagree", compareDirections({ now: 1300, before: 1000 }, { now: 700, before: 1000 }) === "disagree");
+    ok("opposite ways by less than 10% is not a contradiction", compareDirections({ now: 1070, before: 1000 }, { now: 940, before: 1000 }) === "cant_tell");
+    ok("one held while the other moves 20% or more disagrees", compareDirections({ now: 1010, before: 1000 }, { now: 600, before: 1000 }) === "disagree");
+    ok("one held while the other moves a little cannot tell", compareDirections({ now: 1010, before: 1000 }, { now: 900, before: 1000 }) === "cant_tell");
+    ok("an unread side cannot tell", compareDirections({ now: 90, before: 80 }, { now: 700, before: 1000 }) === "cant_tell");
+    ok("a clicks fall with held impressions reads as snippet or position", readGroup({ clicksNow: 600, clicksBefore: 1000, imprNow: 9500, imprBefore: 10000 }) === "snippet_or_position");
+    ok("a clicks fall with falling impressions reads as fewer seen", readGroup({ clicksNow: 600, clicksBefore: 1000, imprNow: 6000, imprBefore: 10000 }) === "fewer_seen");
+    ok("a small fall with a bigger engagement fall reads as a page problem", readGroup({ clicksNow: 750, clicksBefore: 900, imprNow: 9800, imprBefore: 10000, engNow: 0.5, engBefore: 0.7 }) === "page_problem");
+    ok("held clicks and rising clicks raise nothing", readGroup({ clicksNow: 1000, clicksBefore: 1000, imprNow: 1, imprBefore: 1 }) === "clicks_held" && readGroup({ clicksNow: 1400, clicksBefore: 1000, imprNow: 1, imprBefore: 1 }) === "clicks_up");
+    ok("a thin base reads as unread", readGroup({ clicksNow: 20, clicksBefore: 50, imprNow: 100, imprBefore: 100 }) === "unread");
+
+    const cfgF = { ...BROWNELL_DEFAULTS, brandTerms: ["harbor"] };
+    const run = (gsc: ReturnType<typeof fakeGsc>) => runAudit(readerFor().read, { client: "Harbor Travel", today: TODAY, window: W, cfg: cfgF, bots: BOTS, formEvent: "form_submit", startEvent: "form_start", baseline: null, gsc: { read: gsc.read, property: "sc-domain:harbor.example", permission: "siteFullUser" } });
+    const steady = await run(fakeGsc({ firstDay: "2025-06-09", lastDay: addDays(TODAY, -3), ratio: 1.2 }));
+    const orgSteady = steady.findings.items.find((x) => x.id === "organic-vs-clicks")!;
+    const orgSessions = facts.filter((r) => r.kind === "s" && r.sessionDefaultChannelGroup === "Organic Search" && r.date >= W.start && r.date <= W.end).reduce((n, r) => n + r.sessions, 0);
+    ok("the Analytics evidence is an independent sum of organic sessions", orgSteady.evidence[0]!.now === orgSessions && orgSessions > 0, `${orgSteady.evidence[0]!.now} vs ${orgSessions}`);
+    ok("both sources held, so they agree", orgSteady.agreement === "agree");
+    ok("every evidence line names its source, basis, dates and filter", steady.findings.items.every((it) => it.evidence.every((e) => (e.source === "Google Analytics" || e.source === "Search Console") && e.basis && e.range && e.filter)));
+    ok("the sources not joined here are listed, with a reason each", steady.findings.notJoined.length === NOT_JOINED.length && steady.findings.notJoined.every((n) => n.source && n.why.length > 20));
+
+    // Search clicks halve in the chosen window while Analytics holds: a disagreement, never a cause.
+    const fall = await run(fakeGsc({ firstDay: "2025-06-09", lastDay: addDays(TODAY, -3), ratio: 1.2, factor: (d) => (d >= W.start ? 0.5 : 1) }));
+    const orgFall = fall.findings.items.find((x) => x.id === "organic-vs-clicks")!;
+    ok("clicks falling while Analytics holds is a disagreement", orgFall.agreement === "disagree");
+    ok("the hypothesis is labelled a guess and names a test", /Possible causes/.test(orgFall.hypothesis ?? "") && orgFall.settleBy.length > 30 && !/because/i.test(orgFall.hypothesis ?? ""));
+    ok("disagreements come before agreements", fall.findings.items[0]!.agreement === "disagree");
+    ok("the summary counts them", /1 place where the sources disagree|[1-9]\d* places where the sources disagree/.test(fall.findings.summary));
+    const md = findingsMd(fall.findings).join("\n");
+    ok("the report prints the finding, the hypothesis as inference and the not-joined list", /DISAGREE/.test(md) && /Hypothesis \(inference, not a finding\)/.test(md) && /Not joined here/.test(md));
+    ok("the report states our floors as ours", /Our own lines, not Google's/.test(md));
+    ok("the findings are in the full report", /6b\. Where the sources agree and disagree/.test(reportMd(fall)));
+    ok("no finding claims a cause as fact", fall.findings.items.every((it) => !/\b(caused by|because of|due to)\b/i.test(it.claim)));
+
+    // Advisors: search clicks far above visits.
+    const adv = await run(fakeGsc({ firstDay: "2025-06-09", lastDay: addDays(TODAY, -3), ratio: 0.3 }));
+    const advBad = adv.findings.items.filter((x) => x.id.startsWith("advisor-") && x.agreement === "disagree");
+    ok("advisor pages with more search clicks than visits are listed as disagreements", advBad.length > 0 && advBad.every((x) => x.evidence[0]!.now! > (x.evidence[1]!.now ?? 0) * (1 + FINDING_FLOORS.advisorOver)));
+    ok("a disagreement found later in the run is sorted ahead of an agreement found first", adv.findings.items[0]!.agreement === "disagree" && adv.findings.items[0]!.id.startsWith("advisor-") && adv.findings.items.some((x) => x.id === "organic-vs-clicks" && x.agreement !== "disagree"));
+    const advOk = steady.findings.items.filter((x) => x.id.startsWith("advisor-"));
+    ok("with clicks below visits no advisor is flagged", advOk.length === 0);
+
+    // No Search Console: one honest line, not a quiet pass.
+    const none = await runAudit(readerFor().read, { client: "Harbor Travel", today: TODAY, window: W, cfg: cfgF, bots: BOTS, formEvent: "form_submit", startEvent: "form_start", baseline: null, gsc: null });
+    ok("without Search Console the findings say so and join nothing", none.findings.items.length === 1 && none.findings.items[0]!.agreement === "cant_tell" && /not read/i.test(none.findings.summary));
+    selfTest("the findings never print a figure without its source", (t) => !/(^|\n)- (?!Google Analytics|Search Console|Hypothesis|What would|Next)\S.*\d{2,}/.test(t.replace(/\*\*.*\n/g, "")), "- Google Analytics: Organic Search sessions 5,000 (confirmed from data; a; b).", "- Organic Search sessions 5,000 (confirmed).");
   }
 
   hr("12. Quota and read-only");

@@ -43,3 +43,14 @@ Custom: `--compare-start` and `--compare-end` (both, or neither) replace "the pe
 ## Not verified live
 
 Nothing here has run against a real property. Request shapes for GA4 (up to four named date ranges, the `isKeyEvent` dimension) and Search Console (`sites.list`, `searchAnalytics.query`) are written from the published reference. The first real run is the proof.
+
+## Where the sources agree and disagree (section 6b)
+
+The audit sets Google Analytics beside Search Console on exact keys only: the whole window, a page group, and an advisor's name. Each join is one of **agree**, **disagree**, **one source** or **cannot tell**, and disagreements print first.
+
+- **Organic visits against search clicks.** Same direction, or both held, agrees. Opposite ways by at least 10% each, or one held while the other moves 20% or more, disagrees.
+- **Page groups.** Clicks, impressions and Analytics organic landings per group. A clicks fall with held impressions reads "people saw it and clicked less" (title, snippet or position). A fall with falling impressions reads "fewer people were shown it". A small fall with a bigger engagement fall reads "the visits do less on the page". These are inference with the check that would settle each; none is a cause.
+- **Advisors.** Search clicks to an advisor's pages against Analytics visits to the main page. Clicks well above visits points at lost tracking (consent banner, redirect, a filter).
+- **Not joined here**, listed with a reason each: Bing, rank history, AI-answer prompts, Airtable leads, call tracking and Clarity. They live in other jobs or cannot be read by this audit.
+
+The floors (a base of 100, 5% held, 10% and 20% for disagreement, 30 advisor clicks) are our own and are printed under the findings. The check is `npm run verify-ga4-audit` (section 11c).

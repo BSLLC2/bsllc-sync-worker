@@ -147,7 +147,7 @@ export async function readGsc(read: GscReader, o: { property: string; permission
     tables.push(table({
       id: "gsc-groups", title: "Search clicks by page group", range: `${label(periods.current)} against ${label(periods.prior)}`, filter: "page group is our classification of the page address",
       columns: [column("group", "Page group", "inference", "text"), column("clicks", "Clicks", "confirmed from data"), column("impr", "Impressions", "confirmed from data"), column("ctr", "Click-through rate", "confirmed from data", "percent"), column("pos", "Average position", "confirmed from data", "position"), column("prior", "Clicks, period before", "confirmed from data"), column("chg", "Change", "confirmed from data", "percent")],
-      rows: [...g0.entries()].sort((a, b) => b[1].clicks - a[1].clicks).map(([k, a]) => ({ group: k, clicks: a.clicks, impr: a.impressions, ctr: ctrOf(a), pos: posOf(a), prior: g1?.get(k)?.clicks ?? null, chg: g1 ? change(a.clicks, g1.get(k)?.clicks ?? null) : null })),
+      rows: [...g0.entries()].sort((a, b) => b[1].clicks - a[1].clicks).map(([k, a]) => ({ group: k, clicks: a.clicks, impr: a.impressions, ctr: ctrOf(a), pos: posOf(a), prior: g1?.get(k)?.clicks ?? null, priorImpr: g1?.get(k)?.impressions ?? null, chg: g1 ? change(a.clicks, g1.get(k)?.clicks ?? null) : null })),
     }));
     const adv = new Map<string, Agg>();
     for (const r of reads[0]!.page ?? []) { const s = advisorSlug(new URL(r.keys[0] ?? "https://x/", "https://x").pathname, o.cfg); if (!s) continue; const a = adv.get(s) ?? emptyAgg(); addRow(a, r); adv.set(s, a); }

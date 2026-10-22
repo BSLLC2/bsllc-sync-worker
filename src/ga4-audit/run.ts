@@ -11,6 +11,7 @@ import { botWatch, type BotWatch } from "./bots.js";
 import type { AuditConfig } from "./classify.js";
 import { readFunnel, type Funnel } from "./funnel.js";
 import type { Reader } from "./ga4.js";
+import { buildFindings, type Findings } from "./findings.js";
 import { readGsc, type GscReader, type GscReading } from "./gsc.js";
 import { column, ratio, table, type Table } from "./metrics.js";
 import { FLOOD_WINDOW, headlineFilter, reconcile, type BotConfig, type Reconciliation } from "./reconcile.js";
@@ -45,6 +46,7 @@ export interface Audit {
   projection: Projection;
   gsc: GscReading | null;
   cross: Table | null;
+  findings: Findings;
   quality: string[];
 }
 
@@ -146,12 +148,20 @@ async function runAuditInner(read: Reader, o: AuditOptions): Promise<Audit> {
     } catch (e) { quality.push(`Search Console could not be read: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`); }
   } else quality.push("Search Console was not read: no property was available to this service account.");
 
+  let findings: Findings;
+  try {
+    findings = await buildFindings({ read, window: o.window, cfg: o.cfg, gsc, advisors, organicFilter: countriesOnly ?? null });
+  } catch (e) {
+    quality.push(`The cross-source findings could not be built: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`);
+    findings = { items: [], summary: "The cross-source findings could not be built.", notJoined: [], tables: [], floors: "" };
+  }
+
   const checks = o.baseline ? orderChecks(await verifyBaseline(read, o.baseline, { gscFirstDay: gsc?.firstDay ?? null, gscCoverage: gsc?.branded.coverage[0] ?? null, formEvent: o.formEvent })) : [];
   if (reconciliation.warning) quality.push(reconciliation.warning);
   if (hasCustomCompare(o.window) && daysIn(o.window.compare!) !== daysIn(o.window)) quality.push(`The comparison period is ${daysIn(o.window.compare!)} days and the chosen window is ${daysIn(o.window)}. Counts are not like for like; rates and shares are.`);
   quality.push("form_submit is the only conversion-like event Analytics holds for this site, and it counts searches and repeats. No count of enquiries can be taken from this data.");
   if (!o.baseline) quality.push("No stored baseline was supplied, so the stored facts were not re-checked.");
-  return { generatedOn: o.today, client: o.client, window: o.window, options: o, checks, reconciliation, bots, advisors, funnel, sources, movers, series, projection, gsc, cross, quality };
+  return { generatedOn: o.today, client: o.client, window: o.window, options: o, checks, reconciliation, bots, advisors, funnel, sources, movers, series, projection, gsc, cross, findings, quality };
 }
 
 export { BROWNELL_BASELINE, addDays };

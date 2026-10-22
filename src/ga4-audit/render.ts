@@ -7,6 +7,7 @@ import { DEFINITIONS, fmt, fmtChange, change, type Table } from "./metrics.js";
 import { label, periodsFor, priorName } from "./periods.js";
 import { effectTable, headlineTable } from "./reconcile.js";
 import { buildHelp } from "./help.js";
+import { findingsMd } from "./findings-render.js";
 import type { Audit } from "./run.js";
 
 const BASIS_MARK = { "confirmed from data": "", inference: " (inference)" } as const;
@@ -36,6 +37,7 @@ export function reportMd(a: Audit): string {
   out.push("## 5. Sources", "", tableMd(a.sources.tables.byClass), tableMd(a.sources.tables.ai), ...a.sources.notes.map((x) => `- ${x}`), "");
   out.push("## 6. Search Console", "");
   if (a.gsc) out.push(`Property: ${a.gsc.property} (${a.gsc.permission || "permission not reported"}). History starts ${a.gsc.firstDay ?? "unknown"}.`, "", ...a.gsc.tables.map(tableMd), ...(a.cross ? [tableMd(a.cross)] : []), ...a.gsc.notes.map((x) => `- ${x}`), ""); else out.push("Search Console was not read. See section 10.", "");
+  out.push(...findingsMd(a.findings));
   out.push("## 7. Bot and quality watch", "", "Flags are our reading of low engagement on many sessions. Google Analytics does not say a visit was automated.", "", tableMd(a.bots.landing.table), tableMd(a.bots.country.table), tableMd(a.bots.city.table), tableMd(a.bots.source.table));
   out.push("## 8. Anomalies and projection", "");
   for (const s of a.series) {
