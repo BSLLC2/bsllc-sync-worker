@@ -8,6 +8,7 @@ import { DEFAULT_MONTHS, MAX_MONTHS } from "./ga4-report/types.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { ymd } from "./page-behaviour/paths.js";
 import { googleToken } from "./signals/google.js";
+import { withVerifyFull } from "./db-url.js";
 
 /**
  * Read each client's Website performance report from Google Analytics 4: daily
@@ -67,7 +68,7 @@ async function main() {
   if (!url) throw new Error("Missing required env var DATABASE_URL.");
   const today = ymd(new Date());
 
-  const c = new pg.Client({ connectionString: url });
+  const c = new pg.Client({ connectionString: withVerifyFull(url) });
   await c.connect();
   let pipe!: PipelineResult;
   try {

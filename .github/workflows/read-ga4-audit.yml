@@ -1,0 +1,69 @@
+name: GA4 and Search Console audit (read-only report)
+
+# Runs the standing audit for one client and uploads the report and the one-page
+# client summary as a build artifact. READ-ONLY: Google's analytics and Search Console
+# read scopes, and three SELECTs against our own database. It writes no database row.
+#
+# WHEN. Run by hand from the Actions tab, or every Monday 08:30 UTC for Brownell Travel.
+# Leave start and end blank for 1 January of this year to three days ago.
+#
+# NEEDS: GOOGLE_SERVICE_ACCOUNT_JSON and DATABASE_URL (both existing). The service
+# account must be a user on the GA4 property and on the Search Console property.
+on:
+  schedule:
+    - cron: "30 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client slug or dashboard UUID."
+        required: false
+        default: "brownell-travel"
+      start:
+        description: "Window start, YYYY-MM-DD. Blank = 1 January of this year."
+        required: false
+        default: ""
+      end:
+        description: "Window end, YYYY-MM-DD. Blank = three days ago."
+        required: false
+        default: ""
+
+concurrency:
+  group: read-ga4-audit-${{ inputs.client || 'brownell-travel' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - uses: actions/cache@v4
+        with:
+          path: .ga4-audit-cache
+          key: ga4-audit-cache-${{ inputs.client || 'brownell-travel' }}-${{ github.run_id }}
+          restore-keys: ga4-audit-cache-${{ inputs.client || 'brownell-travel' }}-
+      - run: npm ci
+      - name: Run the audit
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          CLIENT: ${{ inputs.client || 'brownell-travel' }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+        run: |
+          ARGS="--client=$CLIENT --out=audit-out --json"
+          [ -n "$START" ] && ARGS="$ARGS --start=$START"
+          [ -n "$END" ] && ARGS="$ARGS --end=$END"
+          npm run read-ga4-audit -- $ARGS
+      - name: Keep the report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ga4-audit-${{ inputs.client || 'brownell-travel' }}
+          path: audit-out/
+          retention-days: 90
