@@ -6,6 +6,7 @@
  * A missing, unparseable or hostile value means NO exclusions, NO groups and the
  * default form event. A bad single entry is dropped; it never fails the run.
  */
+import { cleanMatch, groupKey } from "./groups.js";
 import { CHANNEL_GROUPS, CONFIG_LIMITS, DEFAULT_FORM_EVENT, type ReportConfig, type ReportGroup } from "./types.js";
 
 export const CONFIG_KEY_PREFIX = "web_report_config:";
@@ -62,9 +63,16 @@ export function sanitiseConfig(raw: unknown): ReportConfig {
       const prefix = gg.prefix.trim();
       if (!name || hasControl(name)) continue;
       if (!prefix.startsWith("/") || prefix.length > CONFIG_LIMITS.prefixChars || hasControl(prefix) || /\s/.test(prefix)) continue;
-      if (seen.has(prefix)) continue;
-      seen.add(prefix);
-      out.groups.push({ name, prefix } satisfies ReportGroup);
+      // No mode, or one this build does not know, is the original behaviour. An address may repeat when the modes differ.
+      const match = cleanMatch(gg.match);
+      // A "one level deeper" group hangs off a directory: a bare "/" would be every top-level page, which is not a group of pages under anything.
+      if (match === "child" && prefix === "/") continue;
+      // A query or fragment is never part of a page's address in the report, so an exact or deeper-level address with one matches nothing.
+      if (match !== "starts" && (prefix.includes("?") || prefix.includes("#"))) continue;
+      const key = groupKey({ prefix, match });
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.groups.push({ name, prefix, match } satisfies ReportGroup);
       if (out.groups.length >= CONFIG_LIMITS.groups) break;
     }
   }

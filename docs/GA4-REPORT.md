@@ -33,12 +33,23 @@ uses).
    | `landing_page` | landingPage | same | '' | normalised path | 100 |
    | `form_page` | pagePath (filter eventName = form event) | eventCount -> `events` | '' | normalised path | 100 |
    | `event_name` | eventName | eventCount -> `events` | '' | the event name verbatim | 100 |
-   | `group_page` | landingPage (BEGINS_WITH prefix) | same as sessions | the prefix | normalised path | 300 per group |
-   | `group_form` | pagePath (BEGINS_WITH prefix AND eventName = form event) | eventCount -> `events` | the prefix | normalised path | 300 per group |
+   | `group_page` | landingPage (the group's filter, below) | same as sessions | the group key | normalised path | 300 per group |
+   | `group_form` | pagePath (the group's filter AND eventName = form event) | eventCount -> `events` | the group key | normalised path | 300 per group |
 
-   | `group_visits` | pagePath (BEGINS_WITH prefix) | sessions | the prefix | normalised path | 300 per group |
+   | `group_visits` | pagePath (the group's filter) | sessions | the group key | normalised path | 300 per group |
+   | `group_sessions` | none (one row a month) | sessions | the group key | `all` | 1 per group |
+   | `month_raw` | none (one row a month), NO country or channel exclusion | sessions, engaged, seconds | '' | `all` | 1 |
    | `channel_sessions` | sessionDefaultChannelGroup | sessions | '' | the channel group | 40 |
    | `channel_forms` | sessionDefaultChannelGroup (filter eventName = form event) | eventCount -> `events` | '' | the channel group | 40 |
+
+   `month_raw` is every session of the month with nothing left out, so the page can set the figure it shows
+   against the raw one. **Page group match modes** (`src/ga4-report/groups.ts`, copied byte for byte into the app):
+   `starts` (the original: the address begins with the typed text; rows are filed under the plain prefix, so every row
+   written before modes existed still belongs to its group), `exact` (the address or its slash twin; key `=<address>`)
+   and `child` (one level deeper: begins with the directory and is not the directory itself, with or without a query;
+   key `><address>`; deeper pages are folded under their advisor when the rows are read). The filters are LITERAL
+   begins-with and exact matches on typed text, never a regular expression, so nothing typed is read as a pattern.
+   The same address can be a group in two modes; the same mode and address twice is one group.
 
    `group_visits` counts any visit that touched the page; `group_page` counts engagement on
    visits that started there. `channel_sessions` and `channel_forms` are ALWAYS read without
@@ -53,10 +64,10 @@ uses).
 ## The settings it applies
 
 `app_settings` row `web_report_config:<clientId>`, JSON
-`{ excludeCountries, excludeChannels, groups: [{name, prefix}], formEvent, by, at }`. Sanitised:
+`{ excludeCountries, excludeChannels, groups: [{name, prefix, match?}], formEvent, by, at }`. Sanitised:
 a missing or unparseable value means no exclusions, no groups, form event
 `form_submit`; countries max 25 (trimmed, case-insensitive duplicates dropped);
-groups max 5 (prefix must start with `/`, at most 120 characters, no spaces);
+groups max 5 (prefix must start with `/`, at most 120 characters, no spaces; `match` is `starts` (default), `exact` or `child`, anything else is `starts`; `child` refuses the bare `/`; `exact` and `child` refuse a query or fragment; two groups with the same mode and address are one);
 event name must match `^[a-z][a-z0-9_]{0,39}$`.
 
 **Exclusion semantics.** When `excludeCountries` is not empty, **every** request,

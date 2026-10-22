@@ -26,10 +26,11 @@ import { HttpError, safeMessage } from "./page-behaviour/http.js";
 import { configKey, sanitiseConfig, defaultConfig } from "./ga4-report/config.js";
 import { readWindow, monthFromYearMonth, dayFromGa4Date, monthsBetween, daysBetween } from "./ga4-report/months.js";
 import {
-  DAILY_METRIC_LADDER, SESSION_METRIC_LADDER, andFilters, dailyRequest, dailyRows, exclusionFilter, isRetryable, kindSpecs,
+  DAILY_METRIC_LADDER, SESSION_METRIC_LADDER, andFilters, dailyRequest, dailyRows, exclusionFilter, groupFilter, isRetryable, kindSpecs,
   parseDaily, parseReport, reportRequest, topPerMonth, type Filter,
 } from "./ga4-report/ga4.js";
 import { readClientReport, type Deps } from "./ga4-report/run.js";
+import { GROUP_MATCH_MODES, cleanMatch, groupKey, mergeKey, parseGroupKey, pathInGroup } from "./ga4-report/groups.js";
 import { processClients } from "./ga4-report/pipeline.js";
 import {
   DELETE_KIND_MONTHS, INSERT_REPORT_ROW, INSERT_RUN, INSERT_RUN_KEEP, INSERT_SITE_DAY, writeClientReport, type Queryable,
@@ -87,6 +88,7 @@ function matches(f: unknown, rec: Record<string, string | undefined>): boolean {
   const o = f as Record<string, any> | undefined;
   if (!o) return true;
   if (o.andGroup) return (o.andGroup.expressions as unknown[]).every((e) => matches(e, rec));
+  if (o.orGroup) return (o.orGroup.expressions as unknown[]).some((e) => matches(e, rec));
   if (o.notExpression) return !matches(o.notExpression, rec);
   const fl = o.filter;
   if (!fl) return true;
@@ -192,7 +194,7 @@ function deps(f: FetchLike, extra: Partial<Deps> = {}): Deps {
   return { fetch: f, token: async () => SECRET, today: TODAY, months: MONTHS, sleep: noSleep, pauseMs: 0, ...extra };
 }
 const cfg = (o: Record<string, unknown>) => sanitiseConfig(JSON.stringify(o));
-const GROUP = { name: "Advisor pages", prefix: "/plan-your-trip/advisor/" };
+const GROUP = { name: "Advisor pages", prefix: "/plan-your-trip/advisor/", match: "starts" as const };
 
 /* ═════════════════════════ 1. the settings are cleaned ═════════════════════════ */
 hr("1. settings: hostile input is cleaned, never trusted");
@@ -256,8 +258,9 @@ hr("3. what is asked: the country exclusion rides on every request");
   // Every request of a real run, with and without the exclusion.
   const run = async (config: ReturnType<typeof cfg>) => { const p = property(dataset()); await readClientReport(CTX, config, deps(p.fetch)); return p.calls; };
   const full = await run(cfg({ excludeCountries: India, groups: [GROUP, { name: "Lps", prefix: "/lp/" }] }));
-  ok("a configured run makes the daily, the seven reports and three requests per group", full.length === 1 + 7 + 3 * 2, `${full.length} requests`);
-  ok("EVERY request of the run carries the exclusion", full.every((c) => JSON.stringify(c.body.dimensionFilter ?? {}).includes("inListFilter") && JSON.stringify(c.body.dimensionFilter).includes("Russia")));
+  ok("a configured run makes the daily, the eight reports and four requests per group", full.length === 1 + 8 + 4 * 2, `${full.length} requests`);
+  const rawCall = (c: { body: Record<string, any> }) => (c.body.dimensions as any[]).length === 1 && c.body.dimensions[0].name === "yearMonth" && !("dimensionFilter" in c.body);
+  ok("EVERY request of the run carries the exclusion, except the one unfiltered monthly total", full.filter((c) => !rawCall(c)).every((c) => JSON.stringify(c.body.dimensionFilter ?? {}).includes("inListFilter") && JSON.stringify(c.body.dimensionFilter).includes("Russia")) && full.filter(rawCall).length === 1);
   const plain = await run(cfg({ groups: [GROUP] }));
   ok("with nothing excluded no request names a country filter", plain.every((c) => !JSON.stringify(c.body).includes("inListFilter")));
   ok("every request goes to the property's runReport with the token", full.every((c) => c.url === "https://analyticsdata.googleapis.com/v1beta/properties/111222333:runReport" && c.headers.Authorization === `Bearer ${SECRET}`));
@@ -265,7 +268,7 @@ hr("3. what is asked: the country exclusion rides on every request");
 
   const specs = kindSpecs([GROUP], "form_submit");
   const kinds = specs.map((s) => s.kind);
-  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "group_page", "group_visits", "group_form"]));
+  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "month_raw", "group_page", "group_visits", "group_sessions", "group_form"]));
   const byKind = Object.fromEntries(specs.map((s) => [s.kind, reportRequest(w, s, s.ladder[0]!, [])])) as Record<string, any>;
   ok("region asks for country and region", byKind.region.dimensions.map((d: any) => d.name).join() === "yearMonth,country,region");
   ok("sources ask for sessionSourceMedium", byKind.source_medium.dimensions[1].name === "sessionSourceMedium");
@@ -426,9 +429,9 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
   ok("a failed daily read is an error with nothing to write", d.status === "error" && d.daily === null && Object.keys(d.kinds).length === 0 && d.rows === 0);
   ok("and nothing else is even asked for", failDaily.calls.length === 1);
 
-  const failAll = property(dataset(), { fail: (b) => ((b.dimensions as any[]).length > 1 ? { status: 403, body: "denied" } : null) });
+  const failAll = property(dataset(), { fail: (b) => ((b.dimensions as any[])[0].name === "yearMonth" ? { status: 403, body: "denied" } : null) });
   const all = await readClientReport(CTX, defaultConfig(), deps(failAll.fetch));
-  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 7);
+  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 8);
 
   // Retries.
   let n = 0;
@@ -765,6 +768,7 @@ hr("12. channels left out of the report, the two channel reports, and visits tha
   ok("every other report carries the channel exclusion", specs.filter((x) => !x.ignoreChannels).every((x) => JSON.stringify(reportRequest(w, x, x.ladder[0]!, [], CH)).includes("Unassigned")));
   ok("the visits report for a group asks pagePath, sessions and the prefix", (() => { const sp = kindOf("group_visits"); const r = reportRequest(w, sp, sp.ladder[0]!, [], []) as Record<string, any>; return (r.dimensions as any[])[1].name === "pagePath" && JSON.stringify(r.dimensionFilter).includes("BEGINS_WITH") && (r.metrics as any[]).some((m) => m.name === "sessions"); })());
 
+  ok("the distinct sessions report for a group has NO page dimension, so a session counts once", (() => { const sp = kindOf("group_sessions"); const r = reportRequest(w, sp, sp.ladder[0]!, [], []) as Record<string, any>; return (r.dimensions as any[]).length === 1 && (r.dimensions as any[])[0].name === "yearMonth" && JSON.stringify(r.dimensionFilter).includes("BEGINS_WITH") && JSON.stringify(r.dimensionFilter).includes(GROUP.prefix) && (r.metrics as any[]).some((m) => m.name === "sessions"); })());
   const run = await readClientReport(CTX, cfg({ groups: [GROUP], excludeChannels: CH }), deps(property(dataset()).fetch));
   ok("the run is ok with channels left out", run.status === "ok" && run.failedKinds.length === 0, `${run.status} ${run.detail ?? ""}`);
   ok("the channel left out is absent from the daily total and from the lists", run.daily![0]!.sessions === 65, String(run.daily![0]!.sessions));
@@ -776,11 +780,94 @@ hr("12. channels left out of the report, the two channel reports, and visits tha
   ok("the sources list leaves the excluded channels' traffic out", !run.kinds.source_medium!.some((x) => x.key.startsWith("(direct)")));
   const gv = run.kinds.group_visits!;
   ok("group visits: pages under the prefix, query gone, parent is the prefix", gv.length > 0 && gv.every((x) => x.parent === GROUP.prefix && x.key.startsWith("/plan-your-trip/advisor/") && !x.key.includes("?")));
+  const gsx = run.kinds.group_sessions!;
+  ok("group sessions: one row a month for the group, parent is the prefix, a count and no page", gsx.length > 0 && gsx.every((x) => x.parent === GROUP.prefix && x.key === "all" && (x.sessions ?? 0) > 0) && new Set(gsx.map((x) => x.month)).size === gsx.length);
   ok("the applied channel list is on the result", run.config.excludeChannels.join() === "Direct,Unassigned");
   const none = await readClientReport(CTX, defaultConfig(), deps(property(dataset()).fetch));
   ok("with no groups the visits kind clears as nothing, like the other group kinds", Array.isArray(none.kinds.group_visits) && none.kinds.group_visits!.length === 0);
-  ok("the channel kinds have a row cap", TOP_N.channel_sessions > 0 && TOP_N.channel_forms > 0 && TOP_N.group_visits > 0);
+  ok("the channel kinds have a row cap", TOP_N.group_sessions >= 1 && TOP_N.channel_sessions > 0 && TOP_N.channel_forms > 0 && TOP_N.group_visits > 0);
   ok("the run row stores the channels it applied", INSERT_RUN.includes("excluded_channels") && INSERT_RUN_KEEP.includes("excluded_channels") && !/excluded_channels = EXCLUDED/.test(INSERT_RUN_KEEP.split("DO UPDATE SET")[1] ?? ""));
+}
+
+/* ═════════════════════════ 13. page group match modes, and the unfiltered monthly total ═════════════════════════ */
+hr("13. match modes: starts with, exactly, one level deeper; the filter and the rule agree; no pattern is ever sent");
+{
+  const DIR = "/plan-your-trip/advisor/";
+  const landings = [
+    DIR, `${DIR}?destination=Paris`, "/plan-your-trip/advisor", `${DIR}jane-doe/`, `${DIR}jane-doe/about`, `${DIR}jane-doe-2/`, `${DIR}john`,
+    `${DIR}john/?utm=1`, "/", "/contact", "/contact/", "/contact-us", "/contact/thanks", "/plan-your-trip/advisors-list/",
+  ];
+  const ds = (): Dataset => ({
+    sessions: landings.map((l, i) => S("20260705", "United States", "Ohio", "google / organic", l, 10 + i)),
+    events: landings.map((l, i) => E("20260705", "United States", l.split("?")[0]!, "form_submit", 1 + i)),
+  });
+  const modes: Array<{ m: "starts" | "exact" | "child"; prefix: string }> = [
+    { m: "starts", prefix: DIR }, { m: "exact", prefix: DIR }, { m: "child", prefix: DIR }, { m: "exact", prefix: "/contact" }, { m: "starts", prefix: "/contact" },
+  ];
+  for (const { m, prefix } of modes) {
+    const g = { prefix, match: m };
+    for (const field of ["landingPage", "pagePath"] as const) {
+      const filter = groupFilter(field, g);
+      const wrong = landings.filter((l) => {
+        // A page path never carries a query, so the address under test is the path for that field.
+        const value = field === "pagePath" ? l.split("?")[0]! : l;
+        return matches(filter, { [field]: value }) !== pathInGroup(value, g);
+      });
+      ok(`${m} on ${prefix} (${field}): the request filter and pathInGroup agree on every address`, wrong.length === 0, wrong.join(" | "));
+    }
+  }
+  ok("every mode is spelled the same in both lists, and an unknown one is the original behaviour", GROUP_MATCH_MODES.join() === "starts,exact,child" && cleanMatch(undefined) === "starts" && cleanMatch("regex") === "starts" && cleanMatch("EXACT") === "starts");
+  ok("a group's rows are filed under its key: the plain prefix for starts with, a marked one for the others", groupKey({ prefix: DIR }) === DIR && groupKey({ prefix: DIR, match: "starts" }) === DIR && groupKey({ prefix: DIR, match: "exact" }) === `=${DIR}` && groupKey({ prefix: DIR, match: "child" }) === `>${DIR}`);
+  ok("a key reads back to its mode and address", parseGroupKey(`=${DIR}`).match === "exact" && parseGroupKey(`>${DIR}`).prefix === DIR && parseGroupKey(DIR).match === "starts");
+
+  const child = { prefix: DIR, match: "child" as const };
+  ok("one level deeper: the directory itself, with or without a slash or a query, is never a member", !pathInGroup(DIR, child) && !pathInGroup("/plan-your-trip/advisor", child) && !pathInGroup(`${DIR}?destination=Paris`, child));
+  ok("one level deeper: an advisor and the pages under the advisor are members", pathInGroup(`${DIR}jane-doe/`, child) && pathInGroup(`${DIR}jane-doe/about`, child));
+  ok("one level deeper: a deeper page folds into its advisor, and a -2 copy folds into the original", mergeKey(`${DIR}jane-doe/about`, child) === `${DIR}jane-doe/` && mergeKey(`${DIR}jane-doe-2/`, child) === `${DIR}jane-doe/` && mergeKey(`${DIR}john`, child) === `${DIR}john/`);
+  ok("exactly: only the address and its slash twin, and nothing folds", pathInGroup("/contact", { prefix: "/contact", match: "exact" }) && pathInGroup("/contact/", { prefix: "/contact", match: "exact" }) && !pathInGroup("/contact-us", { prefix: "/contact", match: "exact" }) && !pathInGroup("/contact/thanks", { prefix: "/contact", match: "exact" }) && mergeKey("/contact/", { prefix: "/contact", match: "exact" }) === "/contact/");
+  ok("starts with: the original rule (a -2 copy folds, deeper pages stay their own rows)", mergeKey(`${DIR}jane-doe-2/`, { prefix: DIR }) === `${DIR}jane-doe/` && mergeKey(`${DIR}jane-doe/about`, { prefix: DIR }) === `${DIR}jane-doe/about/`);
+
+  // No pattern is ever sent, whatever was typed.
+  const typed = "/a.b(c)*[d]+x$/";
+  const allFilters = (["starts", "exact", "child"] as const).flatMap((m) => (["landingPage", "pagePath"] as const).map((f) => JSON.stringify(groupFilter(f, { prefix: typed, match: m }))));
+  ok("no filter uses a regular expression, so nothing typed can be read as a pattern", allFilters.every((f) => !/REGEXP|regex/i.test(f)));
+  ok("the typed text goes into the request as a literal value, unchanged", JSON.stringify(groupFilter("pagePath", { prefix: "/a.b(c)*/", match: "starts" })).includes('"value":"/a.b(c)*/"'));
+
+  // The settings.
+  const same = cfg({ groups: [{ name: "Directory", prefix: DIR, match: "exact" }, { name: "Advisors", prefix: DIR, match: "child" }, { name: "Everything", prefix: DIR }] });
+  ok("one address can be three groups when the modes differ", same.groups.length === 3 && same.groups.map((g) => g.match).join() === "exact,child,starts");
+  ok("two groups with the same mode and the same address are one group", cfg({ groups: [{ name: "A", prefix: DIR, match: "child" }, { name: "B", prefix: DIR, match: "child" }, { name: "C", prefix: DIR }, { name: "D", prefix: DIR, match: "starts" }] }).groups.map((g) => g.name).join() === "A,C");
+  ok("a stored group with no mode is starts with, exactly as before", cfg({ groups: [{ name: "Old", prefix: "/old/" }] }).groups[0]!.match === "starts");
+  ok("an unknown mode is starts with, never a thing that is passed on", cfg({ groups: [{ name: "X", prefix: "/x/", match: "regex" }, { name: "Y", prefix: "/y/", match: { toString: () => "exact" } }] }).groups.every((g) => g.match === "starts"));
+  ok("one level deeper needs a directory: the bare root is refused", cfg({ groups: [{ name: "Root", prefix: "/", match: "child" }] }).groups.length === 0);
+  ok("exactly and one level deeper refuse an address with a query or fragment", cfg({ groups: [{ name: "Q", prefix: "/a/?x=1", match: "exact" }, { name: "F", prefix: "/a/#top", match: "child" }] }).groups.length === 0);
+  ok("the root can be an exact group (the home page)", cfg({ groups: [{ name: "Home", prefix: "/", match: "exact" }] }).groups.length === 1);
+
+  // A real run with the directory and the microsites as two groups on one address.
+  const two = cfg({ groups: [{ name: "Directory", prefix: DIR, match: "exact" }, { name: "Advisors", prefix: DIR, match: "child" }] });
+  const p = property(ds());
+  const r = await readClientReport(CTX, two, deps(p.fetch));
+  ok("both groups are read, and the run is ok", r.status === "ok" && r.failedKinds.length === 0, `${r.status} ${r.detail ?? ""}`);
+  const keyOf = (rows: ReportRowOut[] | undefined, parent: string) => (rows ?? []).filter((x) => x.parent === parent && x.month === "2026-07").map((x) => x.key).sort();
+  const dirRows = keyOf(r.kinds.group_page, `=${DIR}`);
+  const advRows = keyOf(r.kinds.group_page, `>${DIR}`);
+  ok("the directory group holds the directory page only (its search form and its slashless twin are the same page)", dirRows.join() === "/plan-your-trip/advisor", dirRows.join());
+  ok("the directory group's sessions add the three spellings of the one page", (r.kinds.group_page ?? []).find((x) => x.parent === `=${DIR}`)?.sessions === 10 + 11 + 12);
+  ok("the advisors group holds the advisors' pages, deeper pages included, and never the directory", advRows.length > 0 && advRows.every((k) => k.startsWith("/plan-your-trip/advisor/") && k !== "/plan-your-trip/advisor") && advRows.some((k) => k.endsWith("/jane-doe/about")) && advRows.some((k) => k.endsWith("/jane-doe-2")), advRows.join());
+  ok("each group's rows are under its own key and the two never meet", (r.kinds.group_visits ?? []).every((x) => x.parent === `=${DIR}` || x.parent === `>${DIR}`) && (r.kinds.group_form ?? []).every((x) => x.parent === `=${DIR}` || x.parent === `>${DIR}`));
+  ok("the distinct-session report is one row a month for each group", (r.kinds.group_sessions ?? []).filter((x) => x.month === "2026-07").length === 2);
+  ok("the result carries each group's mode", r.config.groups.length === 2 && r.config.groups[0]!.match === "exact" && r.config.groups[1]!.match === "child");
+  ok("a starts-with group still files its rows under the plain prefix (rows written before modes existed still belong to it)", (await readClientReport(CTX, cfg({ groups: [{ name: "Old", prefix: DIR }] }), deps(property(ds()).fetch))).kinds.group_page!.every((x) => x.parent === DIR));
+
+  // The unfiltered monthly total.
+  const mr = await readClientReport(CTX, cfg({ excludeCountries: ["India"], excludeChannels: ["Direct"] }), deps(property(dataset()).fetch));
+  const raw = (mr.kinds.month_raw ?? []).find((x) => x.month === "2026-06");
+  ok("the unfiltered monthly total counts every session whatever was left out", raw?.sessions === 10 + 5 + 4 + 50 + 7 + 8 && raw?.key === "all" && raw?.parent === "", JSON.stringify(raw));
+  ok("it carries engagement too, for the folded raw column", raw?.engagedSessions != null && raw?.engagementSeconds != null);
+  ok("and the filtered daily total leaves them out, so the two can be set side by side", mr.daily!.filter((x) => x.day.startsWith("2026-06")).reduce((a, x) => a + (x.sessions ?? 0), 0) < (raw?.sessions ?? 0));
+  const spec = kindSpecs([], "form_submit").find((x) => x.kind === "month_raw")!;
+  ok("the request for it has no filter at all and no dimension but the month", !("dimensionFilter" in (reportRequest(readWindow(TODAY, MONTHS)!, spec, spec.ladder[0]!, ["India"], ["Direct"]) as object)) && spec.dimensions.length === 0);
+  ok("one row a month is kept", TOP_N.month_raw === 1 && REPORT_KINDS.includes("month_raw"));
 }
 
 console.log("\n" + "─".repeat(72));

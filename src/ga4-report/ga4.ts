@@ -22,6 +22,7 @@
  */
 import { HttpError, postJson } from "../page-behaviour/http.js";
 import { isRealPath, normPath } from "../page-behaviour/paths.js";
+import { childBase, cleanMatch, groupKey } from "./groups.js";
 import { dayFromGa4Date, daysBetween, monthFromYearMonth } from "./months.js";
 import {
   PAGE_SIZE, RETRY_WAITS_MS, ROW_CEILING, TOP_N,
@@ -54,6 +55,39 @@ export type Filter = Record<string, unknown>;
 
 const stringFilter = (fieldName: string, matchType: "EXACT" | "BEGINS_WITH", value: string): Filter =>
   ({ filter: { fieldName, stringFilter: { matchType, value } } });
+
+/**
+ * The pages of one group, as a request filter. LITERAL MATCHES ONLY: begins-with and exact on typed text, never a
+ * regular expression, so nothing a person typed can be read as a pattern and there is nothing to escape.
+ *
+ *   starts  the address begins with the typed text (the original behaviour).
+ *   exact   the address, or its twin with the trailing slash added or removed. A landing page may carry a
+ *           query in its value, so the same address followed by "?" is also taken; a page path never does.
+ *   child   begins with the directory (the typed address with one trailing slash) and is not the directory
+ *           itself, with or without a query. Deeper pages are in; they are folded under their advisor when
+ *           the rows are read.
+ *
+ * `pathInGroup` in groups.ts says the same thing in code; npm run verify-ga4-report proves they agree.
+ */
+const twinOf = (p: string): string => (p.endsWith("/") ? p.slice(0, -1) : `${p}/`);
+export function groupFilter(field: "landingPage" | "pagePath", g: { prefix: string; match?: unknown }): Filter {
+  const mode = cleanMatch(g.match);
+  if (mode === "starts") return stringFilter(field, "BEGINS_WITH", g.prefix);
+  if (mode === "child") {
+    const base = childBase(g.prefix);
+    const directory = orFilters(stringFilter(field, "EXACT", base), stringFilter(field, "BEGINS_WITH", `${base}?`));
+    return { andGroup: { expressions: [stringFilter(field, "BEGINS_WITH", base), { notExpression: directory }] } };
+  }
+  const addresses = [g.prefix, twinOf(g.prefix)].filter((a, i, all) => a !== "" && all.indexOf(a) === i);
+  const parts = addresses.map((a) => stringFilter(field, "EXACT", a));
+  if (field === "landingPage") for (const a of addresses) parts.push(stringFilter(field, "BEGINS_WITH", `${a}?`));
+  return orFilters(...parts);
+}
+
+/** One filter as it is, several as an orGroup. */
+function orFilters(...parts: Filter[]): Filter {
+  return parts.length === 1 ? parts[0]! : { orGroup: { expressions: parts } };
+}
 
 /** Leaves out every listed country. Null where nothing is excluded. */
 export function exclusionFilter(countries: readonly string[]): Filter | null {
@@ -100,8 +134,10 @@ export interface KindSpec {
   orderBy: string;
   filter: Filter | null;
   parent: string;
-  /** True for the two channel reports: the channel exclusion is not applied to them. */
+  /** True for the two channel reports and the unfiltered monthly total: the channel exclusion is not applied to them. */
   ignoreChannels?: boolean;
+  /** True for the unfiltered monthly total only: the country exclusion is not applied either, so the page can show raw against filtered. */
+  ignoreCountries?: boolean;
 }
 
 /** The report requests a client's config calls for, in the order they are read. */
@@ -117,25 +153,32 @@ export function kindSpecs(groups: readonly ReportGroup[], formEvent: string): Ki
     // Sessions and form submissions by channel group, with no channel exclusion, so the page can say what leaving a channel out removes.
     { kind: "channel_sessions", dimensions: ["sessionDefaultChannelGroup"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "", ignoreChannels: true },
     { kind: "channel_forms", dimensions: ["sessionDefaultChannelGroup"], ladder: [EVENT_METRICS], orderBy: "eventCount", filter: formFilter, parent: "", ignoreChannels: true },
+    // Every session of the month with NOTHING left out, so the page can set the figure it shows against the raw one. One row a month.
+    { kind: "month_raw", dimensions: [], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "", ignoreChannels: true, ignoreCountries: true },
   ];
   for (const g of groups) {
-    specs.push({ kind: "group_page", dimensions: ["landingPage"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: stringFilter("landingPage", "BEGINS_WITH", g.prefix), parent: g.prefix });
+    specs.push({ kind: "group_page", dimensions: ["landingPage"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: groupFilter("landingPage", g), parent: groupKey(g) });
   }
   // Visits that LOOKED at a page of the group, whichever page they started on: a landing-page report misses a visitor who came through the directory.
   for (const g of groups) {
-    specs.push({ kind: "group_visits", dimensions: ["pagePath"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: stringFilter("pagePath", "BEGINS_WITH", g.prefix), parent: g.prefix });
+    specs.push({ kind: "group_visits", dimensions: ["pagePath"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: groupFilter("pagePath", g), parent: groupKey(g) });
+  }
+  // The distinct sessions that looked at ANY page of the group. group_visits counts a session once per page it looked at, so adding it up
+  // overstates; this has no page dimension, so a session counts once however many of the group's pages it saw.
+  for (const g of groups) {
+    specs.push({ kind: "group_sessions", dimensions: [], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: groupFilter("pagePath", g), parent: groupKey(g) });
   }
   for (const g of groups) {
     specs.push({
       kind: "group_form", dimensions: ["pagePath"], ladder: [EVENT_METRICS], orderBy: "eventCount",
-      filter: andFilters(stringFilter("pagePath", "BEGINS_WITH", g.prefix), formFilter) ?? null, parent: g.prefix,
+      filter: andFilters(groupFilter("pagePath", g), formFilter) ?? null, parent: groupKey(g),
     });
   }
   return specs;
 }
 
 export function reportRequest(w: ReadWindow, spec: KindSpec, metrics: readonly string[], countries: readonly string[], channels: readonly string[] = []) {
-  const dimensionFilter = andFilters(spec.filter, exclusionFilter(countries), spec.ignoreChannels ? null : channelExclusionFilter(channels));
+  const dimensionFilter = andFilters(spec.filter, spec.ignoreCountries ? null : exclusionFilter(countries), spec.ignoreChannels ? null : channelExclusionFilter(channels));
   return {
     dateRanges: [{ startDate: w.start, endDate: w.end }],
     dimensions: [{ name: "yearMonth" }, ...spec.dimensions.map((name) => ({ name }))],
@@ -236,6 +279,9 @@ export function parseReport(report: unknown, spec: KindSpec, validMonths: Readon
       key = keyText(dv[2]?.value, 160);
     } else if (spec.kind === "source_medium") {
       key = keyText(dv[1]?.value, 160);
+    } else if (spec.kind === "group_sessions" || spec.kind === "month_raw") {
+      // One row a month for the whole group (or the whole site): there is no page to name.
+      key = "all";
     } else if (spec.kind === "event_name" || spec.kind === "channel_sessions" || spec.kind === "channel_forms") {
       // An event name or a channel group verbatim: a name, not a path.
       key = keyText(dv[1]?.value, 120);
@@ -265,7 +311,7 @@ export function topPerMonth(rows: readonly ReportRowOut[], kind: ReportKind, n: 
   const groups = new Map<string, ReportRowOut[]>();
   for (const r of rows) {
     // A region list is per month; a group list is per month and group.
-    const g = kind === "group_page" || kind === "group_form" || kind === "group_visits" ? `${r.month}\u0000${r.parent}` : r.month;
+    const g = kind === "group_page" || kind === "group_form" || kind === "group_visits" || kind === "group_sessions" ? `${r.month}\u0000${r.parent}` : r.month;
     (groups.get(g) ?? groups.set(g, []).get(g)!).push(r);
   }
   const kept: ReportRowOut[] = [];
