@@ -256,7 +256,7 @@ hr("3. what is asked: the country exclusion rides on every request");
   // Every request of a real run, with and without the exclusion.
   const run = async (config: ReturnType<typeof cfg>) => { const p = property(dataset()); await readClientReport(CTX, config, deps(p.fetch)); return p.calls; };
   const full = await run(cfg({ excludeCountries: India, groups: [GROUP, { name: "Lps", prefix: "/lp/" }] }));
-  ok("a configured run makes the daily, the seven reports and three requests per group", full.length === 1 + 7 + 3 * 2, `${full.length} requests`);
+  ok("a configured run makes the daily, the seven reports and four requests per group", full.length === 1 + 7 + 4 * 2, `${full.length} requests`);
   ok("EVERY request of the run carries the exclusion", full.every((c) => JSON.stringify(c.body.dimensionFilter ?? {}).includes("inListFilter") && JSON.stringify(c.body.dimensionFilter).includes("Russia")));
   const plain = await run(cfg({ groups: [GROUP] }));
   ok("with nothing excluded no request names a country filter", plain.every((c) => !JSON.stringify(c.body).includes("inListFilter")));
@@ -265,7 +265,7 @@ hr("3. what is asked: the country exclusion rides on every request");
 
   const specs = kindSpecs([GROUP], "form_submit");
   const kinds = specs.map((s) => s.kind);
-  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "group_page", "group_visits", "group_form"]));
+  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "group_page", "group_visits", "group_sessions", "group_form"]));
   const byKind = Object.fromEntries(specs.map((s) => [s.kind, reportRequest(w, s, s.ladder[0]!, [])])) as Record<string, any>;
   ok("region asks for country and region", byKind.region.dimensions.map((d: any) => d.name).join() === "yearMonth,country,region");
   ok("sources ask for sessionSourceMedium", byKind.source_medium.dimensions[1].name === "sessionSourceMedium");
@@ -765,6 +765,7 @@ hr("12. channels left out of the report, the two channel reports, and visits tha
   ok("every other report carries the channel exclusion", specs.filter((x) => !x.ignoreChannels).every((x) => JSON.stringify(reportRequest(w, x, x.ladder[0]!, [], CH)).includes("Unassigned")));
   ok("the visits report for a group asks pagePath, sessions and the prefix", (() => { const sp = kindOf("group_visits"); const r = reportRequest(w, sp, sp.ladder[0]!, [], []) as Record<string, any>; return (r.dimensions as any[])[1].name === "pagePath" && JSON.stringify(r.dimensionFilter).includes("BEGINS_WITH") && (r.metrics as any[]).some((m) => m.name === "sessions"); })());
 
+  ok("the distinct sessions report for a group has NO page dimension, so a session counts once", (() => { const sp = kindOf("group_sessions"); const r = reportRequest(w, sp, sp.ladder[0]!, [], []) as Record<string, any>; return (r.dimensions as any[]).length === 1 && (r.dimensions as any[])[0].name === "yearMonth" && JSON.stringify(r.dimensionFilter).includes("BEGINS_WITH") && JSON.stringify(r.dimensionFilter).includes(GROUP.prefix) && (r.metrics as any[]).some((m) => m.name === "sessions"); })());
   const run = await readClientReport(CTX, cfg({ groups: [GROUP], excludeChannels: CH }), deps(property(dataset()).fetch));
   ok("the run is ok with channels left out", run.status === "ok" && run.failedKinds.length === 0, `${run.status} ${run.detail ?? ""}`);
   ok("the channel left out is absent from the daily total and from the lists", run.daily![0]!.sessions === 65, String(run.daily![0]!.sessions));
@@ -776,10 +777,12 @@ hr("12. channels left out of the report, the two channel reports, and visits tha
   ok("the sources list leaves the excluded channels' traffic out", !run.kinds.source_medium!.some((x) => x.key.startsWith("(direct)")));
   const gv = run.kinds.group_visits!;
   ok("group visits: pages under the prefix, query gone, parent is the prefix", gv.length > 0 && gv.every((x) => x.parent === GROUP.prefix && x.key.startsWith("/plan-your-trip/advisor/") && !x.key.includes("?")));
+  const gsx = run.kinds.group_sessions!;
+  ok("group sessions: one row a month for the group, parent is the prefix, a count and no page", gsx.length > 0 && gsx.every((x) => x.parent === GROUP.prefix && x.key === "all" && (x.sessions ?? 0) > 0) && new Set(gsx.map((x) => x.month)).size === gsx.length);
   ok("the applied channel list is on the result", run.config.excludeChannels.join() === "Direct,Unassigned");
   const none = await readClientReport(CTX, defaultConfig(), deps(property(dataset()).fetch));
   ok("with no groups the visits kind clears as nothing, like the other group kinds", Array.isArray(none.kinds.group_visits) && none.kinds.group_visits!.length === 0);
-  ok("the channel kinds have a row cap", TOP_N.channel_sessions > 0 && TOP_N.channel_forms > 0 && TOP_N.group_visits > 0);
+  ok("the channel kinds have a row cap", TOP_N.group_sessions >= 1 && TOP_N.channel_sessions > 0 && TOP_N.channel_forms > 0 && TOP_N.group_visits > 0);
   ok("the run row stores the channels it applied", INSERT_RUN.includes("excluded_channels") && INSERT_RUN_KEEP.includes("excluded_channels") && !/excluded_channels = EXCLUDED/.test(INSERT_RUN_KEEP.split("DO UPDATE SET")[1] ?? ""));
 }
 

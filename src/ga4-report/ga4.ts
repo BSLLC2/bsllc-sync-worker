@@ -125,6 +125,11 @@ export function kindSpecs(groups: readonly ReportGroup[], formEvent: string): Ki
   for (const g of groups) {
     specs.push({ kind: "group_visits", dimensions: ["pagePath"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: stringFilter("pagePath", "BEGINS_WITH", g.prefix), parent: g.prefix });
   }
+  // The distinct sessions that looked at ANY page of the group. group_visits counts a session once per page it looked at, so adding it up
+  // overstates; this has no page dimension, so a session counts once however many of the group's pages it saw.
+  for (const g of groups) {
+    specs.push({ kind: "group_sessions", dimensions: [], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: stringFilter("pagePath", "BEGINS_WITH", g.prefix), parent: g.prefix });
+  }
   for (const g of groups) {
     specs.push({
       kind: "group_form", dimensions: ["pagePath"], ladder: [EVENT_METRICS], orderBy: "eventCount",
@@ -236,6 +241,9 @@ export function parseReport(report: unknown, spec: KindSpec, validMonths: Readon
       key = keyText(dv[2]?.value, 160);
     } else if (spec.kind === "source_medium") {
       key = keyText(dv[1]?.value, 160);
+    } else if (spec.kind === "group_sessions") {
+      // One row a month for the whole group: there is no page to name.
+      key = "all";
     } else if (spec.kind === "event_name" || spec.kind === "channel_sessions" || spec.kind === "channel_forms") {
       // An event name or a channel group verbatim: a name, not a path.
       key = keyText(dv[1]?.value, 120);
@@ -265,7 +273,7 @@ export function topPerMonth(rows: readonly ReportRowOut[], kind: ReportKind, n: 
   const groups = new Map<string, ReportRowOut[]>();
   for (const r of rows) {
     // A region list is per month; a group list is per month and group.
-    const g = kind === "group_page" || kind === "group_form" || kind === "group_visits" ? `${r.month}\u0000${r.parent}` : r.month;
+    const g = kind === "group_page" || kind === "group_form" || kind === "group_visits" || kind === "group_sessions" ? `${r.month}\u0000${r.parent}` : r.month;
     (groups.get(g) ?? groups.set(g, []).get(g)!).push(r);
   }
   const kept: ReportRowOut[] = [];
