@@ -252,7 +252,7 @@ hr("3. what is asked: the country exclusion rides on every request");
   // Every request of a real run, with and without the exclusion.
   const run = async (config: ReturnType<typeof cfg>) => { const p = property(dataset()); await readClientReport(CTX, config, deps(p.fetch)); return p.calls; };
   const full = await run(cfg({ excludeCountries: India, groups: [GROUP, { name: "Lps", prefix: "/lp/" }] }));
-  ok("a configured run makes the daily, the four reports and two requests per group", full.length === 1 + 4 + 2 * 2, `${full.length} requests`);
+  ok("a configured run makes the daily, the five reports and two requests per group", full.length === 1 + 5 + 2 * 2, `${full.length} requests`);
   ok("EVERY request of the run carries the exclusion", full.every((c) => JSON.stringify(c.body.dimensionFilter ?? {}).includes("inListFilter") && JSON.stringify(c.body.dimensionFilter).includes("Russia")));
   const plain = await run(cfg({ groups: [GROUP] }));
   ok("with nothing excluded no request names a country filter", plain.every((c) => !JSON.stringify(c.body).includes("inListFilter")));
@@ -261,7 +261,7 @@ hr("3. what is asked: the country exclusion rides on every request");
 
   const specs = kindSpecs([GROUP], "form_submit");
   const kinds = specs.map((s) => s.kind);
-  ok("one spec per kind, plus a page and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "group_page", "group_form"]));
+  ok("one spec per kind, plus a page and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form"]));
   const byKind = Object.fromEntries(specs.map((s) => [s.kind, reportRequest(w, s, s.ladder[0]!, [])])) as Record<string, any>;
   ok("region asks for country and region", byKind.region.dimensions.map((d: any) => d.name).join() === "yearMonth,country,region");
   ok("sources ask for sessionSourceMedium", byKind.source_medium.dimensions[1].name === "sessionSourceMedium");
@@ -272,7 +272,8 @@ hr("3. what is asked: the country exclusion rides on every request");
   const over = kindSpecs([], "quote_request").find((s) => s.kind === "form_page")!;
   ok("the form event can be overridden", JSON.stringify(reportRequest(w, over, over.ladder[0]!, [])).includes("quote_request"));
   ok("no groups means no group requests", kindSpecs([], "form_submit").every((s) => s.kind !== "group_page" && s.kind !== "group_form"));
-  const ex = reportRequest(w, specs[4]!, specs[4]!.ladder[0]!, India) as any;
+  const gspec = specs.find((x) => x.kind === "group_page")!;
+  const ex = reportRequest(w, gspec, gspec.ladder[0]!, India) as any;
   ok("a group request with an exclusion is the prefix filter AND the exclusion", ex.dimensionFilter.andGroup.expressions.length === 2);
 }
 
@@ -307,6 +308,11 @@ hr("4. what is kept: months, paths, regions");
   ok("form submissions are summed per normalised path into events", fp.length === 1 && fp[0]!.key === "/c" && fp[0]!.events === 5 && fp[0]!.sessions === null);
   const gp = parseReport(rep([["202607", "/plan-your-trip/advisor/ohio?q=1"]], ["sessions"], [[7]]), sp("group_page"), months);
   ok("a group's rows have the group's prefix as the parent", gp[0]!.parent === GROUP.prefix && gp[0]!.key === "/plan-your-trip/advisor/ohio");
+  const en = parseReport(rep([["202607", "form_submit"], ["202607", "page_view"], ["202607", ""], ["202607", "Scroll"]], ["eventCount"], [[2], [90], [1], [4]]), sp("event_name"), months);
+  ok("event names are kept verbatim as keys with events, nothing else", en.length === 4 && en.find((r) => r.key === "page_view")?.events === 90 && en.find((r) => r.key === "Scroll")?.events === 4 && en.every((r) => r.parent === "" && r.sessions === null && r.engagedSessions === null && r.engagementSeconds === null));
+  ok("an empty event name reads as (not set), never as a path", en.some((r) => r.key === "(not set)"));
+  ok("event_name asks for eventName and eventCount with no filter but the exclusion", (() => { const q = reportRequest(w, sp("event_name"), sp("event_name").ladder[0]!, []) as any; return q.dimensions.map((d: any) => d.name).join() === "yearMonth,eventName" && q.metrics.length === 1 && q.metrics[0].name === "eventCount" && !("dimensionFilter" in q) && !JSON.stringify(q).includes("totalUsers"); })());
+  ok("event_name keeps the top 100 a month", TOP_N.event_name === 100);
   const gf = parseReport(rep([["202607", "/plan-your-trip/advisor/ohio"]], ["eventCount"], [[2]]), sp("group_form"), months);
   ok("a group's form rows carry events", gf[0]!.events === 2 && gf[0]!.parent === GROUP.prefix);
 
@@ -382,6 +388,7 @@ hr("6. a whole run against the pretend property");
   ok("form pages: another event name is not read", !r.kinds.form_page!.some((x) => x.key === "/lp/spring"));
   ok("group pages: only paths under the prefix, parent is the prefix", r.kinds.group_page!.length > 0 && r.kinds.group_page!.every((x) => x.parent === GROUP.prefix && x.key.startsWith("/plan-your-trip/advisor/")));
   ok("group forms: under the prefix and the form event", r.kinds.group_form!.length > 0 && r.kinds.group_form!.every((x) => x.parent === GROUP.prefix && (x.events ?? 0) > 0));
+  ok("event names: every event the property counts, excluded country left out, per month", (() => { const e = r.kinds.event_name!; return e.some((x) => x.key === "page_view" && x.month === "2026-06" && x.events === 99) && e.some((x) => x.key === "form_submit" && x.month === "2026-07" && x.events === 2) && e.some((x) => x.key === "lead_form") && !e.some((x) => x.key === "form_submit" && x.month === "2026-07" && (x.events ?? 0) > 2); })());
   const withOverride = await readClientReport(CTX, cfg({ formEvent: "lead_form" }), deps(property(dataset()).fetch));
   ok("a configured form event is the one counted", withOverride.kinds.form_page!.length === 1 && withOverride.kinds.form_page![0]!.key === "/lp/spring" && withOverride.kinds.form_page![0]!.events === 5);
   const noGroups = await readClientReport(CTX, defaultConfig(), deps(property(dataset()).fetch));
@@ -417,7 +424,7 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
 
   const failAll = property(dataset(), { fail: (b) => ((b.dimensions as any[]).length > 1 ? { status: 403, body: "denied" } : null) });
   const all = await readClientReport(CTX, defaultConfig(), deps(failAll.fetch));
-  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 4);
+  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 5);
 
   // Retries.
   let n = 0;
@@ -434,8 +441,9 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
   ok("a property that stays down is retried a bounded number of times, then an error", dd.status === "error" && dead.calls.length === 1 + RETRY_WAITS_MS.length, `${dead.calls.length} calls`);
   ok("the retry predicate: 429 and 5xx and a dropped connection yes, 400 and 403 no", isRetryable(new HttpError(429, "", "x")) && isRetryable(new HttpError(502, "", "x")) && isRetryable(new TypeError("fetch failed")) && !isRetryable(new HttpError(400, "", "x")) && !isRetryable(new HttpError(403, "", "x")));
   const pauses: number[] = [];
-  await readClientReport(CTX, defaultConfig(), deps(property(dataset()).fetch, { pauseMs: 450, sleep: async (ms) => { pauses.push(ms); } }));
-  ok("one request at a time with a pause between calls, none before the first", pauses.length === 4 && pauses.every((x) => x === 450), pauses.join());
+  const paced = property(dataset());
+  await readClientReport(CTX, defaultConfig(), deps(paced.fetch, { pauseMs: 450, sleep: async (ms) => { pauses.push(ms); } }));
+  ok("one request at a time with a pause between calls, none before the first", pauses.length === paced.calls.length - 1 && pauses.length > 0 && pauses.every((x) => x === 450), `${pauses.length} pauses, ${paced.calls.length} calls`);
 
   // Paging and ceilings.
   const big: Dataset = { sessions: Array.from({ length: 30 }, (_, i) => S(`202607${String((i % 28) + 1).padStart(2, "0")}`, "United States", `R${i}`, "google / organic", "/", 1)), events: [] };
@@ -459,7 +467,7 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
     return endless(u, init);
   };
   const hb = await readClientReport(CTX, defaultConfig(), deps(halfEndless));
-  ok("reports past the ceiling are `capped`, named failed and left untouched, never written cut", hb.status === "capped" && hb.failedKinds.length === 4 && hb.daily!.length > 0 && hb.kinds.region === undefined);
+  ok("reports past the ceiling are `capped`, named failed and left untouched, never written cut", hb.status === "capped" && hb.failedKinds.length === 5 && hb.daily!.length > 0 && hb.kinds.region === undefined);
 }
 
 /* ═════════════════════════ 8. no secret and no row text in anything said ═════════════════════════ */
@@ -600,7 +608,7 @@ hr("10. the workflow, the scripts and CI");
     const p = property(dataset());
     await readClientReport(CTX, cfg({ groups: [GROUP], excludeCountries: ["India"] }), deps(p.fetch));
     const used = new Set(p.calls.flatMap((c) => (c.body.dimensions as Array<{ name: string }>).map((d) => d.name)));
-    const allowed = new Set(["date", "yearMonth", "country", "region", "sessionSourceMedium", "landingPage", "pagePath"]);
+    const allowed = new Set(["date", "yearMonth", "country", "region", "sessionSourceMedium", "landingPage", "pagePath", "eventName"]);
     ok("no visitor-level dimension is ever requested (only dates, places, sources and pages)", Array.from(used).every((n) => allowed.has(n)), Array.from(used).join());
     const metricsUsed = new Set(p.calls.flatMap((c) => (c.body.metrics as Array<{ name: string }>).map((m) => m.name)));
     ok("and only counts are asked for", Array.from(metricsUsed).every((n) => ["sessions", "engagedSessions", "userEngagementDuration", "totalUsers", "keyEvents", "eventCount"].includes(n)), Array.from(metricsUsed).join());
@@ -646,9 +654,17 @@ async function storeSection(url: string) {
     ok("the run row is ok with the applied config", run1.status === "ok" && run1.excluded_countries === JSON.stringify(["India"]) && run1.form_event === "form_submit" && run1.groups_json === JSON.stringify([GROUP]) && run1.rows === first.r.rows);
     ok("the run row's spans are the daily and the month spans", run1.first_day === "2026-06-10" && run1.last_day === "2026-10-12" && run1.first_month === "2026-06" && run1.last_month === "2026-10");
 
+    // A row of a month this run did not read (an older month, kept from a longer read) is never touched.
+    await c.query(`INSERT INTO ga4_report_rows (id, client_id, month, kind, parent, key, sessions) VALUES ('old1', 'client-a', '2025-01', 'landing_page', '', '/old-month', 7), ('old2', 'client-a', '2026-07', 'landing_page', '', '/other-clients-twin', 1)`);
+    await c.query(`INSERT INTO ga4_report_rows (id, client_id, month, kind, parent, key, sessions) VALUES ('oldb', 'client-b', '2026-07', 'landing_page', '', '/belongs-to-b', 3)`);
+    await run({ excludeCountries: ["India"], groups: [GROUP] });
+    ok("a month the run did not read keeps its rows", (await count(`SELECT count(*) AS n FROM ga4_report_rows WHERE id = 'old1'`)) === 1);
+    ok("a month the run did read is replaced whole (a stray row in it is gone)", (await count(`SELECT count(*) AS n FROM ga4_report_rows WHERE id = 'old2'`)) === 0);
+    ok("another client's rows are never touched", (await count(`SELECT count(*) AS n FROM ga4_report_rows WHERE id = 'oldb'`)) === 1);
+
     // A second identical run adds nothing.
     await run({ excludeCountries: ["India"], groups: [GROUP] });
-    ok("a rerun adds no row and removes none", (await count(`SELECT count(*) AS n FROM ga4_report_rows WHERE client_id = 'client-a'`)) === rows1 && (await count(`SELECT count(*) AS n FROM ga4_site_days WHERE client_id = 'client-a'`)) === days);
+    ok("a rerun adds no row and removes none", (await count(`SELECT count(*) AS n FROM ga4_report_rows WHERE client_id = 'client-a' AND id NOT IN ('old1')`)) === rows1 && (await count(`SELECT count(*) AS n FROM ga4_site_days WHERE client_id = 'client-a'`)) === days);
 
     // GA4 restates a month: a path that had visits no longer does, and a new one appears. The month is replaced whole.
     const before = (await c.query(`SELECT key FROM ga4_report_rows WHERE client_id='client-a' AND kind='landing_page' AND month='2026-07' ORDER BY key`)).rows.map((x) => (x as { key: string }).key);

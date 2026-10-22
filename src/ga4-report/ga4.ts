@@ -100,6 +100,8 @@ export function kindSpecs(groups: readonly ReportGroup[], formEvent: string): Ki
     { kind: "source_medium", dimensions: ["sessionSourceMedium"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "" },
     { kind: "landing_page", dimensions: ["landingPage"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "" },
     { kind: "form_page", dimensions: ["pagePath"], ladder: [EVENT_METRICS], orderBy: "eventCount", filter: formFilter, parent: "" },
+    // A diagnostic for the team: which event names does the property count. Never shown to a client.
+    { kind: "event_name", dimensions: ["eventName"], ladder: [EVENT_METRICS], orderBy: "eventCount", filter: null, parent: "" },
   ];
   for (const g of groups) {
     specs.push({ kind: "group_page", dimensions: ["landingPage"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: stringFilter("landingPage", "BEGINS_WITH", g.prefix), parent: g.prefix });
@@ -202,7 +204,7 @@ const keyText = (v: string | undefined, max = 300): string => {
 export function parseReport(report: unknown, spec: KindSpec, validMonths: ReadonlySet<string>): ReportRowOut[] {
   const r = (report ?? {}) as GaReport;
   const ix = metricIndex(r);
-  const isEvents = spec.kind === "form_page" || spec.kind === "group_form";
+  const isEvents = spec.kind === "form_page" || spec.kind === "group_form" || spec.kind === "event_name";
   const by = new Map<string, ReportRowOut>();
   for (const row of r.rows ?? []) {
     const dv = row.dimensionValues ?? [];
@@ -215,6 +217,9 @@ export function parseReport(report: unknown, spec: KindSpec, validMonths: Readon
       key = keyText(dv[2]?.value, 160);
     } else if (spec.kind === "source_medium") {
       key = keyText(dv[1]?.value, 160);
+    } else if (spec.kind === "event_name") {
+      // The event name verbatim: it is a name, not a path.
+      key = keyText(dv[1]?.value, 120);
     } else {
       const raw = String(dv[1]?.value ?? "");
       if (!isRealPath(raw)) continue;

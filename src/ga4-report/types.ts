@@ -21,12 +21,12 @@ export const RUN_STATUSES = ["ok", "off", "no_key", "error", "no_data", "capped"
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** The report kinds written to ga4_report_rows. */
-export const REPORT_KINDS = ["region", "source_medium", "landing_page", "form_page", "group_page", "group_form"] as const;
+export const REPORT_KINDS = ["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
 
 /** Rows kept per month per kind. The ceiling cuts the smallest. OURS. */
 export const TOP_N: Record<ReportKind, number> = {
-  region: 100, source_medium: 100, landing_page: 100, form_page: 100, group_page: 300, group_form: 300,
+  region: 100, source_medium: 100, landing_page: 100, form_page: 100, event_name: 100, group_page: 300, group_form: 300,
 };
 
 /** Months of history read by default, and the most a run may be asked for. */
