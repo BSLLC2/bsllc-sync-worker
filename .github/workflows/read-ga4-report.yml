@@ -1,0 +1,74 @@
+name: Read website performance (Google Analytics 4 report)
+
+# Reads each client's Website performance report from Google Analytics 4 and keeps
+# counts in three tables the dashboard app declares (ga4_site_days, ga4_report_rows,
+# ga4_report_runs): daily sessions, engaged sessions, engagement time, users and key
+# events; visitors by region; traffic sources (source / medium); landing pages; form
+# submissions by page; and named page groups. Per client the settings in the
+# dashboard (countries to leave out, page groups, the form event) are applied to
+# every request.
+#
+# WHAT IT TOUCHES. Google's analytics Data API, read-only, with the service account
+# the other importers use. Our own database, three tables. It touches no client site
+# and no ad account. It stores counts, never a visitor.
+#
+# WHEN. Daily 07:40 UTC. Run by hand from the Actions tab: leave dry_run true first,
+# read the counts it prints, then run it again with dry_run false.
+#
+# NEEDS: DATABASE_URL and GOOGLE_SERVICE_ACCOUNT_JSON (both existing), and the
+# dashboard deployed with the three tables. The service account must be a user on
+# each GA4 property.
+on:
+  schedule:
+    - cron: "40 7 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id). Blank = every client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print counts, write nothing (true/false)."
+        required: false
+        default: "true"
+
+concurrency:
+  group: read-ga4-report-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the website performance report
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-ga4-report -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own
+      # last line as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is ONE row for the whole book, so stamping it from a run that
+      # read one account would claim every other account was read today. The note
+      # reaches the command through the environment and is never put into the shell.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_ga4_report --status="$STATUS" --note="$NOTE" --log=run.log
