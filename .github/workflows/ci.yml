@@ -52,6 +52,8 @@ jobs:
         run: npm run verify-page-behaviour
       - name: Website performance report guard (GA4), against a pretend Google
         run: npm run verify-ga4-report
+      - name: GA4 and Search Console audit guard, against a pretend Google
+        run: npm run verify-ga4-audit
       - name: URL inspection guard, against a pretend Search Console
         run: npm run verify-url-inspection
       - name: Business Profile guard, against a pretend Google
