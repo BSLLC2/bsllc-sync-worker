@@ -61,20 +61,48 @@ export const INSERT_RUN_KEEP = `INSERT INTO ga4_report_runs
    status = EXCLUDED.status, detail = EXCLUDED.detail,
    capped_kinds = EXCLUDED.capped_kinds, failed_kinds = EXCLUDED.failed_kinds, ran_at = EXCLUDED.ran_at`;
 
-async function writeDaily(c: Queryable, clientId: string, rows: readonly DailyRowOut[], at: Date) {
-  for (const r of rows) {
-    await c.query(INSERT_SITE_DAY, [id("d", clientId, r.day), clientId, r.day, r.sessions, r.engagedSessions, r.engagementSeconds, r.users, r.keyEvents, at]);
+/**
+ * ONE STATEMENT PER BATCH, NOT PER ROW. The first version sent one INSERT per row; with 24 months of
+ * daily and per-page rows per client over a remote database that is tens of thousands of round trips,
+ * and a real run took over half an hour where the dry run (no writes) took two minutes. The batch
+ * statement is DERIVED from the single-row literal above (the same column list, the same ON CONFLICT
+ * clause), so the app's wiring check still reads one source of truth. Rows are de-duplicated on their id
+ * first, last one wins, which is what the sequential upserts did: a single statement may not touch the
+ * same row twice.
+ */
+export const BATCH_ROWS = 500;
+
+export function batchSql(single: string, rows: number): string {
+  const m = /VALUES \(([^)]*)\)/.exec(single);
+  if (!m) throw new Error("no VALUES tuple to batch");
+  const width = (m[1]!.match(/\$\d+/g) ?? []).length;
+  const tuples: string[] = [];
+  for (let i = 0; i < rows; i++) {
+    tuples.push("(" + Array.from({ length: width }, (_, k) => `$${i * width + k + 1}`).join(", ") + ")");
   }
+  return single.replace(/VALUES \([^)]*\)/, "VALUES " + tuples.join(", "));
+}
+
+async function insertBatched(c: Queryable, single: string, rows: ReadonlyArray<unknown[]>): Promise<void> {
+  const byId = new Map<unknown, unknown[]>();
+  for (const r of rows) byId.set(r[0], r);
+  const unique = [...byId.values()];
+  for (let i = 0; i < unique.length; i += BATCH_ROWS) {
+    const chunk = unique.slice(i, i + BATCH_ROWS);
+    await c.query(batchSql(single, chunk.length), chunk.flat());
+  }
+}
+
+async function writeDaily(c: Queryable, clientId: string, rows: readonly DailyRowOut[], at: Date) {
+  await insertBatched(c, INSERT_SITE_DAY, rows.map((r) => [id("d", clientId, r.day), clientId, r.day, r.sessions, r.engagedSessions, r.engagementSeconds, r.users, r.keyEvents, at]));
 }
 
 async function writeKind(c: Queryable, clientId: string, kind: ReportKind, months: readonly string[], rows: readonly ReportRowOut[], at: Date) {
   await c.query(DELETE_KIND_MONTHS, [clientId, kind, [...months]]);
-  for (const r of rows) {
-    await c.query(INSERT_REPORT_ROW, [
-      id("r", clientId, r.month, r.kind, r.parent, r.key), clientId, r.month, r.kind, r.parent, r.key,
-      r.sessions, r.engagedSessions, r.engagementSeconds, r.events, at,
-    ]);
-  }
+  await insertBatched(c, INSERT_REPORT_ROW, rows.map((r) => [
+    id("r", clientId, r.month, r.kind, r.parent, r.key), clientId, r.month, r.kind, r.parent, r.key,
+    r.sessions, r.engagedSessions, r.engagementSeconds, r.events, at,
+  ]));
 }
 
 /** The config this run APPLIED, as stored on the run row. */
