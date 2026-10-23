@@ -33,7 +33,7 @@ import { readClientReport, type Deps } from "./ga4-report/run.js";
 import { GROUP_MATCH_MODES, cleanMatch, groupKey, mergeKey, parseGroupKey, pathInGroup } from "./ga4-report/groups.js";
 import { processClients } from "./ga4-report/pipeline.js";
 import {
-  DELETE_KIND_MONTHS, INSERT_REPORT_ROW, INSERT_RUN, INSERT_RUN_KEEP, INSERT_SITE_DAY, writeClientReport, type Queryable,
+  BATCH_ROWS, DELETE_KIND_MONTHS, INSERT_REPORT_ROW, INSERT_RUN, INSERT_RUN_KEEP, INSERT_SITE_DAY, batchSql, writeClientReport, type Queryable,
 } from "./ga4-report/store.js";
 import { CONFIG_LIMITS, DEFAULT_FORM_EVENT, REPORT_KINDS, RETRY_WAITS_MS, ROW_CEILING, PAGE_SIZE, TOP_N, type ClientReportResult, type FetchLike, type ReportRowOut } from "./ga4-report/types.js";
 
@@ -533,11 +533,16 @@ const kindOf = (sql: string) => (/^INSERT INTO ga4_site_days/.test(sql) ? "day" 
   ok("every kind that read in full is deleted for the months read, before its rows", REPORT_KINDS.every((k) => delIdx(k) >= 0));
   ok("each delete names the client, the kind and the months read", rec.q.filter((x) => kindOf(x.sql) === "delete").every((x) => x.params[0] === "client-a" && JSON.stringify(x.params[2]) === JSON.stringify(ok1.months)));
   ok("a kind's rows come after its delete and before the next kind's", REPORT_KINDS.every((k, i) => { const d = delIdx(k); const rowsOf = rec.q.map((x, j) => ({ x, j })).filter(({ x }) => kindOf(x.sql) === "row" && x.params[3] === k); return rowsOf.every(({ j }) => j > d) && (i === REPORT_KINDS.length - 1 || rowsOf.every(({ j }) => j < delIdx(REPORT_KINDS[i + 1]!))); }));
-  ok("daily rows are upserts keyed on client and day", rec.q.filter((x) => kindOf(x.sql) === "day").length === ok1.daily!.length && /ON CONFLICT \(client_id, day\)/.test(INSERT_SITE_DAY));
+  const tuplesOf = (k: string, width: number) => rec.q.filter((x) => kindOf(x.sql) === k).reduce((n, x) => n + x.params.length / width, 0);
+  ok("daily rows are upserts keyed on client and day, written in batches", tuplesOf("day", 9) === ok1.daily!.length && rec.q.filter((x) => kindOf(x.sql) === "day").length < ok1.daily!.length && /ON CONFLICT \(client_id, day\)/.test(INSERT_SITE_DAY));
+  ok("a batch holds at most BATCH_ROWS rows", rec.q.filter((x) => kindOf(x.sql) === "day" || kindOf(x.sql) === "row").every((x) => x.params.length / (kindOf(x.sql) === "day" ? 9 : 11) <= BATCH_ROWS));
+  const two = batchSql(INSERT_SITE_DAY, 2);
+  ok("a batch statement repeats the tuple with the placeholders running on, and keeps the conflict clause", two.includes("($1, $2, $3, $4, $5, $6, $7, $8, $9), ($10, $11, $12, $13, $14, $15, $16, $17, $18)") && two.endsWith(INSERT_SITE_DAY.slice(INSERT_SITE_DAY.indexOf("ON CONFLICT"))));
+  ok("a row id repeated inside one write is sent once, the last one winning", await (async () => { const r = recorder(); const dup = { ...ok1, daily: [...ok1.daily!, { ...ok1.daily![0]!, sessions: 999 }] }; await writeClientReport(r.db, "client-a", dup as ClientReportResult, at); const days = r.q.filter((x) => kindOf(x.sql) === "day"); const ids: unknown[] = []; for (const x of days) for (let k = 0; k < x.params.length; k += 9) ids.push(x.params[k]); const first = days.flatMap((x) => { const out: unknown[][] = []; for (let k = 0; k < x.params.length; k += 9) out.push(x.params.slice(k, k + 9)); return out; }).find((t) => t[2] === ok1.daily![0]!.day)!; return ids.length === ok1.daily!.length && new Set(ids).size === ids.length && first[3] === 999; })());
   const run = rec.q.find((x) => kindOf(x.sql) === "run")!;
   ok("the run row records the applied config as the contract says", run.params[11] === JSON.stringify(["India"]) && run.params[12] === "form_submit" && run.params[13] === JSON.stringify([GROUP]));
   ok("the run row records the spans and rows", run.params[4] === ok1.firstDay && run.params[5] === ok1.lastDay && run.params[6] === "2026-06" && run.params[7] === "2026-10" && run.params[8] === ok1.rows);
-  ok("a fixed id per row so a rerun is the same row", new Set(rec.q.filter((x) => kindOf(x.sql) === "row").map((x) => x.params[0])).size === rec.q.filter((x) => kindOf(x.sql) === "row").length);
+  { const ids: unknown[] = []; for (const x of rec.q.filter((y) => kindOf(y.sql) === "row")) for (let i = 0; i < x.params.length; i += 11) ids.push(x.params[i]); ok("a fixed id per row so a rerun is the same row", ids.length > 0 && new Set(ids).size === ids.length); }
 
   // A failed kind is never deleted.
   const failedRegion = await cl({}, { fail: (b) => ((b.dimensions as any[]).some((d) => d.name === "region") ? { status: 403, body: "no" } : null) });
