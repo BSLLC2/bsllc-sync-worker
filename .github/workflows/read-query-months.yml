@@ -1,0 +1,80 @@
+name: Read branded and other searches by month (Search Console)
+
+# Keeps, for each client with a Search Console property and every COMPLETE calendar
+# month, how many clicks and impressions came from searches that name the client
+# (branded) and from every other search Google listed, beside the site total and the
+# searches Google withholds (seo_query_months). Counts only.
+#
+# WHAT IT TOUCHES. Search Console's Search Analytics report, read-only, with the
+# service account the other Google jobs use, and our own database (one table). It
+# writes nothing to any client account.
+#
+# NEVER STORED, PRINTED OR LOGGED: the text of a search. A search can carry a person's
+# name; the job reads each one only to tag it and keeps the sums.
+#
+# WHEN. Mondays 09:00 UTC, after the page-months job (08:30). A month is written once
+# its last day is three days behind, replaced as a whole, so a re-run is free. Run by
+# hand from the Actions tab: leave dry_run true first, read the counts it prints, then
+# run it again with dry_run false. The first live run reads sixteen months.
+#
+# NEEDS: GOOGLE_SERVICE_ACCOUNT_JSON and DATABASE_URL (both existing). The service
+# account must be a user on each Search Console property.
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID (clients.id). Blank = every client with Search Console."
+        required: false
+        default: ""
+      months:
+        description: "How many complete months back (1 to 16). Blank = 16."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print counts, write nothing (true/false)."
+        required: false
+        default: "true"
+
+concurrency:
+  group: read-query-months-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the months
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          MONTHS: ${{ inputs.months }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ -n "$MONTHS" ] && ARGS="$ARGS --months=$MONTHS"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-query-months -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure. A dry run and a
+      # one-client run are excluded: the heartbeat is ONE row for the whole book, so
+      # stamping it from a run that read one account would claim every other account
+      # was read this week. The note reaches the command through the environment.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_query_months --status="$STATUS" --note="$NOTE" --log=run.log

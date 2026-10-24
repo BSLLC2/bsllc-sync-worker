@@ -64,6 +64,8 @@ jobs:
         run: npm run verify-ctm
       - name: Page history guard (top results, pages above a client, pages by month)
         run: npm run verify-page-history
+      - name: Branded-search months guard (pure half; the real job runs in ads-store)
+        run: npm run verify-query-months
       - name: Meta importer guard
         run: npm run verify-meta-import
       - name: HubSpot deal-outcome guard
@@ -136,3 +138,5 @@ jobs:
         run: npm run verify-ga4-report
       - name: Call log to stored calls guard (real SQL)
         run: npm run verify-call-backfill
+      - name: Branded-search months job, against a pretend Search Console (real SQL)
+        run: npm run verify-query-months
