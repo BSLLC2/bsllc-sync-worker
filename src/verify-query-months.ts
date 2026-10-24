@@ -257,7 +257,7 @@ const ALPHA_ROWS: Array<[string, number, number]> = [
   ["dentist near me", 30, 900], ["teeth whitening", 10, 400], ["alphabet dental supply", 4, 40], ["alphadentalfarm", 3, 30],
 ];
 // A search that is also a client's NAME ("alpha dental") is left out of the leak scan: client names are logged.
-const ALL_TEXTS = [...ALPHA_ROWS.map((r) => r[0]), "zeta zoo tickets", "zoo tickets", "zetasomething", "delta diner menu", "eta eats coupons"].filter((t) => t !== "alpha dental");
+const ALL_TEXTS = [...ALPHA_ROWS.map((r) => r[0]), "zeta zoo tickets", "zoo tickets", "zetasomething", "delta diner menu", "eta eats coupons", "theta tickets"].filter((t) => t !== "alpha dental");
 
 async function realJob(admin: string) {
   hr("4. The real job against a pretend Search Console and a throwaway database");
@@ -283,6 +283,7 @@ async function realJob(admin: string) {
     await addClient("c-epsilon", "Epsilon Eats", "sc-domain:eps.example");
     await addClient("c-zeta", "Zeta Zoo", "sc-domain:zeta.example", { typed: JSON.stringify({ terms: ["zeta", "zz", "hope", "Zeta Zoo!"], by: "Sam Example", at: "2026-10-01T00:00:00Z" }) });
     await addClient("c-eta", "Eta Eats", "sc-domain:eta.example", { typed: JSON.stringify({ terms: ["ab", "hope"], by: "Sam Example", at: "2026-10-01T00:00:00Z" }) });
+    await addClient("c-theta", "Theta Tea", "sc-domain:theta.example");
     await addClient("c-nosite", "No Search Console", null);
     await addClient("c-churned", "Churned Co", "sc-domain:churned.example", { status: "churned" });
     await addClient("c-internal", "Our Own Account", "sc-domain:own.example", { internal: true });
@@ -327,6 +328,9 @@ async function realJob(admin: string) {
         const list: Array<[string, number, number]> = [["eta eats coupons", 9, 90], ["lunch", 1, 10]];
         const s = sum(list);
         return { body: dim ? rowsOf(list) : { rows: [{ clicks: s.clicks, impressions: s.imps }] } };
+      }
+      if (prop === "sc-domain:theta.example") {         // searches listed, but no site total: a reading that cannot be completed
+        return { body: dim ? rowsOf([["theta tickets", 5, 50]]) : {} };
       }
       if (prop === "sc-domain:beta.example") {          // three full pages: capped
         const page = req.startRow ?? 0;
@@ -388,6 +392,7 @@ async function realJob(admin: string) {
     ok("the retries happened (the pretend server said no first)", (seen.get(`sc-domain:delta.example|t|${spans[0]!.start}|0`) ?? 0) >= 3 && (seen.get(`sc-domain:delta.example|q|${spans[0]!.start}|0`) ?? 0) >= 2);
     ok("a derived name has its company suffix taken off (Delta Diner LLC is matched as delta diner)", delta[0]!.terms_source === "derived" && delta[0]!.terms_fingerprint === sha16(["delta diner"]) && delta[0]!.brand_terms === 1, delta[0]);
     ok("a refused property writes nothing and is named", (await rowsFor("c-epsilon")).length === 0 && /Epsilon Eats[^\n]*could not be read \(Search Console refused the service account \(403\)/.test(live.out) && /stopped for this property/.test(live.out), live.out.slice(0, 900));
+    ok("searches with no site total are a failed month, named, and nothing is written for it", (await rowsFor("c-theta")).length === 0 && /Theta Tea[^\n]*could not be read \(Search Console gave searches for the month but no site total\)/.test(live.out), live.out.slice(0, 1200));
     ok("a refused property is asked once, not once a month", fake.calls.filter((x) => /eps\.example/.test(decodeURIComponent(x.path))).length === 1);
     ok("one account failing did not stop the others", delta.length === 3 && alpha.length === 2 && (await rowsFor("c-zeta")).length === 3);
     const zeta = (await rowsFor("c-zeta"))[0]!;
