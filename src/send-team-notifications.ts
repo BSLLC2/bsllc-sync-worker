@@ -43,9 +43,21 @@ async function main() {
   const c = new pg.Client({ connectionString: env("DATABASE_URL") });
   await c.connect();
   try {
-    const { rows } = await c.query<{ id: string; user_email: string; kind: string; title: string; body: string | null; url: string | null }>(
+    const { rows: allRows } = await c.query<{ id: string; user_email: string; kind: string; title: string; body: string | null; url: string | null }>(
       `SELECT id, user_email, kind, title, body, url FROM team_notifications WHERE status = 'pending' ORDER BY created_at ASC LIMIT 100`,
     );
+    // KINDS THE APP HAS RETIRED. The app's catalog (shared/notification-catalog.ts)
+    // decides what is sent right away; a job in this repo that inserts a row
+    // directly skips that decision. 'digest' is cut there, so a row of that kind
+    // is stored as muted, never delivered. Keep this list equal to the app's cut
+    // kinds that this repo can still write.
+    const RETIRED_KINDS = new Set(["digest"]);
+    const retired = allRows.filter((n) => RETIRED_KINDS.has(n.kind));
+    if (retired.length && !dryRun) {
+      await c.query(`UPDATE team_notifications SET status='muted' WHERE id = ANY($1::text[])`, [retired.map((n) => n.id)]);
+      console.log(`  muted ${retired.length} retired-kind notification(s)`);
+    }
+    const rows = allRows.filter((n) => !RETIRED_KINDS.has(n.kind));
     if (rows.length === 0) { console.log("send-team-notifications — nothing pending."); return; }
     console.log(`send-team-notifications — ${rows.length} pending${dryRun ? " (dry-run)" : ""}`);
 

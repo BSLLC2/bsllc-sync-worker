@@ -533,7 +533,10 @@ async function main() {
     }
 
     if (!dryRun) {
-      const sent = await queueDigest(c, digest);
+      // No weekly ads email (retired 2026-10-08 in the app, still written here
+      // until 2026-10-25). The queue and the roundup's one line carry it.
+      const sent = 0;
+      void queueDigest;
       console.log(`\n${"─".repeat(72)}`);
       console.log(`${totalCreated} new · ${totalReopened} re-opened on changed evidence · ${totalClosed} closed · ${digest.length} above ${usd(DIGEST_FLOOR_CENTS)}/mo · digest queued for ${sent} teammate(s)`);
       emitJobSummary(formatJobSummary(

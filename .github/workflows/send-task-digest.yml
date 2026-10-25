@@ -3,9 +3,13 @@ name: Send task digest
 # Enqueues ONE morning digest per teammate (overdue / due today / due tomorrow /
 # awaiting-client-past-SLA) into team_notifications. send-team-notifications then
 # delivers it to each person's chosen channels. Runs daily ~8am ET / 7am CT.
+# RETIRED 2026-10-25. The app's weekday roundup (8:00 ET, one message per
+# person) already says what is late and what is due. This job wrote a second
+# 'Today: N overdue' email to everyone every day including Saturday and
+# Sunday, outside the app's catalog (kind 'digest' is cut there), which is part
+# of why the owner counted thirty system emails in a day. The schedule is
+# removed; a hand-run still works.
 on:
-  schedule:
-    - cron: "0 13 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
