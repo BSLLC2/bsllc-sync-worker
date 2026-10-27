@@ -66,14 +66,26 @@ async function pool<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): 
   return out;
 }
 
+const DEGRADED = new Set<string>();
 type Paa = { q: string; domain: string; url: string };
 type Serp = { query: string; organic: Array<{ rank: number; url: string; domain: string; title: string }>; aiPresent: boolean; aiRefs: Array<{ url: string; domain: string }>; paa: Paa[]; err: string | null };
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function serp(creds: DfsCreds, query: string): Promise<Serp> {
   try {
-    const { result } = await task(creds, "/serp/google/organic/live/advanced", [{
+    const body: any = {
       keyword: query, location_name: "United States", language_name: "English", device: "desktop", depth: 10,
       people_also_ask_click_depth: 2, load_async_ai_overview: true,
-    }]);
+    };
+    let result: any;
+    // A 40101 is DataForSEO's own server error. Retry the same request twice; if it still fails, ask for the plain result (no click-through, no async overview) and say so in the note.
+    for (let attempt = 0; ; attempt++) {
+      try { ({ result } = await task(creds, "/serp/google/organic/live/advanced", [body])); break; }
+      catch (e) {
+        if (!/40101/.test(String(e)) || attempt >= 3) throw e;
+        if (attempt === 2) { delete body.people_also_ask_click_depth; delete body.load_async_ai_overview; DEGRADED.add(query); }
+        await sleep(3000 * (attempt + 1));
+      }
+    }
     const items: any[] = result?.[0]?.items ?? [];
     const organic = items.filter((i) => i?.type === "organic").slice(0, 10).map((i) => ({ rank: n(i.rank_group) ?? n(i.rank_absolute) ?? 0, url: String(i.url ?? ""), domain: dom(String(i.domain ?? hostOf(String(i.url ?? "")))), title: String(i.title ?? "").slice(0, 160) }));
     const ai = items.find((i) => i?.type === "ai_overview");
@@ -117,7 +129,11 @@ async function page(creds: DfsCreds, url: string): Promise<Page> {
     base.internal = n(meta.internal_links_count); base.external = n(meta.external_links_count);
     // Schema, author and date are not fields of the on-page response, so read them from the raw page DataForSEO stored for this task.
     try {
-      const raw = await dfs(creds, "GET", `/on_page/raw_html?id=${id}&url=${encodeURIComponent(url)}`);
+      let raw: any;
+      for (let a = 0; ; a++) {
+        try { raw = await dfs(creds, "GET", `/on_page/raw_html?id=${id}&url=${encodeURIComponent(url)}`); break; }
+        catch (e) { if (a >= 2) throw e; await sleep(6000); }
+      }
       const html: string = raw?.tasks?.[0]?.result?.[0]?.items?.html ?? raw?.tasks?.[0]?.result?.[0]?.items?.raw_html ?? "";
       if (html) {
         base.schema = schemaTypes(html);
@@ -155,7 +171,7 @@ const typeOf = (d: string) => TYPE_RULES.find(([rx]) => rx.test(d))?.[1] ?? "oth
   for (const s of serps) { if (!s.aiPresent) row(s.query, "no", "", "", "serp/live (load_async_ai_overview on)", RUN); for (const r of s.aiRefs) row(s.query, "yes", r.domain, r.url, "serp/live (load_async_ai_overview on)", RUN); if (s.aiPresent && !s.aiRefs.length) row(s.query, "yes", "", "", "AI Overview shown, no sources returned", RUN); }
   end();
   block("1c_people_also_ask", ["query", "question", "answering_domain", "answering_url", "source", "date"]);
-  for (const s of serps) { if (!s.paa.length) row(s.query, "no data", "", "", "serp/live (people_also_ask_click_depth 2)", RUN); for (const p of s.paa) row(s.query, p.q, p.domain, p.url, "serp/live (people_also_ask_click_depth 2)", RUN); }
+  for (const s of serps) { const src = DEGRADED.has(s.query) ? "serp/live (plain request after repeated server errors: no click-through, no async overview)" : "serp/live (people_also_ask_click_depth 2)"; if (!s.paa.length) row(s.query, "no data", "", "", src, RUN); for (const p of s.paa) row(s.query, p.q, p.domain, p.url, src, RUN); }
   end();
   checkpoint("1 (Google results, People Also Ask)");
 
