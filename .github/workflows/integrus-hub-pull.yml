@@ -1,0 +1,34 @@
+name: Integrus hub pull (READ ONLY)
+
+# DataForSEO only. People Also Ask, how ranking pages are built, our own two pages,
+# and a backlink gap. Nothing is written anywhere. CEILING stops the run once the
+# API's own cost fields pass it; a balance under $1 stops it before any call.
+on:
+  workflow_dispatch:
+    inputs:
+      ceiling:
+        description: "USD ceiling for this run"
+        required: true
+        default: "8"
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run pull
+        env:
+          CEILING: ${{ inputs.ceiling }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run integrus-hub-pull 2>&1 | tee integrus-hub-pull.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integrus-hub-pull
+          path: integrus-hub-pull.txt
