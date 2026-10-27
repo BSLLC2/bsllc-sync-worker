@@ -1,0 +1,51 @@
+name: Integrus AI-answer research (READ ONLY)
+
+# DataForSEO AI Optimization API only. Nothing is written to any database or
+# third party. PART a = candidate questions + who holds the answers now +
+# a cost estimate. PART b = the shortlisted questions put to ChatGPT, Claude,
+# Gemini, Perplexity and Google AI Mode. CEILING stops the run once the sum of
+# the API's own cost fields passes it.
+on:
+  workflow_dispatch:
+    inputs:
+      part:
+        description: "a or b"
+        required: true
+        default: "a"
+      ceiling:
+        description: "USD ceiling for this run"
+        required: true
+        default: "40"
+      shortlist:
+        description: "PART b only: JSON array of questions"
+        required: false
+        default: "[]"
+      probes:
+        description: "PART b only: JSON object question -> probe phrase for the concentration read"
+        required: false
+        default: "{}"
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run research
+        env:
+          PART: ${{ inputs.part }}
+          CEILING: ${{ inputs.ceiling }}
+          SHORTLIST: ${{ inputs.shortlist }}
+          PROBES: ${{ inputs.probes }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run integrus-aeo-research 2>&1 | tee integrus-aeo-${{ inputs.part }}.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integrus-aeo-${{ inputs.part }}
+          path: integrus-aeo-${{ inputs.part }}.txt

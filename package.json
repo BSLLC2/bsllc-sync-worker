@@ -238,6 +238,7 @@
     "verify-alert-reminder": "tsx src/verify-alert-reminder.ts",
     "verify-reply-to": "tsx src/verify-reply-to.ts",
     "integrus-research": "tsx src/integrus-research.ts",
+    "integrus-aeo-research": "tsx src/integrus-aeo-research.ts",
     "pcc-research": "tsx src/pcc-research.ts",
     "dfs-ranked-urls": "tsx src/dfs-ranked-urls.ts",
     "tracker-profile": "tsx src/tracker-profile.ts",
