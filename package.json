@@ -246,7 +246,8 @@
     "tracker-crossmatch": "tsx src/tracker-crossmatch.ts",
     "brownell-dash-audit": "tsx src/brownell-dash-audit.ts",
     "brownell-dash-audit2": "tsx src/brownell-dash-audit2.ts",
-    "integrus-three-parts": "tsx src/integrus-three-parts.ts"
+    "integrus-three-parts": "tsx src/integrus-three-parts.ts",
+    "integrus-three-parts-followup": "tsx src/integrus-three-parts-followup.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

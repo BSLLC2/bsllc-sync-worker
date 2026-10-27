@@ -1,0 +1,34 @@
+name: Integrus three-part follow-up (READ ONLY)
+
+# DataForSEO only. Volumes, Dallas volumes and where integruspartners.com ranks. Read only.
+# Nothing is written anywhere. The cost is reported against a reference figure; a
+# balance under $1 stops it before any call.
+on:
+  workflow_dispatch:
+    inputs:
+      reference:
+        description: "USD reference cost for this run (reported against, not a stop)"
+        required: true
+        default: "3"
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run pull
+        env:
+          REFERENCE_COST: ${{ inputs.reference }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run integrus-three-parts-followup 2>&1 | tee integrus-three-parts-followup.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integrus-three-parts-followup
+          path: integrus-three-parts-followup.txt
