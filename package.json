@@ -145,6 +145,8 @@
     "verify-gbp": "tsx src/verify-gbp.ts",
     "read-bing": "tsx src/read-bing.ts",
     "verify-bing": "tsx src/verify-bing.ts",
+    "read-webops": "tsx src/read-webops.ts",
+    "verify-webops-readers": "tsx src/verify-webops-readers.ts",
     "read-ctm": "tsx src/read-ctm.ts",
     "verify-ctm": "tsx src/verify-ctm.ts",
     "backfill-calls-from-ctm": "tsx src/backfill-calls-from-ctm.ts",

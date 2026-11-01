@@ -62,6 +62,8 @@ jobs:
         run: npm run verify-bing
       - name: CallTrackingMetrics guard, against a pretend CTM
         run: npm run verify-ctm
+      - name: WebOps readers guard (site check, domain expiry, WP Umbrella), against pretend servers
+        run: npm run verify-webops-readers
       - name: Page history guard (top results, pages above a client, pages by month)
         run: npm run verify-page-history
       - name: Meta importer guard

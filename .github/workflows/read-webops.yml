@@ -1,0 +1,73 @@
+name: Read WebOps site care (site check, domain expiry, WP Umbrella)
+
+# For each WebOps client: one public check of the client's own site (status, speed,
+# certificate expiry, redirects, canonical, four security headers), the domain's expiry
+# through RDAP, and, where the site is managed in WP Umbrella, its update, backup and
+# uptime counts. Keeps COUNTS and DATES in the dashboard's site-care table
+# (site_care_readings). No page text, no header value, no plugin name is stored.
+#
+# SITEGROUND HAS NO API and is never read or scraped; its facts are typed in the app.
+#
+# WHEN. Daily 09:30 UTC. The dashboard's per-client refresh can dispatch it with client_id.
+#
+# NEEDS: DATABASE_URL and the dashboard with the site-care table. WP_UMBRELLA_API_KEY
+# (optional per client): without it a client that HAS a WP Umbrella project id goes red
+# on purpose and the run names the secret. The site and domain checks need no secret.
+on:
+  schedule:
+    - cron: "30 9 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every WebOps client."
+        required: false
+        default: ""
+      kind:
+        description: "site, domain, wp or all."
+        required: false
+        default: "all"
+      dry_run:
+        description: "Read and print, write nothing (true/false). Start with true."
+        required: false
+        default: "true"
+
+concurrency:
+  group: read-webops-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read site care
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WP_UMBRELLA_API_KEY: ${{ secrets.WP_UMBRELLA_API_KEY || secrets.WPUMBRELLA_API_KEY }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          KIND: ${{ inputs.kind }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ -n "$KIND" ] && ARGS="$ARGS --kind=$KIND"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-webops -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own last
+      # line as the reason. A dry run, a one-client run and a one-kind run are excluded:
+      # the heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && (github.event_name == 'schedule' || (inputs.dry_run != 'true' && inputs.client_id == '' && inputs.kind == 'all'))
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_webops --status="$STATUS" --note="$NOTE" --log=run.log
