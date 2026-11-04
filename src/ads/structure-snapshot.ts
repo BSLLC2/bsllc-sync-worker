@@ -28,31 +28,59 @@
  * Every query here is a SELECT. Nothing in this file writes to an ad account,
  * proposes anything or applies anything.
  *
- * ── THE GRAIN: CAMPAIGN, AD GROUP, KEYWORD, BUDGET, BID STRATEGY ───────────
+ * ── THE GRAIN ─────────────────────────────────────────────────────────────
  *
- * Those five are the account's skeleton and they are what this system already
- * reasons about: the rules engine judges campaigns, the guarded apply path
- * writes budgets and campaign negatives, and the bid-target reading next door
- * turns on the strategy. Keywords cover both levels — the positive and
- * negative criteria on an ad group, and the negative keyword list on a
- * campaign — because campaign negatives are one of the operations we ourselves
- * write, and a snapshot that cannot diff our own writes is missing the half we
- * are answerable for.
+ * The first five kinds are the account's skeleton and what this system already
+ * reasons about: campaign, ad group, keyword, budget, bid strategy. Keywords
+ * cover every level the platform keeps a keyword at AND that this job reads:
+ * the positive and NEGATIVE criteria on an ad group (the `negative` attribute
+ * says which, so ad-group negatives were always in here), and the negative
+ * keyword list on a campaign. Campaign negatives are one of the operations we
+ * ourselves write, and a snapshot that cannot diff our own writes is missing
+ * the half we are answerable for.
  *
- * ADS AND RESPONSIVE SEARCH ADS ARE OUT OF SCOPE, deliberately, and this is
- * what it costs. An RSA carries up to fifteen headlines and four descriptions;
- * that is CONTENT, it is the biggest row by an order of magnitude, and it
- * moves on its own schedule. Three things make it the wrong thing to store
- * here. Ad copy is out of our change scope by policy rather than by API limit
- * (the adapter's capability block says so — OCH runs under LegitScript). A
- * served Google ad is effectively immutable, so "an ad changed" is really a
- * new ad created and the old one paused, which is a CREATE and a REMOVE that
- * `change_event` already records with its own timestamps. And the diff a
- * person actually wants over ad text is a diff of words, which is a different
- * reading from a diff of settings. THE COST, stated rather than hidden: this
- * table cannot answer "which ads were live on 1 September", and the copy work
- * in a vendor brief is not measured by it. Adding ads later is one more entry
- * in ENTITY_KINDS and one more normalizer; nothing here is shaped against it.
+ * SIX MORE KINDS WERE ADDED (2026-11-04), each a separate `entity_kind` so that
+ * every reader that asks for `keyword` or `campaign` is byte-for-byte what it
+ * was (the dashboard reads `keyword` by its `ag:` / `camp:` id prefix, and a
+ * new level under that name would have been read as one of those):
+ *
+ *   ad                    a responsive search ad: its headlines, descriptions,
+ *                         final URLs, display path, labels, strength and
+ *                         approval status. REVERSES the earlier decision to
+ *                         leave ads out — see below for what that costs.
+ *   account_negative      a negative keyword at the ACCOUNT level
+ *                         (customer_negative_criterion).
+ *   shared_set            a shared negative keyword LIST, and which campaigns it
+ *                         is attached to.
+ *   shared_negative       one keyword in such a list.
+ *   conversion_action     an account's conversion action and how it counts.
+ *   campaign_conversion_goal  which conversion goal a campaign optimises
+ *                         towards (category + origin, biddable or not).
+ *
+ * ADS ARE IN NOW, AND THIS IS WHAT THAT CHANGES. The earlier version of this
+ * header kept ads out for three reasons, and each is answered rather than
+ * dropped. (1) Ad copy is out of our CHANGE scope by policy (OCH runs under
+ * LegitScript). It still is: nothing in this file writes an ad, proposes one
+ * or applies one, and the dashboard's guarded apply path is unchanged. READING
+ * the copy that is live is not changing it, and "what did the ad say on
+ * 1 September" is exactly what a before-and-after reading of a copy change
+ * needs. (2) A served ad is effectively immutable, so "an ad changed" is a
+ * create and a remove that `change_event` already timestamps. True, and a
+ * snapshot is how the NEW ad's words are known on the day it appeared. (3) The
+ * biggest row by an order of magnitude. It is bounded: an RSA carries at most
+ * fifteen headlines of thirty characters and four descriptions of ninety, and
+ * the normalizer caps what it keeps (MAX_ASSETS_PER_AD, MAX_ASSET_CHARS) so a
+ * malformed response cannot make a row unbounded.
+ *
+ * WHAT IS STORED OF AN AD, AND WHAT IS NOT. The text of each headline and
+ * description (with the position it is pinned to, where it is), the final URLs,
+ * the two display-path fragments, label names, the ad strength and the policy
+ * approval status. NOT stored: Google's per-asset performance rating (it moves
+ * on its own schedule, so keeping it would write a new interval for every ad
+ * most days and the table would grow with TIME again), the ad's own name, any
+ * tracking template, and anything about who saw it. There is no person's data
+ * in an ad; the one thing worth a thought is a final URL carrying a query
+ * string, which is kept verbatim because the destination is the point.
  *
  * ── HOW OFTEN: DAILY, AND WHAT THAT COSTS ─────────────────────────────────
  *
@@ -101,9 +129,10 @@
  * is a function of how much the account changes, not of how long we keep it.
  *
  * The one thing that would make this wrong is named so nobody has to work it
- * out later: if ads are ever added at the grain above, or the cadence ever
- * goes sub-daily on a large account, rows start growing with TIME again and
- * this decision has to be taken a second time.
+ * out later: if the cadence ever goes sub-daily on a large account, or an
+ * attribute that moves on its own schedule is added to an entity's attrs (the
+ * reason an ad's per-asset performance rating is NOT stored), rows start
+ * growing with TIME again and this decision has to be taken a second time.
  *
  * ── ENUMS ARE INTEGERS, AND MONEY IS MICROS ───────────────────────────────
  *
@@ -123,8 +152,11 @@
 import type pg from "pg";
 import { createHash, randomUUID } from "node:crypto";
 
-/** The five kinds this snapshot covers. See the header for what is not here. */
-export const ENTITY_KINDS = ["campaign", "ad_group", "keyword", "budget", "bid_strategy"] as const;
+/** The kinds this snapshot covers. The first five are the skeleton; the rest were added 2026-11-04 (see the header). */
+export const ENTITY_KINDS = [
+  "campaign", "ad_group", "keyword", "budget", "bid_strategy",
+  "ad", "account_negative", "shared_set", "shared_negative", "conversion_action", "campaign_conversion_goal",
+] as const;
 export type EntityKind = (typeof ENTITY_KINDS)[number];
 
 /**
@@ -634,6 +666,287 @@ export function normalizeBidStrategy(row: any, report?: UnrecognisedEnum[]): Sna
       target_roas: micros(s.target_roas?.target_roas),
       maximize_conversion_value_target_roas: micros(s.maximize_conversion_value?.target_roas),
     },
+  };
+}
+
+// ── The newer kinds: ads, account negatives, shared lists, conversions ──────
+export const AD_GROUP_AD_STATUS: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "ENABLED", "3": "PAUSED", "4": "REMOVED",
+};
+export const SHARED_SET_STATUS: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "ENABLED", "3": "REMOVED",
+};
+export const CONVERSION_ACTION_STATUS: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "ENABLED", "3": "REMOVED", "4": "HIDDEN",
+};
+export const CONVERSION_ACTION_TYPE: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "AD_CALL", "3": "CLICK_TO_CALL", "4": "GOOGLE_PLAY_DOWNLOAD",
+  "5": "GOOGLE_PLAY_IN_APP_PURCHASE", "6": "UPLOAD_CALLS", "7": "UPLOAD_CLICKS", "8": "WEBPAGE",
+  "9": "WEBSITE_CALL", "10": "STORE_SALES_DIRECT_UPLOAD", "11": "STORE_SALES", "12": "FIREBASE_ANDROID_FIRST_OPEN",
+  "13": "FIREBASE_ANDROID_IN_APP_PURCHASE", "14": "FIREBASE_ANDROID_CUSTOM", "15": "FIREBASE_IOS_FIRST_OPEN",
+  "16": "FIREBASE_IOS_IN_APP_PURCHASE", "17": "FIREBASE_IOS_CUSTOM", "18": "THIRD_PARTY_APP_ANALYTICS_ANDROID_FIRST_OPEN",
+  "19": "THIRD_PARTY_APP_ANALYTICS_ANDROID_IN_APP_PURCHASE", "20": "THIRD_PARTY_APP_ANALYTICS_ANDROID_CUSTOM",
+  "21": "THIRD_PARTY_APP_ANALYTICS_IOS_FIRST_OPEN", "22": "THIRD_PARTY_APP_ANALYTICS_IOS_IN_APP_PURCHASE",
+  "23": "THIRD_PARTY_APP_ANALYTICS_IOS_CUSTOM", "24": "ANDROID_APP_PRE_REGISTRATION", "25": "ANDROID_INSTALLS_ALL_OTHER_APPS",
+  "26": "FLOODLIGHT_ACTION", "27": "FLOODLIGHT_TRANSACTION", "28": "GOOGLE_HOSTED", "29": "LEAD_FORM_SUBMIT",
+  "30": "SALESFORCE", "31": "SEARCH_ADS_360", "32": "SMART_CAMPAIGN_AD_CLICKS_TO_CALL", "33": "SMART_CAMPAIGN_MAP_CLICKS_TO_CALL",
+  "34": "SMART_CAMPAIGN_MAP_DIRECTIONS", "35": "SMART_CAMPAIGN_TRACKED_CALLS", "36": "STORE_VISITS", "37": "WEBPAGE_CODELESS",
+  "38": "UNIVERSAL_ANALYTICS_GOAL", "39": "UNIVERSAL_ANALYTICS_TRANSACTION", "40": "GOOGLE_ANALYTICS_4_CUSTOM",
+  "41": "GOOGLE_ANALYTICS_4_PURCHASE",
+};
+export const CONVERSION_ORIGIN: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "WEBSITE", "3": "GOOGLE_HOSTED", "4": "APP", "5": "CALL_FROM_ADS", "6": "STORE", "7": "YOUTUBE_HOSTED",
+};
+export const CONVERSION_GOAL_CATEGORY: Record<string, string> = {
+  "0": "UNSPECIFIED", "1": "UNKNOWN", "2": "DEFAULT", "3": "PAGE_VIEW", "4": "PURCHASE", "5": "SIGNUP", "6": "LEAD",
+  "7": "DOWNLOAD", "8": "ADD_TO_CART", "9": "BEGIN_CHECKOUT", "10": "SUBSCRIBE_PAID", "11": "PHONE_CALL_LEAD",
+  "12": "IMPORTED_LEAD", "13": "SUBMIT_LEAD_FORM", "14": "BOOK_APPOINTMENT", "15": "REQUEST_QUOTE", "16": "GET_DIRECTIONS",
+  "17": "OUTBOUND_CLICK", "18": "CONTACT", "19": "ENGAGEMENT", "20": "STORE_VISIT", "21": "STORE_SALE",
+  "22": "QUALIFIED_LEAD", "23": "CONVERTED_LEAD",
+};
+
+/** A responsive search ad carries up to 15 headlines and 4 descriptions. */
+export const MAX_ASSETS_PER_AD = 15;
+/** An asset is 30 or 90 characters on the platform; this is the safety ceiling
+ *  on what is kept, not a rule about ad copy. */
+export const MAX_ASSET_CHARS = 120;
+
+/**
+ * Ads: RESPONSIVE SEARCH ADS ONLY, and only the wording the account holds.
+ * Per-asset performance ratings are not selected: they change as Google
+ * re-rates and would open a new interval every week for no change anybody made.
+ * No tracking template, no URL parameters, no customer data.
+ */
+export const AD_GAQL = `
+  SELECT ad_group_ad.ad.id, ad_group_ad.ad.final_urls, ad_group_ad.ad.responsive_search_ad.headlines,
+         ad_group_ad.ad.responsive_search_ad.descriptions, ad_group_ad.ad.responsive_search_ad.path1,
+         ad_group_ad.ad.responsive_search_ad.path2, ad_group_ad.status, ad_group.id, campaign.id
+    FROM ad_group_ad
+   WHERE ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD' AND ad_group_ad.status != 'REMOVED'`;
+
+/** Labels on those ads. A label is a word the account manager typed; its text is
+ *  kept. If this query fails the ad kind is dropped for the run (see assembleAds). */
+export const AD_LABEL_GAQL = `
+  SELECT ad_group_ad.resource_name, label.name
+    FROM ad_group_ad_label
+   WHERE ad_group_ad.status != 'REMOVED'`;
+
+/** Negatives set on the account as a whole. */
+export const ACCOUNT_NEGATIVE_GAQL = `
+  SELECT customer_negative_criterion.id, customer_negative_criterion.type,
+         customer_negative_criterion.keyword.text, customer_negative_criterion.keyword.match_type
+    FROM customer_negative_criterion
+   WHERE customer_negative_criterion.type = 'KEYWORD'`;
+
+export const SHARED_SET_GAQL = `
+  SELECT shared_set.id, shared_set.name, shared_set.type, shared_set.status
+    FROM shared_set
+   WHERE shared_set.type = 'NEGATIVE_KEYWORDS' AND shared_set.status != 'REMOVED'`;
+
+export const CAMPAIGN_SHARED_SET_GAQL = `
+  SELECT campaign.id, shared_set.id
+    FROM campaign_shared_set
+   WHERE shared_set.type = 'NEGATIVE_KEYWORDS' AND campaign_shared_set.status = 'ENABLED'`;
+
+export const SHARED_CRITERION_GAQL = `
+  SELECT shared_set.id, shared_criterion.criterion_id, shared_criterion.keyword.text,
+         shared_criterion.keyword.match_type
+    FROM shared_criterion
+   WHERE shared_set.type = 'NEGATIVE_KEYWORDS' AND shared_criterion.type = 'KEYWORD'`;
+
+export const CONVERSION_ACTION_GAQL = `
+  SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type,
+         conversion_action.category, conversion_action.origin, conversion_action.primary_for_goal,
+         conversion_action.include_in_conversions_metric, conversion_action.counting_type,
+         conversion_action.value_settings.default_value, conversion_action.value_settings.always_use_default_value
+    FROM conversion_action
+   WHERE conversion_action.status != 'REMOVED'`;
+
+export const CAMPAIGN_CONVERSION_GOAL_GAQL = `
+  SELECT campaign.id, campaign_conversion_goal.category, campaign_conversion_goal.origin,
+         campaign_conversion_goal.biddable
+    FROM campaign_conversion_goal`;
+
+const cut = (v: unknown): string | null => {
+  const s = String(v ?? "").trim().slice(0, MAX_ASSET_CHARS);
+  return s ? s : null;
+};
+const assetTexts = (list: unknown): string[] =>
+  (Array.isArray(list) ? list : [])
+    .map((a: any) => cut(a?.text))
+    .filter((t): t is string => t !== null)
+    .slice(0, MAX_ASSETS_PER_AD);
+const sortedJoin = (xs: string[]): string | null => (xs.length ? JSON.stringify(xs) : null);
+/** `customers/1/adGroupAds/2~3` -> `2~3`. */
+export function parseAdGroupAdResource(v: unknown): string | null {
+  const s = String(v ?? "").trim();
+  const m = s.match(/adGroupAds\/(\d+~\d+)$/);
+  return m ? (m[1] ?? null) : null;
+}
+
+/** One ad, without its labels yet. Headlines and descriptions keep their order:
+ *  an order change is an edit somebody made. */
+export function normalizeAd(row: any, report?: UnrecognisedEnum[]): SnapshotEntity | null {
+  const a = row?.ad_group_ad?.ad ?? {};
+  const adId = str(a.id);
+  const adGroupId = str(row?.ad_group?.id);
+  if (!adId || !adGroupId) return null;
+  const rsa = a.responsive_search_ad ?? {};
+  const urlList: unknown[] = Array.isArray(a.final_urls) ? a.final_urls : [];
+  const urls = urlList.map((u: unknown) => str(u)).filter((u): u is string => u !== null);
+  return {
+    kind: "ad",
+    entityId: `${adGroupId}~${adId}`,
+    parentId: adGroupId,
+    campaignId: str(row?.campaign?.id),
+    name: null,
+    status: snapshotEnum(AD_GROUP_AD_STATUS, row?.ad_group_ad?.status, "ad_group_ad.status", report),
+    attrs: {
+      ad_type: "RESPONSIVE_SEARCH_AD",
+      headlines: sortedJoin(assetTexts(rsa.headlines)),
+      descriptions: sortedJoin(assetTexts(rsa.descriptions)),
+      final_urls: sortedJoin(urls),
+      path1: str(rsa.path1),
+      path2: str(rsa.path2),
+      labels: null,
+    },
+  };
+}
+
+/**
+ * Attach labels. `labelRows === null` means the label query FAILED, and then NO
+ * ad is returned at all: an ad stored with null labels this week and real
+ * labels next week is a change nobody made. `[]` is a real answer (no labels).
+ */
+export function assembleAds(ads: SnapshotEntity[], labelRows: any[] | null): SnapshotEntity[] {
+  if (labelRows === null) return [];
+  const byAd = new Map<string, string[]>();
+  for (const r of labelRows) {
+    const key = parseAdGroupAdResource(r?.ad_group_ad?.resource_name);
+    const name = str(r?.label?.name);
+    if (!key || !name) continue;
+    const list = byAd.get(key) ?? [];
+    list.push(name);
+    byAd.set(key, list);
+  }
+  return ads.map((a) => {
+    const labels = (byAd.get(a.entityId) ?? []).sort();
+    return { ...a, attrs: { ...a.attrs, labels: labels.length ? JSON.stringify(labels) : null } };
+  });
+}
+
+export function normalizeAccountNegative(row: any, report?: UnrecognisedEnum[]): SnapshotEntity | null {
+  const n = row?.customer_negative_criterion ?? {};
+  const id = str(n.id);
+  if (!id) return null;
+  return {
+    kind: "account_negative",
+    entityId: id,
+    parentId: null,
+    campaignId: null,
+    name: str(n.keyword?.text),
+    status: "ENABLED",
+    attrs: {
+      match_type: snapshotEnum(KEYWORD_MATCH_TYPE, n.keyword?.match_type, "customer_negative_criterion.keyword.match_type", report),
+      negative: true,
+      level: "account",
+    },
+  };
+}
+
+/** A shared negative list, with the campaigns it is attached to. A failed
+ *  attachment query (`attach === null`) drops the kind: attachments are part of
+ *  what the list is. */
+export function assembleSharedSets(setRows: any[], attach: any[] | null, report?: UnrecognisedEnum[]): SnapshotEntity[] {
+  if (attach === null) return [];
+  const byset = new Map<string, string[]>();
+  for (const r of attach) {
+    const sid = str(r?.shared_set?.id);
+    const cid = str(r?.campaign?.id);
+    if (!sid || !cid) continue;
+    const list = byset.get(sid) ?? [];
+    list.push(cid);
+    byset.set(sid, list);
+  }
+  const out: SnapshotEntity[] = [];
+  for (const r of setRows) {
+    const s = r?.shared_set ?? {};
+    const id = str(s.id);
+    if (!id) continue;
+    const campaigns = (byset.get(id) ?? []).sort((a, b) => Number(a) - Number(b));
+    out.push({
+      kind: "shared_set",
+      entityId: id,
+      parentId: null,
+      campaignId: null,
+      name: str(s.name),
+      status: snapshotEnum(SHARED_SET_STATUS, s.status, "shared_set.status", report),
+      attrs: { list_type: "NEGATIVE_KEYWORDS", campaign_ids: campaigns.length ? JSON.stringify(campaigns) : null },
+    });
+  }
+  return out;
+}
+
+export function normalizeSharedNegative(row: any, report?: UnrecognisedEnum[]): SnapshotEntity | null {
+  const k = row?.shared_criterion ?? {};
+  const setId = str(row?.shared_set?.id);
+  const criterionId = str(k.criterion_id);
+  if (!setId || !criterionId) return null;
+  return {
+    kind: "shared_negative",
+    entityId: `ss:${setId}:${criterionId}`,
+    parentId: setId,
+    campaignId: null,
+    name: str(k.keyword?.text),
+    status: "ENABLED",
+    attrs: {
+      match_type: snapshotEnum(KEYWORD_MATCH_TYPE, k.keyword?.match_type, "shared_criterion.keyword.match_type", report),
+      negative: true,
+      level: "shared_list",
+    },
+  };
+}
+
+/** `default_value` is in the ACCOUNT'S currency units, NOT micros; it is stored
+ *  verbatim under a name that says so. */
+export function normalizeConversionAction(row: any, report?: UnrecognisedEnum[]): SnapshotEntity | null {
+  const a = row?.conversion_action ?? {};
+  const id = str(a.id);
+  if (!id) return null;
+  return {
+    kind: "conversion_action",
+    entityId: id,
+    parentId: null,
+    campaignId: null,
+    name: str(a.name),
+    status: snapshotEnum(CONVERSION_ACTION_STATUS, a.status, "conversion_action.status", report),
+    attrs: {
+      action_type: snapshotEnum(CONVERSION_ACTION_TYPE, a.type, "conversion_action.type", report),
+      category: snapshotEnum(CONVERSION_GOAL_CATEGORY, a.category, "conversion_action.category", report),
+      origin: snapshotEnum(CONVERSION_ORIGIN, a.origin, "conversion_action.origin", report),
+      primary_for_goal: a.primary_for_goal == null ? null : Boolean(a.primary_for_goal),
+      include_in_conversions_metric: a.include_in_conversions_metric == null ? null : Boolean(a.include_in_conversions_metric),
+      counting_type: a.counting_type == null ? null : String(a.counting_type),
+      default_value_account_currency: a.value_settings?.default_value == null ? null : Number(a.value_settings.default_value),
+      always_use_default_value: a.value_settings?.always_use_default_value == null ? null : Boolean(a.value_settings.always_use_default_value),
+    },
+  };
+}
+
+export function normalizeCampaignConversionGoal(row: any, report?: UnrecognisedEnum[]): SnapshotEntity | null {
+  const g = row?.campaign_conversion_goal ?? {};
+  const campaignId = str(row?.campaign?.id);
+  const category = snapshotEnum(CONVERSION_GOAL_CATEGORY, g.category, "campaign_conversion_goal.category", report);
+  const origin = snapshotEnum(CONVERSION_ORIGIN, g.origin, "campaign_conversion_goal.origin", report);
+  if (!campaignId || !category || !origin) return null;
+  return {
+    kind: "campaign_conversion_goal",
+    entityId: `${campaignId}:${category}:${origin}`,
+    parentId: campaignId,
+    campaignId,
+    name: null,
+    status: "ENABLED",
+    attrs: { category, origin, biddable: g.biddable == null ? null : Boolean(g.biddable) },
   };
 }
 

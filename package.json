@@ -177,6 +177,8 @@
     "ads-structure-snapshot": "tsx src/ads-structure-snapshot.ts",
     "ads-daily-metrics": "tsx src/ads-daily-metrics.ts",
     "verify-ads-daily-metrics": "tsx src/verify-ads-daily-metrics.ts",
+    "ads-keyword-metrics": "tsx src/ads-keyword-metrics.ts",
+    "verify-ads-gaps": "tsx src/verify-ads-gaps.ts",
     "ads-findings": "tsx src/ads-findings-run.ts",
     "ads-apply-approved": "tsx src/ads-apply-approved.ts",
     "ads-verify-outcomes": "tsx src/ads-verify-outcomes.ts",
