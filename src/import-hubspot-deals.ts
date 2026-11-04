@@ -120,7 +120,7 @@ async function main() {
   // batch, not a condition to bolt on; what holds an app decision here is
   // deals.pipeline_set_at, which is a fact about who moved a field rather than
   // a race between two clocks.
-  const props = ["dealname", "amount", "dealstage", "pipeline", "closedate", "hubspot_owner_id", "closed_lost_reason_deal", "hs_is_closed_won", "hs_is_closed", "hs_lastmodifieddate", "notes_last_updated"];
+  const props = ["dealname", "amount", "dealstage", "pipeline", "closedate", "hubspot_owner_id", "closed_lost_reason_deal", "hs_is_closed_won", "hs_is_closed", "hs_lastmodifieddate", "notes_last_updated", "createdate"];
   type HsDeal = { id: string; properties: Record<string, string>; associations?: { companies?: { results?: Array<{ id: string }> } } };
   const deals: HsDeal[] = [];
   let after: string | undefined;
@@ -330,9 +330,9 @@ async function main() {
       } else if (status === "open") {
         await c.query(
           `INSERT INTO deals (id, name, company_id, stage, status, amount_cents, close_date, owner_name,
-             source, hubspot_id, last_contacted_at)
-           VALUES ($1,$2,$3,$4,'open',$5,$6,$7,'hubspot',$8,$9)`,
-          [randomUUID(), name, companyId, stage, amountCents, closeDate, ownerName, d.id, lastContacted],
+             source, hubspot_id, last_contacted_at, created_at)
+           VALUES ($1,$2,$3,$4,'open',$5,$6,$7,'hubspot',$8,$9,COALESCE($10::timestamptz, now()))`,
+          [randomUUID(), name, companyId, stage, amountCents, closeDate, ownerName, d.id, lastContacted, d.properties.createdate || null],
         );
         created++;
       } else {

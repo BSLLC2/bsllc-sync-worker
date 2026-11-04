@@ -119,7 +119,7 @@ async function main() {
   const hsDeals = await fetchAll(
     token,
     "deals",
-    ["dealname", "amount", "dealstage", "pipeline", "closedate", "hubspot_owner_id", "hs_analytics_source", "hs_is_closed_won", "hs_is_closed", "dealtype", "hs_priority", "hs_forecast_category", "closed_lost_reason", "hs_deal_score", "notes_last_contacted"],
+    ["dealname", "amount", "dealstage", "pipeline", "closedate", "hubspot_owner_id", "hs_analytics_source", "hs_is_closed_won", "hs_is_closed", "dealtype", "hs_priority", "hs_forecast_category", "closed_lost_reason", "hs_deal_score", "notes_last_contacted", "createdate"],
     ["companies"],
     limit,
   );
@@ -205,6 +205,8 @@ async function main() {
       closedLostReason: d.properties.closed_lost_reason || null,
       dealScore: d.properties.hs_deal_score != null && d.properties.hs_deal_score !== "" ? Math.round(Number(d.properties.hs_deal_score)) : null,
       lastContactedAt: d.properties.notes_last_contacted || null,
+      // HubSpot's own createdate. The app stamps it on INSERT only.
+      createdAt: d.properties.createdate || null,
     }];
   });
 
