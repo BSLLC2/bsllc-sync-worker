@@ -68,6 +68,20 @@ async function main() {
       `SELECT id, name, seo_domain, seo_location FROM clients WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> ''`,
     )).rows;
 
+    // A client with tracked keywords and no website is never pulled, and used to
+    // be skipped without a word. Name each one so the run log says what is
+    // missing and where to add it (the client's SEO tab, "Domain to track").
+    const noSite = (await c.query<{ id: string; name: string; n: number }>(
+      `SELECT c.id, c.name, count(t.id)::int AS n
+         FROM clients c JOIN seo_targets t ON t.client_id = c.id AND t.active = true
+        WHERE c.seo_domain IS NULL OR btrim(c.seo_domain) = ''
+        GROUP BY c.id, c.name ORDER BY c.name`,
+    )).rows;
+    for (const x of noSite) {
+      if (onlyClient && slugify(x.name) !== onlyClient && x.id !== onlyClient) continue;
+      console.log(`! ${slugify(x.name)}: ${x.n} active keywords but NO WEBSITE recorded, so no positions can be pulled. Add the website on the client's SEO tab.`);
+    }
+
     for (const client of clients) {
       const slug = slugify(client.name);
       if (onlyClient && slug !== onlyClient && client.id !== onlyClient) continue;
