@@ -86,8 +86,12 @@ const bal = async (creds: DfsCreds) => dfs(creds, "GET", "/appendix/user_data").
   type S = { q: string; err: string | null; items: Array<{ rank: number; domain: string; url: string }> };
   const serps = await pool(QUERIES, 3, async (q): Promise<S> => {
     try {
-      const res = await task(creds, "/serp/google/organic/live/advanced", [{ keyword: q, location_code: 2840, language_code: "en", device: "desktop", depth: 30 }], 3);
-      const items = (res?.[0]?.items ?? []).filter((i: any) => i?.type === "organic").map((i: any) => ({ rank: n(i.rank_absolute) ?? 0, domain: dom(String(i.url ?? i.domain ?? "")), url: String(i.url ?? "") }));
+      const res = await task(creds, "/serp/google/organic/live/advanced", [{ keyword: q, location_code: 2840, language_name: "English", device: "desktop", depth: 30 }], 3);
+      const rawOrg = (res?.[0]?.items ?? []).filter((i: any) => i?.type === "organic");
+      if (q === QUERIES[0]) { const f = rawOrg[0] ?? {}; console.log(`# DEBUG keys ${Object.keys(f).join(",")}`); console.log(`# DEBUG sample ${JSON.stringify({ domain: f.domain, url: f.url, breadcrumb: f.breadcrumb, website_name: f.website_name, cache_url: f.cache_url, title: f.title }).slice(0, 400)}`); }
+      const hostish = (c: string) => c.replace(/^https?:\/\//, "").replace(/^www\./, "").split(/[\/\s›]/)[0]!.toLowerCase();
+      const pick = (i: any) => { const cands = [i.url, i.domain, i.breadcrumb, i.website_name, i.cache_url].map((x: any) => String(x ?? "")).filter(Boolean); return cands.find((c) => hostish(c) !== "google.com" && /\./.test(hostish(c))) ?? cands[0] ?? ""; };
+      const items = rawOrg.map((i: any) => ({ rank: n(i.rank_absolute) ?? 0, domain: hostish(pick(i)), url: String(i.url ?? "") }));
       return { q, err: null, items };
     } catch (e) { return { q, err: String(e).slice(0, 160), items: [] }; }
   });
