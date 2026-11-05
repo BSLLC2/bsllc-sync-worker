@@ -87,10 +87,11 @@ const bal = async (creds: DfsCreds) => dfs(creds, "GET", "/appendix/user_data").
   const serps = await pool(QUERIES, 3, async (q): Promise<S> => {
     try {
       const res = await task(creds, "/serp/google/organic/live/advanced", [{ keyword: q, location_code: 2840, language_code: "en", device: "desktop", depth: 30 }], 3);
-      const items = (res?.[0]?.items ?? []).filter((i: any) => i?.type === "organic").map((i: any) => ({ rank: n(i.rank_absolute) ?? 0, domain: dom(String(i.domain ?? i.url ?? "")), url: String(i.url ?? "") }));
+      const items = (res?.[0]?.items ?? []).filter((i: any) => i?.type === "organic").map((i: any) => ({ rank: n(i.rank_absolute) ?? 0, domain: dom(String(i.url ?? i.domain ?? "")), url: String(i.url ?? "") }));
       return { q, err: null, items };
     } catch (e) { return { q, err: String(e).slice(0, 160), items: [] }; }
   });
+  for (const s of serps.slice(0, 2)) { console.log(`# DEBUG serp "${s.q}" err=${s.err} items=${s.items.length}`); for (const it of s.items.slice(0, 12)) console.log(`# DEBUG ${it.rank} ${it.domain} ${it.url.slice(0, 90)}`); }
   const tally = new Map<string, { n: number; best: number; qs: Set<string> }>();
   for (const s of serps) for (const it of s.items) {
     if (it.rank > 20 || !it.domain) continue;
@@ -107,7 +108,7 @@ const bal = async (creds: DfsCreds) => dfs(creds, "GET", "/appendix/user_data").
   for (const r of dpgRanks) row(r.q, r.best ?? "not in top 30", "");
   end();
   const serpComps = ranked.filter(([d, e]) => d !== OURS && !NOT_COMPETITORS.test(d + ".") && e.qs.size >= 3).map(([d]) => d);
-  const comps = [...new Set([...SEED_COMPETITORS, ...serpComps])].slice(0, 12);
+  const comps = [...new Set([...SEED_COMPETITORS, ...serpComps])].filter((c) => !/google\./.test(c)).slice(0, 12);
   console.log(`# competitor set (${comps.length}): ${comps.join(", ")}`);
 
   // B: summaries
@@ -183,17 +184,24 @@ const bal = async (creds: DfsCreds) => dfs(creds, "GET", "/appendix/user_data").
   end();
   console.log(`# gap domains before filtering: ${targets.length}; after: ${filtered.length}`);
 
-  // F: per-competitor top refdomains (kind-filtered) for the competitors with the most traffic overlap
+  // F: per-competitor referring domains, then our own overlap count (robust fallback for the intersection endpoint)
   part("F_comp_refdomains");
-  const top3 = usable.slice(0, 4);
-  block("F_top_competitor_referring_domains", ["competitor", "referring_domain", "domain_rank", "kind", "links_to_dpg", "source"]);
-  for (const c of top3) {
+  const compLists = new Map<string, Array<{ d: string; rank: number }>>();
+  await pool(usable.slice(0, 8), 3, async (c) => {
     try {
-      const res = await task(creds, "/backlinks/referring_domains/live", [{ target: c, include_subdomains: true, limit: 120, order_by: ["rank,desc"], backlinks_status_type: "live" }]);
-      const items = (res?.[0]?.items ?? []).map((it: any) => ({ d: dom(String(it?.domain ?? "")), rank: n(it?.rank) })).filter((x: any) => x.d && !SPAMMY.test(x.d) && !NOT_COMPETITORS.test(x.d + "."));
-      for (const x of items.slice(0, 25)) row(c, x.d, x.rank ?? "", kindOf(x.d), mineSet.has(x.d) ? "yes" : "no", "backlinks/referring_domains/live");
-    } catch (e) { row(c, "no data", "", "", "", `call failed: ${String(e).slice(0, 120)}`); }
-  }
+      const res = await task(creds, "/backlinks/referring_domains/live", [{ target: c, include_subdomains: true, limit: 400, order_by: ["rank,desc"], backlinks_status_type: "live" }]);
+      compLists.set(c, (res?.[0]?.items ?? []).map((it: any) => ({ d: dom(String(it?.domain ?? "")), rank: n(it?.rank) ?? 0 })).filter((x: any) => x.d && x.rank >= 10 && !SPAMMY.test(x.d) && !NOT_COMPETITORS.test(x.d + ".") && !/^\d+\.\d+\.\d+\.\d+$/.test(x.d)));
+    } catch (e) { console.log(`# refdomains failed for ${c}: ${String(e).slice(0, 120)}`); }
+  });
+  block("F_top_competitor_referring_domains", ["competitor", "referring_domain", "domain_rank", "kind", "links_to_dpg", "source"]);
+  for (const [c, list] of compLists) for (const x of list.slice(0, 30)) row(c, x.d, x.rank, kindOf(x.d), mineSet.has(x.d) ? "yes" : "no", "backlinks/referring_domains/live (rank 10 or higher, analytics and SEO-tool domains dropped)");
+  end();
+  const overlap = new Map<string, { rank: number; cs: string[] }>();
+  for (const [c, list] of compLists) for (const x of list) { const e = overlap.get(x.d) ?? { rank: x.rank, cs: [] }; e.cs.push(c); e.rank = Math.max(e.rank, x.rank); overlap.set(x.d, e); }
+  block("F_overlap_links_to_2plus_competitors_not_dpg", ["referring_domain", "domain_rank", "links_to_n_competitors", "links_to", "kind", "source"]);
+  const ov = [...overlap.entries()].filter(([d, e]) => e.cs.length >= 2 && !mineSet.has(d)).sort((a, b) => b[1].cs.length - a[1].cs.length || b[1].rank - a[1].rank);
+  if (!ov.length) row("no data: no domain linked to two or more competitors", "", "", "", "", "own overlap of the referring-domain lists");
+  for (const [d, e] of ov.slice(0, 60)) row(d, e.rank, e.cs.length, e.cs.join(" | "), kindOf(d), `own overlap of referring domains (rank 10 or higher) for: ${[...compLists.keys()].join(", ")}`);
   end();
 
   part("balance_after");
