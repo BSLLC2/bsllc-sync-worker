@@ -49,7 +49,8 @@ const parts: Record<string, { spent: number; calls: number }> = {};
 let cur = "";
 function part(name: string) { cur = name; parts[name] = { spent: 0, calls: 0 }; }
 async function dfs(creds: DfsCreds, method: "POST" | "GET", path: string, body?: unknown): Promise<any> {
-  const res = await fetch(`https://api.dataforseo.com/v3${path}`, { method, headers: { "content-type": "application/json", authorization: "Basic " + Buffer.from(`${creds.login}:${creds.password}`).toString("base64") }, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(`https://api.dataforseo.com/v3${path}`, { method, headers: { "content-type": "application/json", authorization: "Basic " + Buffer.from(`${creds.login}:${creds.password}`).toString("base64") }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(100000) });
+  console.error(`[${new Date().toISOString().slice(11,19)}] ${method} ${path}`);
   if (!res.ok) throw new Error(`HTTP ${res.status} ${path}: ${(await res.text().catch(() => "")).slice(0, 160)}`);
   const j: any = await res.json(); const c = n(j?.cost) ?? 0; calls++; spent += c;
   if (parts[cur]) { parts[cur]!.spent += c; parts[cur]!.calls++; }
