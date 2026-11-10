@@ -42,6 +42,8 @@ jobs:
         run: npm run verify-ads-daily-metrics
       - name: Ads data gaps (keyword metrics, RSA and negatives in the snapshot, conversion actions)
         run: npm run verify-ads-gaps
+      - name: Search terms by day, WordPress changes (pure sections, fake server)
+        run: npm run verify-term-days-wp
       - name: Ads audit run summary and sweep guard (pure sections)
         run: npm run verify-ads-run-summary
       - name: Zero-vs-nothing guard
@@ -136,6 +138,8 @@ jobs:
         run: npm run verify-ads-daily-metrics
       - name: Ads data gaps store guard (real SQL)
         run: npm run verify-ads-gaps
+      - name: Search terms and WordPress changes store guard (real SQL)
+        run: npm run verify-term-days-wp
       - name: Website performance report store guard (real SQL)
         run: npm run verify-ga4-report
       - name: Call log to stored calls guard (real SQL)

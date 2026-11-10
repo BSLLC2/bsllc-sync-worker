@@ -1,0 +1,55 @@
+name: Read WordPress site changes (public API, read-only)
+
+# What each client's WordPress site says it published or edited, from the site's
+# PUBLIC REST API: a path and two dates per change. No login, no title, no content.
+# A site with no readable API is recorded as "not readable", never as "no edits".
+on:
+  schedule:
+    # 07:20 UTC daily.
+    - cron: "20 7 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Limit to one client (slug or id). Blank = every client with a site address."
+        required: false
+        default: ""
+      dry_run:
+        description: "Fetch and print, write nothing (true/false). Defaults to true."
+        required: false
+        default: "true"
+
+concurrency:
+  group: read-wp-changes
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the sites
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-wp-changes -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure. A dry run and a
+      # one-client run are excluded: the heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_wp_changes --status="$STATUS" --note="$NOTE" --log=run.log

@@ -110,6 +110,14 @@ export const ADS_JOBS: AdsJobSpec[] = [
     quiet: "An account with no keywords genuinely stores no rows, and the note's accounts/read/keywords counts say so. What this job must never do is stop silently: the keyword and conversion-action figures are read as the last 30 days, and each part has its own scan row saying when it was last read and whether it worked. A failed or truncated read writes a failure row and leaves the earlier figures as they were.",
     fix: "Open bsllc-sync-worker → Actions → \"Ads keyword metrics (read-only)\" and re-run it. Every query is a SELECT and nothing is written to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account. Dispatch it with dry_run=true first to see what it would store.",
   },
+  {
+    job: "ads_search_term_days",
+    workflow: "ads-search-term-days.yml",
+    label: "Ads search terms by day",
+    cadence: "daily 05:55 UTC",
+    quiet: "An account with no search terms genuinely stores no rows, and the note's accounts/read/rows counts say so. What this job must never do is stop silently: the dashboard's term-leakage reading dates itself from the scan row, which says when the 90 day window was last read and whether it worked. A failed or truncated read writes a failure row and leaves the earlier rows as they were.",
+    fix: "Open bsllc-sync-worker → Actions → \"Ads search terms by day (read-only)\" and re-run it. Every query is a SELECT and nothing is written to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account. Dispatch it with dry_run=true first to see what it would store.",
+  },
 ];
 
 // `ads_change_digest` is deliberately NOT in this list (2026-09-23) for the
