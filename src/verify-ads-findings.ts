@@ -2091,7 +2091,11 @@ async function main() {
     // THE SENTENCE MAY NOT CLAIM A CAUSE. This function knows the audit did not
     // see the thing. It does not know that nobody touched it, and the owner
     // spent an afternoon in an account proving that.
-    const reason = /dismissed_reason = '([^']*)'/.exec(sweepBody)?.[1] ?? "";
+    // The sentence now lives in sweep-plan.ts as CLEARED_REASON (the planned sweep
+    // passes it in); read it from there, falling back to a literal in the store.
+    const PLAN = readFileSync(new URL("./ads/sweep-plan.ts", import.meta.url), "utf8");
+    const reason = /CLEARED_REASON\s*=\s*"([^"]*)"/.exec(PLAN)?.[1]
+      ?? /dismissed_reason = '([^']*)'/.exec(sweepBody)?.[1] ?? "";
     ok("the sweep's stored sentence says what the audit saw",
       reason.length > 0 && /audit/i.test(reason), reason);
     ok("…and claims no cause for it",
