@@ -150,13 +150,13 @@ async function grid(creds: DfsCreds) {
   const onlyTerr: string[] = PARAMS.only || [];
   const size = Number(PARAMS.size || 7);
   const cellJobs: { c: (typeof centers)[number]; q: { q: string; kind: string; svc: string }; device: string }[] = [];
-  for (const c of centers) { if (onlyTerr.length && !onlyTerr.includes(c.id)) continue; for (const q of queriesFor(c.terr)) for (const device of devices) cellJobs.push({ c, q, device }); }
+  for (const c of centers) { if (onlyTerr.length && !onlyTerr.includes(c.id)) continue; for (const q of queriesFor(c.terr)) { if (PARAMS.qOnly && !PARAMS.qOnly.includes(q.q)) continue; for (const device of devices) cellJobs.push({ c, q, device }); } }
   console.log(`# grid jobs ${cellJobs.length} x ${size * size} points`);
   for (const job of cellJobs) {
     if (capped()) { console.log(`# COST CAP HIT before ${job.c.id} ${job.q.q} ${job.device}`); break; }
     const pts = gridPoints(job.c.lat, job.c.lng, size, 5);
     const per: Record<string, (number | null)[]> = { HT: [], AVS: [] };
-    const comp = new Map<string, any>(); const lookalikes = new Map<string, number>(); let err = 0; let nResults = 0;
+    const comp = new Map<string, any>(); const lookalikes = new Map<string, number>(); let err = 0; let nResults = 0; const errMsgs = new Map<string, number>();
     await pool(pts, 25, async (p) => {
       try {
         const { items } = await mapsCall(creds, job.q.q, p.lat, p.lng, job.device);
@@ -171,14 +171,14 @@ async function grid(creds: DfsCreds) {
           e.n++; e.sum += rank; if (rank <= 3) e.t3++; comp.set(key, e);
         }
         per.HT.push(ht); per.AVS.push(avs);
-      } catch { err++; per.HT.push(null); per.AVS.push(null); }
+      } catch (e) { err++; const k = String(e).replace(/[0-9a-f-]{20,}/g, '').slice(0, 90); errMsgs.set(k, (errMsgs.get(k) ?? 0) + 1); per.HT.push(null); per.AVS.push(null); }
     });
     const stat = (arr: (number | null)[]) => {
       const tot = pts.length - err; const found = arr.filter((x) => x != null) as number[];
       return { found: found.length, tot, share_found: tot ? +(found.length / tot).toFixed(3) : null, share_top3: tot ? +(found.filter((x) => x <= 3).length / tot).toFixed(3) : null, avg_when_found: found.length ? +(found.reduce((a, b) => a + b, 0) / found.length).toFixed(2) : null, arp_missing21: tot ? +(arr.slice(0, tot).reduce<number>((a, b) => a + (b ?? 21), 0) / pts.length).toFixed(2) : null, best: found.length ? Math.min(...found) : null };
     };
     const compList = [...comp.values()].filter((e) => !e.who).map((e) => ({ ...e, avg: +(e.sum / e.n).toFixed(2), sum: undefined })).sort((a, b) => b.t3 - a.t3 || b.n - a.n).slice(0, 8);
-    console.log(`### GRID ${J({ terr: job.c.id, q: job.q.q, kind: job.q.kind, svc: job.q.svc, device: job.device, err, results: nResults, HT: stat(per.HT), AVS: stat(per.AVS), comp: compList, look: [...lookalikes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4) })}`);
+    console.log(`### GRID ${J({ terr: job.c.id, q: job.q.q, kind: job.q.kind, svc: job.q.svc, device: job.device, err, errs: [...errMsgs.entries()].slice(0, 3), results: nResults, HT: stat(per.HT), AVS: stat(per.AVS), comp: compList, look: [...lookalikes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4) })}`);
   }
 }
 
