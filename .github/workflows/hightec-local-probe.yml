@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: "discover | grid | serp | ai | listings | reviews"
+        description: "discover | grid | serp | ai | listings | collide | reviews"
         required: true
         default: "discover"
       cost_cap:

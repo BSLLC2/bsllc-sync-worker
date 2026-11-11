@@ -280,12 +280,43 @@ async function listings(creds: DfsCreds) {
   });
 }
 
+
+async function collide(creds: DfsCreds) {
+  const centers: { id: string; lat: number; lng: number }[] = PARAMS.centers || [
+    { id: "Greensburg", lat: 39.3356, lng: -85.5784 }, { id: "Dayton", lat: 39.8746, lng: -84.0548 }, { id: "Lexington", lat: 38.0406, lng: -84.5037 },
+    { id: "Indianapolis", lat: 39.7684, lng: -86.1581 }, { id: "Cincinnati", lat: 39.1031, lng: -84.512 }, { id: "Columbus OH", lat: 39.9612, lng: -82.9988 },
+    { id: "Louisville", lat: 38.2527, lng: -85.7585 }, { id: "Fort Wayne", lat: 41.0793, lng: -85.1394 }, { id: "Toledo", lat: 41.6528, lng: -83.5379 },
+    { id: "Evansville", lat: 37.9716, lng: -87.5711 }, { id: "Bloomington IN", lat: 39.1653, lng: -86.5264 }, { id: "Huntington WV", lat: 38.4192, lng: -82.4452 },
+  ];
+  const qs: string[] = PARAMS.qs || ["Hi-Tec industrial cleaning", "Hi-Tech industrial services", "High-Tec industrial services", "HighTec vacuum services", "Hi-Tec vacuum truck", "Advanced Vacuum", "Advanced Vacuum Services", "Advanced Vacuum industrial", "AVS industrial cleaning", "Hi-Tech vacuum"];
+  const jobs: { q: string; c: (typeof centers)[number] }[] = [];
+  for (const q of qs) for (const c of centers) jobs.push({ q, c });
+  const seen = new Map<string, any>();
+  await pool(jobs, 12, async (j) => {
+    if (capped()) return;
+    try {
+      const { items } = await mapsCall(creds, j.q, j.c.lat, j.c.lng, "desktop");
+      for (const it of items) {
+        const t = String(it.title || "");
+        if (!(look(it) || /\bavs\b|hi[\s-]?te/i.test(t))) continue;
+        const key = String(it.cid || it.title);
+        const e = seen.get(key) ?? { t: trim(it.title, 70), w: whoIs(it), cat: it.category, city: it.address_info?.city, st: it.address_info?.region, d: it.domain, ph: it.phone, ...rv(it), cid: it.cid, found: [] as string[] };
+        e.found.push(`${j.c.id}|${j.q}`); seen.set(key, e);
+      }
+    } catch (e) { if (!/40102/.test(String(e))) console.log(`### COLLIDE ERROR ${J({ q: j.q, from: j.c.id, e: String(e).slice(0, 120) })}`); }
+  });
+  for (const e of seen.values()) console.log(`### COLLIDE ${J({ ...e, found: e.found.length, firstFound: e.found.slice(0, 2) })}`);
+}
+
 async function reviews(creds: DfsCreds) {
   const cids: string[] = PARAMS.cids || []; const depth = Number(PARAMS.reviewDepth || 20);
   const posted: { cid: string; id: string }[] = [];
   for (const cid of cids) {
-    try { const { raw } = await task(creds, "/business_data/google/reviews/task_post", [{ cid, location_name: "United States", language_code: "en", depth, sort_by: "newest" }]); posted.push({ cid, id: raw.id }); }
-    catch (e) { console.log(`### REVIEWS ERROR post ${cid} ${String(e).slice(0, 200)}`); }
+    try {
+      const j = await dfs(creds, "POST", "/business_data/google/reviews/task_post", [{ cid, location_name: "United States", language_code: "en", depth, sort_by: "newest" }]);
+      const t = j?.tasks?.[0]; if (t?.status_code !== 20100 && t?.status_code !== 20000) throw new Error(`${t?.status_code} ${t?.status_message}`);
+      posted.push({ cid, id: t.id });
+    } catch (e) { console.log(`### REVIEWS ERROR post ${cid} ${String(e).slice(0, 200)}`); }
   }
   const pending = new Set(posted.map((p) => p.id)); const t0 = Date.now();
   while (pending.size && Date.now() - t0 < 8 * 60 * 1000) {
@@ -310,7 +341,7 @@ async function reviews(creds: DfsCreds) {
   const bal = () => dfs(creds, "GET", "/appendix/user_data").then((j) => n(j?.tasks?.[0]?.result?.[0]?.money?.balance)).catch(() => null);
   const b0 = await bal();
   console.log(`RUN ${new Date().toISOString()} · HighTec local probe · PHASE=${PHASE} · read-only\n# balance before: ${b0 == null ? "unreadable" : "$" + b0.toFixed(4)} · cap $${CAP} · zoom ${ZOOM} · depth ${DEPTH}`);
-  const phases: Record<string, (c: DfsCreds) => Promise<void>> = { discover, grid, serp, ai, listings, reviews };
+  const phases: Record<string, (c: DfsCreds) => Promise<void>> = { discover, grid, serp, ai, listings, collide, reviews };
   const fn = phases[PHASE]; if (!fn) throw new Error(`unknown PHASE ${PHASE}`);
   await fn(creds);
   const b1 = await bal();
