@@ -103,6 +103,11 @@ export function channelExclusionFilter(channels: readonly string[]): Filter | nu
     : null;
 }
 
+/** Keeps only the client's own hostnames. Null where none are typed. */
+export function hostFilter(hosts: readonly string[]): Filter | null {
+  return hosts.length ? { filter: { fieldName: "hostName", inListFilter: { values: [...hosts] } } } : null;
+}
+
 /** One filter as it is, several as an andGroup, none as undefined. */
 export function andFilters(...parts: Array<Filter | null>): Filter | undefined {
   const list = parts.filter((p): p is Filter => p != null);
@@ -113,8 +118,8 @@ export function andFilters(...parts: Array<Filter | null>): Filter | undefined {
 
 /* ───────────────────────── requests ───────────────────────── */
 
-export function dailyRequest(w: ReadWindow, metrics: readonly string[], countries: readonly string[], channels: readonly string[] = []) {
-  const dimensionFilter = andFilters(exclusionFilter(countries), channelExclusionFilter(channels));
+export function dailyRequest(w: ReadWindow, metrics: readonly string[], countries: readonly string[], channels: readonly string[] = [], hosts: readonly string[] = []) {
+  const dimensionFilter = andFilters(exclusionFilter(countries), channelExclusionFilter(channels), hostFilter(hosts));
   return {
     dateRanges: [{ startDate: w.start, endDate: w.end }],
     dimensions: [{ name: "date" }],
@@ -138,6 +143,8 @@ export interface KindSpec {
   ignoreChannels?: boolean;
   /** True for the unfiltered monthly total only: the country exclusion is not applied either, so the page can show raw against filtered. */
   ignoreCountries?: boolean;
+  /** True for the unfiltered monthly total and the hostname breakdown: the own-hostname filter is not applied, so the page can say what it left out. */
+  ignoreHosts?: boolean;
 }
 
 /** The report requests a client's config calls for, in the order they are read. */
@@ -154,7 +161,9 @@ export function kindSpecs(groups: readonly ReportGroup[], formEvent: string): Ki
     { kind: "channel_sessions", dimensions: ["sessionDefaultChannelGroup"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "", ignoreChannels: true },
     { kind: "channel_forms", dimensions: ["sessionDefaultChannelGroup"], ladder: [EVENT_METRICS], orderBy: "eventCount", filter: formFilter, parent: "", ignoreChannels: true },
     // Every session of the month with NOTHING left out, so the page can set the figure it shows against the raw one. One row a month.
-    { kind: "month_raw", dimensions: [], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "", ignoreChannels: true, ignoreCountries: true },
+    { kind: "month_raw", dimensions: [], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "", ignoreChannels: true, ignoreCountries: true, ignoreHosts: true },
+    // Sessions by the hostname they were counted on, with nothing left out: the difference from the own hostnames is the foreign traffic.
+    { kind: "host_sessions", dimensions: ["hostName"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "", ignoreChannels: true, ignoreCountries: true, ignoreHosts: true },
   ];
   for (const g of groups) {
     specs.push({ kind: "group_page", dimensions: ["landingPage"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: groupFilter("landingPage", g), parent: groupKey(g) });
@@ -177,8 +186,8 @@ export function kindSpecs(groups: readonly ReportGroup[], formEvent: string): Ki
   return specs;
 }
 
-export function reportRequest(w: ReadWindow, spec: KindSpec, metrics: readonly string[], countries: readonly string[], channels: readonly string[] = []) {
-  const dimensionFilter = andFilters(spec.filter, spec.ignoreCountries ? null : exclusionFilter(countries), spec.ignoreChannels ? null : channelExclusionFilter(channels));
+export function reportRequest(w: ReadWindow, spec: KindSpec, metrics: readonly string[], countries: readonly string[], channels: readonly string[] = [], hosts: readonly string[] = []) {
+  const dimensionFilter = andFilters(spec.filter, spec.ignoreCountries ? null : exclusionFilter(countries), spec.ignoreChannels ? null : channelExclusionFilter(channels), spec.ignoreHosts ? null : hostFilter(hosts));
   return {
     dateRanges: [{ startDate: w.start, endDate: w.end }],
     dimensions: [{ name: "yearMonth" }, ...spec.dimensions.map((name) => ({ name }))],
@@ -282,6 +291,8 @@ export function parseReport(report: unknown, spec: KindSpec, validMonths: Readon
     } else if (spec.kind === "group_sessions" || spec.kind === "month_raw") {
       // One row a month for the whole group (or the whole site): there is no page to name.
       key = "all";
+    } else if (spec.kind === "host_sessions") {
+      key = keyText(dv[1]?.value, 120).toLowerCase();
     } else if (spec.kind === "event_name" || spec.kind === "channel_sessions" || spec.kind === "channel_forms") {
       // An event name or a channel group verbatim: a name, not a path.
       key = keyText(dv[1]?.value, 120);
@@ -389,8 +400,8 @@ async function ladder<T>(rungs: ReadonlyArray<readonly string[]>, run: (metrics:
 export interface DailyRead { rows: DailyRowOut[]; firstDay: string; lastDay: string }
 export type DailyResult = { kind: "rows"; read: DailyRead } | { kind: "empty" } | { kind: "too_big" };
 
-export async function readDaily(io: Io, w: ReadWindow, countries: readonly string[], channels: readonly string[] = []): Promise<DailyResult> {
-  const paged = await ladder(DAILY_METRIC_LADDER, (metrics) => postAll(io, dailyRequest(w, metrics, countries, channels), "GA4 runReport (daily totals)"));
+export async function readDaily(io: Io, w: ReadWindow, countries: readonly string[], channels: readonly string[] = [], hosts: readonly string[] = []): Promise<DailyResult> {
+  const paged = await ladder(DAILY_METRIC_LADDER, (metrics) => postAll(io, dailyRequest(w, metrics, countries, channels, hosts), "GA4 runReport (daily totals)"));
   if (paged.truncated) return { kind: "too_big" };
   const rows = dailyRows(parseDaily(paged.report), w.end);
   return rows ? { kind: "rows", read: rows } : { kind: "empty" };
@@ -399,10 +410,10 @@ export async function readDaily(io: Io, w: ReadWindow, countries: readonly strin
 export interface KindRead { rows: ReportRowOut[]; cut: boolean; tooBig: boolean }
 
 /** One kind (every group of it, for the group kinds). Any group that cannot be read fails the whole kind. */
-export async function readKind(io: Io, w: ReadWindow, specs: readonly KindSpec[], countries: readonly string[], months: ReadonlySet<string>, channels: readonly string[] = []): Promise<KindRead> {
+export async function readKind(io: Io, w: ReadWindow, specs: readonly KindSpec[], countries: readonly string[], months: ReadonlySet<string>, channels: readonly string[] = [], hosts: readonly string[] = []): Promise<KindRead> {
   const all: ReportRowOut[] = [];
   for (const spec of specs) {
-    const paged = await ladder(spec.ladder, (metrics) => postAll(io, reportRequest(w, spec, metrics, countries, channels), `GA4 runReport (${spec.kind})`));
+    const paged = await ladder(spec.ladder, (metrics) => postAll(io, reportRequest(w, spec, metrics, countries, channels, hosts), `GA4 runReport (${spec.kind})`));
     if (paged.truncated) return { rows: [], cut: false, tooBig: true };
     all.push(...parseReport(paged.report, spec, months));
   }

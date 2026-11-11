@@ -27,7 +27,7 @@ import { configKey, sanitiseConfig, defaultConfig } from "./ga4-report/config.js
 import { readWindow, monthFromYearMonth, dayFromGa4Date, monthsBetween, daysBetween } from "./ga4-report/months.js";
 import {
   DAILY_METRIC_LADDER, SESSION_METRIC_LADDER, andFilters, dailyRequest, dailyRows, exclusionFilter, groupFilter, isRetryable, kindSpecs,
-  parseDaily, parseReport, reportRequest, topPerMonth, type Filter,
+  hostFilter, parseDaily, parseReport, reportRequest, topPerMonth, type Filter,
 } from "./ga4-report/ga4.js";
 import { readClientReport, type Deps } from "./ga4-report/run.js";
 import { GROUP_MATCH_MODES, cleanMatch, groupKey, mergeKey, parseGroupKey, pathInGroup } from "./ga4-report/groups.js";
@@ -258,9 +258,10 @@ hr("3. what is asked: the country exclusion rides on every request");
   // Every request of a real run, with and without the exclusion.
   const run = async (config: ReturnType<typeof cfg>) => { const p = property(dataset()); await readClientReport(CTX, config, deps(p.fetch)); return p.calls; };
   const full = await run(cfg({ excludeCountries: India, groups: [GROUP, { name: "Lps", prefix: "/lp/" }] }));
-  ok("a configured run makes the daily, the eight reports and four requests per group", full.length === 1 + 8 + 4 * 2, `${full.length} requests`);
+  ok("a configured run makes the daily, the nine reports and four requests per group", full.length === 1 + 9 + 4 * 2, `${full.length} requests`);
   const rawCall = (c: { body: Record<string, any> }) => (c.body.dimensions as any[]).length === 1 && c.body.dimensions[0].name === "yearMonth" && !("dimensionFilter" in c.body);
-  ok("EVERY request of the run carries the exclusion, except the one unfiltered monthly total", full.filter((c) => !rawCall(c)).every((c) => JSON.stringify(c.body.dimensionFilter ?? {}).includes("inListFilter") && JSON.stringify(c.body.dimensionFilter).includes("Russia")) && full.filter(rawCall).length === 1);
+  const hostCall = (c: { body: Record<string, any> }) => (c.body.dimensions as any[]).some((d) => d.name === "hostName") && !("dimensionFilter" in c.body);
+  ok("EVERY request of the run carries the exclusion, except the unfiltered monthly total and the unfiltered host breakdown", full.filter((c) => !rawCall(c) && !hostCall(c)).every((c) => JSON.stringify(c.body.dimensionFilter ?? {}).includes("inListFilter") && JSON.stringify(c.body.dimensionFilter).includes("Russia")) && full.filter(rawCall).length === 1 && full.filter(hostCall).length === 1);
   const plain = await run(cfg({ groups: [GROUP] }));
   ok("with nothing excluded no request names a country filter", plain.every((c) => !JSON.stringify(c.body).includes("inListFilter")));
   ok("every request goes to the property's runReport with the token", full.every((c) => c.url === "https://analyticsdata.googleapis.com/v1beta/properties/111222333:runReport" && c.headers.Authorization === `Bearer ${SECRET}`));
@@ -268,7 +269,12 @@ hr("3. what is asked: the country exclusion rides on every request");
 
   const specs = kindSpecs([GROUP], "form_submit");
   const kinds = specs.map((s) => s.kind);
-  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "month_raw", "group_page", "group_visits", "group_sessions", "group_form"]));
+  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "month_raw", "host_sessions", "group_page", "group_visits", "group_sessions", "group_form"]));
+  const hostReq = reportRequest(w, specs.find((x) => x.kind === "landing_page")!, specs.find((x) => x.kind === "landing_page")!.ladder[0]!, [], [], ["www.example.com"]);
+  ok("own hostnames add a hostName inList filter to a report request", JSON.stringify(hostReq.dimensionFilter).includes("hostName") && JSON.stringify(hostReq.dimensionFilter).includes("www.example.com"));
+  const hostBreak = reportRequest(w, specs.find((x) => x.kind === "host_sessions")!, specs.find((x) => x.kind === "host_sessions")!.ladder[0]!, [], [], ["www.example.com"]);
+  ok("the host breakdown is never itself filtered to the own hosts", !JSON.stringify(hostBreak.dimensionFilter ?? {}).includes("www.example.com") && hostBreak.dimensions[1]!.name === "hostName");
+  ok("hostFilter is null for none", hostFilter([]) === null);
   const byKind = Object.fromEntries(specs.map((s) => [s.kind, reportRequest(w, s, s.ladder[0]!, [])])) as Record<string, any>;
   ok("region asks for country and region", byKind.region.dimensions.map((d: any) => d.name).join() === "yearMonth,country,region");
   ok("sources ask for sessionSourceMedium", byKind.source_medium.dimensions[1].name === "sessionSourceMedium");
@@ -431,7 +437,7 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
 
   const failAll = property(dataset(), { fail: (b) => ((b.dimensions as any[])[0].name === "yearMonth" ? { status: 403, body: "denied" } : null) });
   const all = await readClientReport(CTX, defaultConfig(), deps(failAll.fetch));
-  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 8);
+  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 9);
 
   // Retries.
   let n = 0;
@@ -474,7 +480,7 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
     return endless(u, init);
   };
   const hb = await readClientReport(CTX, defaultConfig(), deps(halfEndless));
-  ok("reports past the ceiling are `capped`, named failed and left untouched, never written cut", hb.status === "capped" && hb.failedKinds.length === 7 && hb.daily!.length > 0 && hb.kinds.region === undefined);
+  ok("reports past the ceiling are `capped`, named failed and left untouched, never written cut", hb.status === "capped" && hb.failedKinds.length === 8 && hb.daily!.length > 0 && hb.kinds.region === undefined);
 }
 
 /* ═════════════════════════ 8. no secret and no row text in anything said ═════════════════════════ */
@@ -588,7 +594,7 @@ const kindOf = (sql: string) => (/^INSERT INTO ga4_site_days/.test(sql) ? "day" 
   const colsOf = (sql: string) => /\(([^)]*)\)\s*VALUES/s.exec(sql)![1]!.split(",").map((c) => c.trim());
   ok("the day columns are the contract's", colsOf(INSERT_SITE_DAY).join() === "id,client_id,day,sessions,engaged_sessions,engagement_seconds,users,key_events,synced_at");
   ok("the row columns are the contract's", colsOf(INSERT_REPORT_ROW).join() === "id,client_id,month,kind,parent,key,sessions,engaged_sessions,engagement_seconds,events,synced_at");
-  ok("the run columns are the contract's", colsOf(INSERT_RUN).join() === "id,client_id,status,detail,first_day,last_day,first_month,last_month,rows,capped_kinds,failed_kinds,excluded_countries,form_event,groups_json,ran_at,excluded_channels");
+  ok("the run columns are the contract's", colsOf(INSERT_RUN).join() === "id,client_id,status,detail,first_day,last_day,first_month,last_month,rows,capped_kinds,failed_kinds,excluded_countries,form_event,groups_json,ran_at,excluded_channels,own_hostnames");
 }
 
 /* ═════════════════════════ 10. the workflow and the wiring ═════════════════════════ */
@@ -629,7 +635,7 @@ hr("10. the workflow, the scripts and CI");
     const p = property(dataset());
     await readClientReport(CTX, cfg({ groups: [GROUP], excludeCountries: ["India"] }), deps(p.fetch));
     const used = new Set(p.calls.flatMap((c) => (c.body.dimensions as Array<{ name: string }>).map((d) => d.name)));
-    const allowed = new Set(["date", "yearMonth", "country", "region", "sessionSourceMedium", "landingPage", "pagePath", "eventName", "sessionDefaultChannelGroup"]);
+    const allowed = new Set(["date", "yearMonth", "country", "region", "sessionSourceMedium", "landingPage", "pagePath", "eventName", "sessionDefaultChannelGroup", "hostName"]);
     ok("no visitor-level dimension is ever requested (only dates, places, sources and pages)", Array.from(used).every((n) => allowed.has(n)), Array.from(used).join());
     const metricsUsed = new Set(p.calls.flatMap((c) => (c.body.metrics as Array<{ name: string }>).map((m) => m.name)));
     ok("and only counts are asked for", Array.from(metricsUsed).every((n) => ["sessions", "engagedSessions", "userEngagementDuration", "totalUsers", "keyEvents", "eventCount"].includes(n)), Array.from(metricsUsed).join());

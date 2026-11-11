@@ -22,13 +22,13 @@ export const RUN_STATUSES = ["ok", "off", "no_key", "error", "no_data", "capped"
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** The report kinds written to ga4_report_rows. */
-export const REPORT_KINDS = ["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form", "group_visits", "group_sessions", "channel_sessions", "channel_forms", "month_raw"] as const;
+export const REPORT_KINDS = ["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form", "group_visits", "group_sessions", "channel_sessions", "channel_forms", "month_raw", "host_sessions"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
 
 /** Rows kept per month per kind. The ceiling cuts the smallest. OURS. */
 export const TOP_N: Record<ReportKind, number> = {
   region: 100, source_medium: 100, landing_page: 100, form_page: 100, event_name: 100, group_page: 300, group_form: 300, group_visits: 300, group_sessions: 5,
-  channel_sessions: 40, channel_forms: 40, month_raw: 1,
+  channel_sessions: 40, channel_forms: 40, month_raw: 1, host_sessions: 20,
 };
 
 /** Months of history read by default, and the most a run may be asked for. */
@@ -48,7 +48,7 @@ export const RETRY_WAITS_MS: readonly number[] = [1_000, 3_000, 9_000];
 /** The form event used when nothing is configured. */
 export const DEFAULT_FORM_EVENT = "form_submit";
 
-export const CONFIG_LIMITS = { countries: 25, groups: 5, prefixChars: 120, nameChars: 60, countryChars: 80, channels: 6 } as const;
+export const CONFIG_LIMITS = { countries: 25, groups: 5, prefixChars: 120, nameChars: 60, countryChars: 80, channels: 6, hosts: 5, hostChars: 120 } as const;
 
 /**
  * The channel groups Google Analytics 4 files a session under, by its own names. A
@@ -69,6 +69,8 @@ export interface ReportConfig {
   excludeCountries: string[];
   /** Channel groups left out of the totals and every list. Empty means none. */
   excludeChannels: string[];
+  /** The client's own hostnames. Empty means the property is read as it is. Set, every visit, landing page and event is read for these hostnames only (R15). */
+  ownHostnames: string[];
   groups: ReportGroup[];
   formEvent: string;
 }

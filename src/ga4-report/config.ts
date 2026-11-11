@@ -17,7 +17,7 @@ const EVENT_NAME = /^[a-z][a-z0-9_]{0,39}$/;
 const hasControl = (s: string) => /[\u0000-\u001f\u007f]/.test(s);
 
 export function defaultConfig(): ReportConfig {
-  return { excludeCountries: [], excludeChannels: [], groups: [], formEvent: DEFAULT_FORM_EVENT };
+  return { excludeCountries: [], excludeChannels: [], ownHostnames: [], groups: [], formEvent: DEFAULT_FORM_EVENT };
 }
 
 export function sanitiseConfig(raw: unknown): ReportConfig {
@@ -50,6 +50,17 @@ export function sanitiseConfig(raw: unknown): ReportConfig {
       const hit = CHANNEL_GROUPS.find((g) => g.toLowerCase() === c.trim().toLowerCase());
       if (hit && !out.excludeChannels.includes(hit)) out.excludeChannels.push(hit);
       if (out.excludeChannels.length >= CONFIG_LIMITS.channels) break;
+    }
+  }
+
+  if (Array.isArray(o.ownHostnames)) {
+    // A hostname as GA4 reports it: lowercase letters, digits, dots and hyphens. Anything else is dropped, never trimmed to fit.
+    for (const h of o.ownHostnames) {
+      if (typeof h !== "string") continue;
+      const t = h.trim().toLowerCase();
+      if (!t || t.length > CONFIG_LIMITS.hostChars || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(t)) continue;
+      if (!out.ownHostnames.includes(t)) out.ownHostnames.push(t);
+      if (out.ownHostnames.length >= CONFIG_LIMITS.hosts) break;
     }
   }
 
