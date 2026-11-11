@@ -15,6 +15,8 @@ import { credsFromEnv, type DfsCreds } from "./dataforseo.js";
 const MODE = (process.env.MODE || "smoke").toLowerCase();
 const RUNS = Math.max(1, Number(process.env.RUNS || 3));
 const CAP = Number(process.env.COST_CAP || 5);
+const ONLY = (process.env.ONLY || "").toLowerCase().split(",").map((x) => x.trim()).filter(Boolean);
+const want = (n: string) => ONLY.length === 0 || ONLY.includes(n.toLowerCase());
 const MAXTOK = Number(process.env.MAX_OUTPUT_TOKENS || 2500);
 
 type Loc = "US" | "Cincinnati" | "Greensburg" | "Indiana";
@@ -117,7 +119,7 @@ const LLM: { engine: string; seg: string; model: () => string }[] = [
 async function askLlm(creds: DfsCreds, e: (typeof LLM)[number], p: Prompt, run: number): Promise<Ans> {
   const base = { prompt: p.text, pid: p.id, engine: e.engine, run, loc: "United States (API default; no city setting)" };
   try {
-    const { result, raw } = await task(creds, `/ai_optimization/${e.seg}/llm_responses/live`, [{ user_prompt: p.text, model_name: e.model(), web_search: true, max_output_tokens: MAXTOK, temperature: 0.3 }]);
+    const { result, raw } = await task(creds, `/ai_optimization/${e.seg}/llm_responses/live`, [{ user_prompt: p.text, model_name: e.model(), web_search: true, max_output_tokens: MAXTOK, ...(e.seg === "chat_gpt" ? {} : { temperature: 0.3 }) }]);
     const r = readLlm(result);
     return { ...base, model: r.model || e.model(), text: r.text, sources: r.sources, error: r.text ? "" : "empty answer", cost: n(raw?.cost) };
   } catch (err) { return { ...base, model: e.model(), text: "", sources: [], error: String(err).slice(0, 220), cost: null }; }
@@ -167,9 +169,11 @@ const J = (v: unknown) => JSON.stringify(v);
     for (let run = 1; run <= RUNS && !stopped; run++) {
       const jobs: (() => Promise<Ans>)[] = [];
       for (const p of PROMPTS) {
-        for (const e of LLM) jobs.push(() => askLlm(creds, e, p, run));
-        jobs.push(() => askGoogle(creds, "ai_overview", p, run));
-        jobs.push(() => askGoogle(creds, "ai_mode", p, run));
+        for (const e of LLM) if (want(e.engine)) jobs.push(() => askLlm(creds, e, p, run));
+        if (want("google")) {
+          jobs.push(() => askGoogle(creds, "ai_overview", p, run));
+          jobs.push(() => askGoogle(creds, "ai_mode", p, run));
+        }
       }
       const got = await pool(jobs, 4, async (j) => { if (spent > CAP) { stopped = true; return null; } return j(); });
       for (const a of got) if (a) all.push(a);
