@@ -81,8 +81,8 @@ function gridPoints(lat: number, lng: number, size = 7, spacingMi = 5) {
 // ---------- territories ------------------------------------------------
 interface Terr { id: string; name: string; city: string; state: string; lat: number; lng: number }
 const TERR: Terr[] = PARAMS.terr || [
-  { id: "T1", name: "Greensburg IN", city: "Greensburg", state: "Indiana", lat: 39.3373, lng: -85.4836 },
-  { id: "T2", name: "Huber Heights / Dayton OH", city: "Dayton", state: "Ohio", lat: 39.8439, lng: -84.1247 },
+  { id: "T1", name: "Greensburg IN", city: "Greensburg", state: "Indiana", lat: 39.3356, lng: -85.5784 },
+  { id: "T2", name: "Huber Heights / Dayton OH", city: "Dayton", state: "Ohio", lat: 39.8746, lng: -84.0548 },
   { id: "T3", name: "Central Kentucky (provisional: Lexington)", city: "Lexington", state: "Kentucky", lat: 38.0406, lng: -84.5037 },
 ];
 const SERVICES: string[] = PARAMS.services || ["industrial vacuum service", "vacuum truck service", "hydro excavation", "industrial tank cleaning", "industrial water blasting", "industrial pressure washing", "emergency industrial cleanup", "roof rock removal"];
@@ -157,7 +157,7 @@ async function grid(creds: DfsCreds) {
     const pts = gridPoints(job.c.lat, job.c.lng, size, 5);
     const per: Record<string, (number | null)[]> = { HT: [], AVS: [] };
     const comp = new Map<string, any>(); const lookalikes = new Map<string, number>(); let err = 0; let nResults = 0;
-    await pool(pts, 14, async (p) => {
+    await pool(pts, 25, async (p) => {
       try {
         const { items } = await mapsCall(creds, job.q.q, p.lat, p.lng, job.device);
         nResults += items.length;
@@ -184,7 +184,7 @@ async function grid(creds: DfsCreds) {
 
 async function serp(creds: DfsCreds) {
   const spots: { id: string; lat: number; lng: number; state: string }[] = PARAMS.spots || [
-    { id: "Greensburg", lat: 39.3373, lng: -85.4836, state: "Indiana" }, { id: "HuberHeights", lat: 39.8439, lng: -84.1247, state: "Ohio" },
+    { id: "AVS-address", lat: 39.3356, lng: -85.5784, state: "Indiana" }, { id: "HT-address", lat: 39.8746, lng: -84.0548, state: "Ohio" },
     { id: "TippCity", lat: 39.9598, lng: -84.1747, state: "Ohio" }, { id: "Lexington", lat: 38.0406, lng: -84.5037, state: "Kentucky" },
   ];
   const devices = ["desktop", "mobile"];
