@@ -256,7 +256,8 @@
     "integrus-three-parts": "tsx src/integrus-three-parts.ts",
     "integrus-three-parts-followup": "tsx src/integrus-three-parts-followup.ts",
     "dpg-backlinks": "tsx src/dpg-backlinks.ts",
-    "dpg-aeo-probe": "tsx src/dpg-aeo-probe.ts"
+    "dpg-aeo-probe": "tsx src/dpg-aeo-probe.ts",
+    "hightec-aeo-probe": "tsx src/hightec-aeo-probe.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

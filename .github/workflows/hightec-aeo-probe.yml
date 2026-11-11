@@ -1,0 +1,44 @@
+name: HighTec AEO probe (READ ONLY)
+
+# DataForSEO only. Asks AI answer engines a fixed prompt set about HighTec and
+# prints every answer and cited source. Writes nothing anywhere. A cost cap stops
+# new calls.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "models | smoke | full"
+        required: true
+        default: "smoke"
+      cost_cap:
+        description: "USD cap; no new call starts once spend passes it"
+        required: true
+        default: "5"
+      runs:
+        description: "Runs per prompt and engine (full mode)"
+        required: true
+        default: "3"
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run probe
+        env:
+          MODE: ${{ inputs.mode }}
+          COST_CAP: ${{ inputs.cost_cap }}
+          RUNS: ${{ inputs.runs }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run hightec-aeo-probe 2>&1 | tee hightec-aeo-probe.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hightec-aeo-probe
+          path: hightec-aeo-probe.txt
