@@ -1,0 +1,43 @@
+name: HighTec local probe (READ ONLY)
+
+# DataForSEO only. Local pack / Maps geo-grid, branded SERPs, ads, listings and AI
+# local answers for HighTec and AVS. Writes nothing anywhere. A cost cap stops new calls.
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "discover | grid | serp | ai | listings | reviews"
+        required: true
+        default: "discover"
+      cost_cap:
+        description: "USD cap; no new call starts once spend passes it"
+        required: true
+        default: "5"
+      params:
+        description: "Optional JSON overrides (centers, cids, only, devices ...)"
+        required: false
+        default: "{}"
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run probe
+        env:
+          PHASE: ${{ inputs.phase }}
+          COST_CAP: ${{ inputs.cost_cap }}
+          PARAMS: ${{ inputs.params }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run hightec-local-probe 2>&1 | tee hightec-local-probe.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hightec-local-probe-${{ inputs.phase }}
+          path: hightec-local-probe.txt
