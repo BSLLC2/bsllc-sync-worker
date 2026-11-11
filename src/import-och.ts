@@ -54,7 +54,7 @@ async function loadLeadIndex(databaseUrl: string, clientSlug: string): Promise<L
       phone: r.phone, dob: r.dob, lastName: r.last_name, gclid: r.gclid,
       utmSource: r.utm_source, utmMedium: r.utm_medium, rawJson: r.raw_json,
       submittedAt: new Date(r.submitted_at),
-      callLabel: r.call_tracking_label, isCall: /^phone:/i.test(r.form_name ?? ""),
+      callLabel: `${r.call_tracking_label ?? ""} ${(r.form_name ?? "").replace(/^phone:/i, "")}`.trim() || null, isCall: /^phone:/i.test(r.form_name ?? ""),
     })));
     if (index.counts.typedIn) console.log(`  ${backfillExclusionLine(index.counts.typedIn)}`);
     return index;
