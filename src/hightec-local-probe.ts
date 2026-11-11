@@ -24,10 +24,13 @@ const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : nul
 let spent = 0; let calls = 0; let stopped = false;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function dfs(creds: DfsCreds, method: "POST" | "GET", path: string, body?: unknown): Promise<any> {
-  const res = await fetch(`https://api.dataforseo.com/v3${path}`, { method, headers: { "content-type": "application/json", authorization: "Basic " + Buffer.from(`${creds.login}:${creds.password}`).toString("base64") }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(170000) });
+  const t0 = Date.now();
+  const res = await fetch(`https://api.dataforseo.com/v3${path}`, { method, headers: { "content-type": "application/json", authorization: "Basic " + Buffer.from(`${creds.login}:${creds.password}`).toString("base64") }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(75000) });
   const txt = await res.text();
   if (!res.ok) throw new Error(`HTTP ${res.status} ${path}: ${txt.slice(0, 200)}`);
-  const j: any = JSON.parse(txt); calls++; spent += n(j?.cost) ?? 0; return j;
+  const j: any = JSON.parse(txt); calls++; spent += n(j?.cost) ?? 0;
+  const ms = Date.now() - t0; if (calls <= 6 || ms > 20000 || calls % 200 === 0) console.log(`# call ${calls} ${path} ${ms}ms cost ${n(j?.cost)} total $${spent.toFixed(4)}`);
+  return j;
 }
 async function task(creds: DfsCreds, path: string, body: unknown): Promise<{ result: any; raw: any }> {
   for (let a = 0; ; a++) {
