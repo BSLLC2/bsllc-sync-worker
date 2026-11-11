@@ -15,7 +15,7 @@ import { credsFromEnv, type DfsCreds } from "./dataforseo.js";
 const MODE = (process.env.MODE || "smoke").toLowerCase();
 const RUNS = Math.max(1, Number(process.env.RUNS || 3));
 const CAP = Number(process.env.COST_CAP || 5);
-const MAXTOK = Number(process.env.MAX_OUTPUT_TOKENS || 800);
+const MAXTOK = Number(process.env.MAX_OUTPUT_TOKENS || 2500);
 
 type Loc = "US" | "Cincinnati" | "Greensburg" | "Indiana";
 const LOCNAME: Record<Loc, string> = {
@@ -108,10 +108,10 @@ function readAi(items: any[]): { text: string; sources: Src[] } {
 }
 
 const LLM: { engine: string; seg: string; model: () => string }[] = [
-  { engine: "ChatGPT", seg: "chat_gpt", model: () => process.env.M_CHATGPT || "gpt-4.1-mini" },
-  { engine: "Claude", seg: "claude", model: () => process.env.M_CLAUDE || "claude-sonnet-4-0" },
-  { engine: "Gemini", seg: "gemini", model: () => process.env.M_GEMINI || "gemini-2.5-pro" },
-  { engine: "Perplexity", seg: "perplexity", model: () => process.env.M_PERPLEXITY || "sonar" },
+  { engine: "ChatGPT", seg: "chat_gpt", model: () => process.env.M_CHATGPT || "gpt-5.5" },
+  { engine: "Claude", seg: "claude", model: () => process.env.M_CLAUDE || "claude-sonnet-5-5" },
+  { engine: "Gemini", seg: "gemini", model: () => process.env.M_GEMINI || "gemini-3.5-flash" },
+  { engine: "Perplexity", seg: "perplexity", model: () => process.env.M_PERPLEXITY || "sonar-pro" },
 ];
 
 async function askLlm(creds: DfsCreds, e: (typeof LLM)[number], p: Prompt, run: number): Promise<Ans> {
