@@ -58,7 +58,7 @@ function serviceAccount(): { client_email: string; private_key: string } {
 
 const ANALYTICS_SCOPE = "https://www.googleapis.com/auth/analytics.readonly";
 const propertyId = (raw: string) => raw.trim().replace(/^properties\//i, "").trim();
-interface ClientRow { id: string; name: string }
+interface ClientRow { id: string; name: string; seo_domain: string | null }
 
 async function main() {
   const dryRun = process.argv.includes("--dry-run");
@@ -77,7 +77,7 @@ async function main() {
         if (!(await tableExists(c, t))) throw new Error(`The table ${t} does not exist yet. Deploy the dashboard app first, then run this again.`);
       }
     }
-    const clients = (await c.query<ClientRow>(`SELECT id, name FROM clients WHERE status <> 'churned' AND is_internal = false ORDER BY name`)).rows;
+    const clients = (await c.query<ClientRow>(`SELECT id, name, seo_domain FROM clients WHERE status <> 'churned' AND is_internal = false ORDER BY name`)).rows;
     const maps = (await c.query<{ client_id: string; external_id: string }>(
       `SELECT client_id, external_id FROM connector_mappings
         WHERE source = 'ga4' AND enabled = true AND external_id IS NOT NULL AND btrim(external_id) <> ''`)).rows;
@@ -93,7 +93,7 @@ async function main() {
     };
     const inputs = chosen.map((client) => {
       const prop = maps.find((m) => m.client_id === client.id)?.external_id ?? null;
-      return { id: client.id, name: client.name, property: prop ? propertyId(prop) : null };
+      return { id: client.id, name: client.name, property: prop ? propertyId(prop) : null, site: client.seo_domain };
     });
     pipe = await processClients({ clients: inputs, settings: settingBy, deps, db: c, dryRun });
     for (const l of pipe.lines) console.log(l);

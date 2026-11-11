@@ -20,6 +20,35 @@ export function defaultConfig(): ReportConfig {
   return { excludeCountries: [], excludeChannels: [], ownHostnames: [], groups: [], formEvent: DEFAULT_FORM_EVENT };
 }
 
+const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+
+/**
+ * The hostnames a client's recorded site stands for: the bare host and its www. form. The recorded value may be a
+ * bare domain, a www. host or a whole address; anything that is not a plain hostname once the scheme, path and port
+ * come off gives NO hostnames (never a guess). A leading "www." comes off to find the bare host; any other
+ * subdomain ("shop.example.com") is kept as written.
+ */
+export function siteHosts(site: unknown): string[] {
+  if (typeof site !== "string") return [];
+  let t = site.trim().toLowerCase();
+  if (!t || hasControl(t)) return [];
+  t = t.replace(/^[a-z][a-z0-9+.-]*:\/\//, "").replace(/[/?#].*$/, "").replace(/:\d+$/, "").replace(/\.$/, "");
+  if (t.includes("@")) return [];
+  const bare = t.replace(/^www\./, "");
+  if (!bare || bare.length > CONFIG_LIMITS.hostChars - 4 || !HOSTNAME.test(bare)) return [];
+  return [bare, `www.${bare}`];
+}
+
+/**
+ * The own-hostname list must not wait for somebody to type it. With no typed list, the client's recorded site is
+ * the default. A typed list always wins. No list and no usable recorded site: unfiltered, as before.
+ */
+export function withSiteDefault(config: ReportConfig, site: unknown): ReportConfig {
+  if (config.ownHostnames.length > 0) return { ...config, ownHostnamesFrom: "typed" };
+  const hosts = siteHosts(site);
+  return hosts.length ? { ...config, ownHostnames: hosts, ownHostnamesFrom: "site" } : config;
+}
+
 export function sanitiseConfig(raw: unknown): ReportConfig {
   const out = defaultConfig();
   let v: unknown = raw;
@@ -58,7 +87,7 @@ export function sanitiseConfig(raw: unknown): ReportConfig {
     for (const h of o.ownHostnames) {
       if (typeof h !== "string") continue;
       const t = h.trim().toLowerCase();
-      if (!t || t.length > CONFIG_LIMITS.hostChars || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(t)) continue;
+      if (!t || t.length > CONFIG_LIMITS.hostChars || !HOSTNAME.test(t)) continue;
       if (!out.ownHostnames.includes(t)) out.ownHostnames.push(t);
       if (out.ownHostnames.length >= CONFIG_LIMITS.hosts) break;
     }

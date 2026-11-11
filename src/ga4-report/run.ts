@@ -47,7 +47,9 @@ function result(config: ReportConfig, status: RunStatus, detail: string | null, 
   };
 }
 
-export async function readClientReport(ctx: ClientCtx, config: ReportConfig, deps: Deps): Promise<ClientReportResult> {
+export async function readClientReport(ctx: ClientCtx, given: ReportConfig, deps: Deps): Promise<ClientReportResult> {
+  let config = given;
+  let siteNote: string | null = null;
   if (!ctx.ga4Property) return result(config, "off", "No analytics property is connected for this account.");
   const w = readWindow(deps.today, deps.months ?? DEFAULT_MONTHS);
   if (!w) return result(config, "error", "The read window could not be worked out from today's date.");
@@ -64,6 +66,22 @@ export async function readClientReport(ctx: ClientCtx, config: ReportConfig, dep
   catch (e) { return result(config, "error", `The daily totals could not be read, so nothing was written. ${say(e)}`); }
   if (daily.kind === "too_big") {
     return result(config, "capped", "The daily totals were more rows than one read allows, so nothing was written for this account.");
+  }
+  if (daily.kind === "empty" && config.ownHostnamesFrom === "site") {
+    // The list was a DEFAULT taken from the recorded site, and it kept nothing. A recorded site that is not the
+    // hostname the property reports must not blank the account: read unfiltered, and say on the run row that no
+    // hostname filter was applied. A TYPED list that keeps nothing is a person's answer and is left as it reads.
+    const open: ReportConfig = { ...config, ownHostnames: [] };
+    delete open.ownHostnamesFrom;
+    let again;
+    try { again = await readDaily(io, w, open.excludeCountries, open.excludeChannels, open.ownHostnames); }
+    catch (e) { return result(open, "error", `The daily totals could not be read, so nothing was written. ${say(e)}`); }
+    if (again.kind === "too_big") return result(open, "capped", "The daily totals were more rows than one read allows, so nothing was written for this account.");
+    if (again.kind !== "empty") {
+      siteNote = "The site on record matched no visits in this property, so no hostname filter was applied.";
+      config = open;
+      daily = again;
+    }
   }
   if (daily.kind === "empty") return result(config, "no_data", "The property had no visits in the window.");
 
@@ -101,6 +119,7 @@ export async function readClientReport(ctx: ClientCtx, config: ReportConfig, dep
     return result(config, "error", `The daily totals were read, but every report failed and keeps its earlier rows. ${firstError ?? ""}`.trim(), base);
   }
   const notes: string[] = [];
+  if (siteNote) notes.push(siteNote);
   if (failed.length) notes.push(`These reports could not be read in full and keep their earlier rows: ${failed.join(", ")}.${firstError ? ` ${firstError}` : ""}`);
   if (tooBig.length) notes.push(`More rows than one read allows: ${tooBig.join(", ")}.`);
   return result(config, tooBig.length ? "capped" : "ok", notes.length ? notes.join(" ") : null, base);

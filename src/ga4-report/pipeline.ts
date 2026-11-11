@@ -6,12 +6,13 @@
  * One client's failure never stops the others.
  */
 import { safeMessage } from "../page-behaviour/http.js";
-import { configKey, sanitiseConfig } from "./config.js";
+import { configKey, sanitiseConfig, withSiteDefault } from "./config.js";
 import { readClientReport, type Deps } from "./run.js";
 import { writeClientReport, type Queryable } from "./store.js";
 import { REPORT_KINDS, type ClientReportResult, type ReportRowOut } from "./types.js";
 
-export interface ClientInput { id: string; name: string; property: string | null }
+/** `site` is the client's recorded site (clients.seo_domain). It is the default own-hostname list when nobody typed one. */
+export interface ClientInput { id: string; name: string; property: string | null; site?: string | null }
 
 export interface PipelineResult {
   attempted: number;
@@ -33,7 +34,7 @@ export function dryRunLines(name: string, r: ClientReportResult): string[] {
   if (r.detail) out.push(`  ${r.detail}`);
   const excl = r.config.excludeCountries.length;
   const exch = r.config.excludeChannels.length;
-  out.push(`  applied: ${excl} countr${excl === 1 ? "y" : "ies"} left out, ${exch} channel${exch === 1 ? "" : "s"} left out, ${r.config.groups.length} group${r.config.groups.length === 1 ? "" : "s"}, form event ${r.config.formEvent}`);
+  out.push(`  applied: ${excl} countr${excl === 1 ? "y" : "ies"} left out, ${exch} channel${exch === 1 ? "" : "s"} left out, ${r.config.groups.length} group${r.config.groups.length === 1 ? "" : "s"}, form event ${r.config.formEvent}, ${r.config.ownHostnames.length ? `own hostnames ${r.config.ownHostnames.join(" ")} (${r.config.ownHostnamesFrom === "site" ? "from the site on record" : "typed"})` : "no hostname filter"}`);
   for (const kind of REPORT_KINDS) {
     const rows = r.kinds[kind];
     if (!rows) continue;
@@ -54,7 +55,8 @@ export async function processClients(opts: {
 }): Promise<PipelineResult> {
   const res: PipelineResult = { attempted: 0, answered: 0, withoutProperty: 0, casualties: [], lines: [], summary: "", allFailed: false };
   for (const client of opts.clients) {
-    const config = sanitiseConfig(opts.settings.get(configKey(client.id)));
+    // No typed hostname list: the client's recorded site is the default. A typed list wins.
+    const config = withSiteDefault(sanitiseConfig(opts.settings.get(configKey(client.id))), client.site);
     let result: ClientReportResult;
     try {
       result = await readClientReport({ id: client.id, name: client.name, ga4Property: client.property }, config, opts.deps);

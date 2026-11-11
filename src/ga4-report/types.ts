@@ -71,6 +71,11 @@ export interface ReportConfig {
   excludeChannels: string[];
   /** The client's own hostnames. Empty means the property is read as it is. Set, every visit, landing page and event is read for these hostnames only (R15). */
   ownHostnames: string[];
+  /**
+   * Where `ownHostnames` came from. "site": nobody typed a list, so the client's recorded site (clients.seo_domain,
+   * the bare host and its www. form) was used. Absent or "typed": a person's list, or no list at all.
+   */
+  ownHostnamesFrom?: "typed" | "site";
   groups: ReportGroup[];
   formEvent: string;
 }

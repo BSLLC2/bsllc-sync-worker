@@ -23,7 +23,7 @@ import * as path from "node:path";
 import pg from "pg";
 import { addDays } from "./page-behaviour/paths.js";
 import { HttpError, safeMessage } from "./page-behaviour/http.js";
-import { configKey, sanitiseConfig, defaultConfig } from "./ga4-report/config.js";
+import { configKey, sanitiseConfig, defaultConfig, siteHosts, withSiteDefault } from "./ga4-report/config.js";
 import { readWindow, monthFromYearMonth, dayFromGa4Date, monthsBetween, daysBetween } from "./ga4-report/months.js";
 import {
   DAILY_METRIC_LADDER, SESSION_METRIC_LADDER, andFilters, dailyRequest, dailyRows, exclusionFilter, groupFilter, isRetryable, kindSpecs,
@@ -879,6 +879,58 @@ hr("13. match modes: starts with, exactly, one level deeper; the filter and the 
   const spec = kindSpecs([], "form_submit").find((x) => x.kind === "month_raw")!;
   ok("the request for it has no filter at all and no dimension but the month", !("dimensionFilter" in (reportRequest(readWindow(TODAY, MONTHS)!, spec, spec.ladder[0]!, ["India"], ["Direct"]) as object)) && spec.dimensions.length === 0);
   ok("one row a month is kept", TOP_N.month_raw === 1 && REPORT_KINDS.includes("month_raw"));
+}
+
+/* ═════════════════════════ the recorded site is the default hostname list ═════════════════════════ */
+hr("own hostnames: the site on record is the default, a typed list wins");
+{
+  ok("a bare domain gives the bare host and its www. form", siteHosts("example.com").join() === "example.com,www.example.com");
+  ok("a www. host gives the same two", siteHosts("www.Example.com").join() === "example.com,www.example.com");
+  ok("a whole address loses its scheme, path, query and port", siteHosts("https://www.example.com:443/path?x=1#y").join() === "example.com,www.example.com");
+  ok("a deeper subdomain is kept as written", siteHosts("shop.example.co.uk").join() === "shop.example.co.uk,www.shop.example.co.uk");
+  for (const bad of [null, undefined, "", "   ", 42, "localhost", "not a host", "user@example.com", "exa mple.com", "example..com", "-bad.com", "a".repeat(130) + ".com", "ex\u0000ample.com"]) {
+    ok(`an unusable recorded site gives no hostnames: ${JSON.stringify(typeof bad === "string" ? bad.slice(0, 20) : bad)}`, siteHosts(bad).length === 0);
+  }
+  const none = withSiteDefault(defaultConfig(), null);
+  ok("no typed list and no recorded site stays unfiltered and claims no source", none.ownHostnames.length === 0 && none.ownHostnamesFrom === undefined);
+  const fromSite = withSiteDefault(defaultConfig(), "example.com");
+  ok("no typed list: the recorded site is applied and marked as the site's", fromSite.ownHostnames.join() === "example.com,www.example.com" && fromSite.ownHostnamesFrom === "site");
+  const typed = withSiteDefault(cfg({ ownHostnames: ["app.other.com"] }), "example.com");
+  ok("a typed list wins over the recorded site", typed.ownHostnames.join() === "app.other.com" && typed.ownHostnamesFrom === "typed");
+  ok("the default does not mutate the config it was given", (() => { const d = defaultConfig(); withSiteDefault(d, "example.com"); return d.ownHostnames.length === 0; })());
+
+  // Through the pipeline: the default reaches the requests and the run row, exactly as applied.
+  const p = property(dataset());
+  const rec = recorder();
+  await processClients({ clients: [{ id: "client-a", name: "Alpine Travel Test", property: "111222333", site: "https://www.example.com/" }], settings: new Map(), deps: deps(p.fetch), db: rec.db, dryRun: false });
+  const daily = p.calls.find((c) => (c.body.dimensions as any[]).length === 1 && (c.body.dimensions as any[])[0].name === "date")!;
+  ok("the daily request is filtered to the recorded site's two hostnames", JSON.stringify(daily.body.dimensionFilter ?? {}).includes("hostName") && JSON.stringify(daily.body.dimensionFilter).includes('"example.com"') && JSON.stringify(daily.body.dimensionFilter).includes('"www.example.com"'));
+  const runRow = rec.q.find((x) => kindOf(x.sql) === "run")!;
+  ok("the run row records the hostnames exactly as applied", runRow.params.includes(JSON.stringify(["example.com", "www.example.com"])), JSON.stringify(runRow.params));
+  const hostBreak = p.calls.find((c) => (c.body.dimensions as any[]).some((d) => d.name === "hostName"))!;
+  ok("the by-hostname breakdown is still unfiltered under the default", !("dimensionFilter" in hostBreak.body));
+
+  const pt = property(dataset());
+  const rect = recorder();
+  await processClients({ clients: [{ id: "client-a", name: "Alpine Travel Test", property: "111222333", site: "example.com" }], settings: new Map([[configKey("client-a"), JSON.stringify({ ownHostnames: ["typed.example.org"] })]]), deps: deps(pt.fetch), db: rect.db, dryRun: false });
+  ok("with a typed list the run row records the typed list, not the site", rect.q.find((x) => kindOf(x.sql) === "run")!.params.includes(JSON.stringify(["typed.example.org"])));
+
+  const pn = property(dataset());
+  const recn = recorder();
+  await processClients({ clients: [{ id: "client-a", name: "Alpine Travel Test", property: "111222333", site: null }], settings: new Map(), deps: deps(pn.fetch), db: recn.db, dryRun: false });
+  ok("no site and no typed list: no request names a hostname filter and the run row records none", pn.calls.every((c) => !JSON.stringify(c.body.dimensionFilter ?? {}).includes("hostName")) && recn.q.find((x) => kindOf(x.sql) === "run")!.params.includes("[]"));
+
+  // A recorded site that is not the hostname the property reports must not blank the account.
+  const emptyWhenFiltered = (b: Record<string, unknown>) => (JSON.stringify(b.dimensionFilter ?? {}).includes("hostName") ? { status: 200, body: { dimensionHeaders: [], metricHeaders: [], rows: [], rowCount: 0 } } : null);
+  const miss = await readClientReport(CTX, withSiteDefault(defaultConfig(), "wrong-site.example"), deps(property(dataset(), { fail: emptyWhenFiltered }).fetch));
+  ok("a default that keeps nothing falls back to an unfiltered read", miss.status === "ok" && (miss.daily?.length ?? 0) > 0, `${miss.status} ${miss.detail}`);
+  ok("and the run then records NO hostnames, because none were applied", miss.config.ownHostnames.length === 0 && miss.config.ownHostnamesFrom === undefined);
+  ok("and says so on the run", /site on record matched no visits/.test(miss.detail ?? ""), String(miss.detail));
+  const typedMiss = await readClientReport(CTX, withSiteDefault(cfg({ ownHostnames: ["wrong-site.example"] }), "example.com"), deps(property(dataset(), { fail: emptyWhenFiltered }).fetch));
+  ok("a TYPED list that keeps nothing is left as it reads: no fallback", typedMiss.status === "no_data" && typedMiss.config.ownHostnames.join() === "wrong-site.example");
+
+  const dryP = await processClients({ clients: [{ id: "client-a", name: "Alpine Travel Test", property: "111222333", site: "example.com" }], settings: new Map(), deps: deps(property(dataset()).fetch), db: recorder().db, dryRun: true });
+  ok("a dry run says where the hostname list came from", dryP.lines.some((l) => l.includes("from the site on record")));
 }
 
 console.log("\n" + "─".repeat(72));
