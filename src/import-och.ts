@@ -466,8 +466,7 @@ async function main() {
     console.log(`\n  What this does not tell you`);
     console.log(`    ${unknownRef} row(s) carry a Referent nobody here recognises. That number is the size of the doubt:`);
     console.log(`    any of them could be a lead of ours under a label intake made up, and only intake can say.`);
-    console.log(`    A lead of ours captured against the row proves it was ours; nothing here proves the reverse,`);
-    console.log(`    and OCH's form capture went quiet on 2026-09-10, so a lead we sent may not have been captured.`);
+    console.log(`    A lead of ours captured against the row proves it was ours; nothing here proves the reverse.`);
     if (debugMonth === currentYm) console.log(`    ${debugMonth} is still open — these are the admissions so far, not the month's final count.`);
   }
 
