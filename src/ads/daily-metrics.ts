@@ -33,6 +33,9 @@
  *    complete would make every missing day a nought.
  *  · A FAILED READ WRITES A FAILURE, NOT SILENCE: the scan row says ok = false
  *    and keeps its coverage where it was.
+ *  · TWO DATES FOR A CONVERSION. `conversions` is by the day of the click, `conversions_by_conv_date` by the day it
+ *    happened (see DAILY_GAQL). Same evidence rule for each: a nought is planted only where the account reported one
+ *    somewhere in the window.
  *  · THE NEWEST DAY IS NOT TRUSTED HERE and is not read by the dashboard: the
  *    window ends yesterday (UTC), and the last `RESTATE_DAYS` are re-read every
  *    run because conversions are attributed late.
@@ -53,12 +56,23 @@ export const RESTATE_DAYS = 14;
 /** More rows than this is a read we cannot call complete, so nothing is written. */
 export const MAX_DAILY_ROWS = 50_000;
 
+/**
+ * `metrics.conversions` is counted on the day of the CLICK, the platform's default, and a conversion that arrives later
+ * (a call logged when it ends, an imported lead when the import runs) is credited back to that day. So the newest days read
+ * low and rise as they settle, and a quiet newest week is not evidence of a broken tag. `conversions_by_conversion_date` is
+ * the same measure by the day the conversion HAPPENED: it says whether the account was recording conversions ON a date.
+ * Both are stored, side by side. The second is optional (see DAILY_GAQL_CLICK_DATE_ONLY).
+ */
 export const DAILY_GAQL = `
   SELECT campaign.id, campaign.name, segments.date,
-         metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
+         metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions,
+         metrics.conversions_by_conversion_date
     FROM campaign
    WHERE segments.date BETWEEN '{{start}}' AND '{{end}}'
      AND campaign.status != 'REMOVED'`;
+
+/** The same read without the conversion-date column, for an API version that refuses it. */
+export const DAILY_GAQL_CLICK_DATE_ONLY = DAILY_GAQL.replace(",\n         metrics.conversions_by_conversion_date", "");
 
 export const NO_ACCOUNTS_NOTE = "no Google Ads account is mapped, so no campaign day was captured for any client";
 
@@ -70,8 +84,10 @@ export interface DailyRow {
   impressions: number;
   clicks: number;
   costMicros: number;
-  /** Null = unanswered (see the rules). */
+  /** Null = unanswered (see the rules). By the day of the click. */
   conversions: number | null;
+  /** Null = not read, or the account counted none anywhere in the window. By the day the conversion happened. */
+  conversionsByConvDate: number | null;
 }
 
 const DAY = 86_400_000;
@@ -93,7 +109,7 @@ export function readWindow(today: string, firstRun: boolean, days?: number): { s
 const finite = (v: unknown): number => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 
 /** One API row into one stored row, or null for a row with no campaign or date. */
-export function normalizeDaily(row: any): { campaignId: string; campaignName: string | null; date: string; impressions: number; clicks: number; costMicros: number; conversions: number } | null {
+export function normalizeDaily(row: any): { campaignId: string; campaignName: string | null; date: string; impressions: number; clicks: number; costMicros: number; conversions: number; conversionsByConvDate: number | null } | null {
   const id = String(row?.campaign?.id ?? "").trim();
   const date = String(row?.segments?.date ?? "").trim();
   if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
@@ -105,6 +121,9 @@ export function normalizeDaily(row: any): { campaignId: string; campaignName: st
     clicks: Math.max(0, Math.round(finite(m.clicks))),
     costMicros: Math.max(0, Math.round(finite(m.cost_micros ?? m.costMicros))),
     conversions: Math.max(0, finite(m.conversions)),
+    // Absent when the read did not ask for it: unanswered, not nought.
+    conversionsByConvDate: m.conversions_by_conversion_date == null && m.conversionsByConversionDate == null
+      ? null : Math.max(0, finite(m.conversions_by_conversion_date ?? m.conversionsByConversionDate)),
   };
 }
 
@@ -123,11 +142,16 @@ export function buildDailyRows(raw: readonly any[]): DailyRow[] {
     if (have) {
       have.impressions += n.impressions; have.clicks += n.clicks;
       have.costMicros += n.costMicros; have.conversions += n.conversions;
+      have.conversionsByConvDate = have.conversionsByConvDate == null || n.conversionsByConvDate == null ? null : have.conversionsByConvDate + n.conversionsByConvDate;
     } else byKey.set(k, n);
   }
   const all = Array.from(byKey.values());
   const window = all.map((r) => r.conversions);
-  return all.map((r) => ({ ...r, conversions: evidencedMetric(r.conversions, window) }))
+  const windowOn = all.map((r) => r.conversionsByConvDate);
+  return all.map((r) => ({
+    ...r, conversions: evidencedMetric(r.conversions, window),
+    conversionsByConvDate: r.conversionsByConvDate == null ? null : evidencedMetric(r.conversionsByConvDate, windowOn),
+  }))
     .sort((a, b) => a.date.localeCompare(b.date) || a.campaignId.localeCompare(b.campaignId));
 }
 
@@ -159,6 +183,7 @@ export async function ensureDailyTables(c: pg.Client): Promise<void> {
       campaign_id TEXT NOT NULL, campaign_name TEXT, metric_date TEXT NOT NULL,
       impressions BIGINT NOT NULL DEFAULT 0, clicks BIGINT NOT NULL DEFAULT 0, cost_micros BIGINT NOT NULL DEFAULT 0,
       conversions DOUBLE PRECISION, synced_at TIMESTAMPTZ NOT NULL DEFAULT now());
+    ALTER TABLE ads_daily_metrics ADD COLUMN IF NOT EXISTS conversions_by_conv_date DOUBLE PRECISION;
     CREATE UNIQUE INDEX IF NOT EXISTS uq_ads_daily_metrics_day ON ads_daily_metrics (platform, account_id, campaign_id, metric_date);
     CREATE INDEX IF NOT EXISTS idx_ads_daily_metrics_client ON ads_daily_metrics (client_id, metric_date);
     CREATE TABLE IF NOT EXISTS ads_daily_scans (
@@ -184,13 +209,13 @@ export async function storeDaily(
   try {
     for (const r of rows) {
       await c.query(
-        `INSERT INTO ads_daily_metrics (id, client_id, platform, account_id, campaign_id, campaign_name, metric_date, impressions, clicks, cost_micros, conversions, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+        `INSERT INTO ads_daily_metrics (id, client_id, platform, account_id, campaign_id, campaign_name, metric_date, impressions, clicks, cost_micros, conversions, conversions_by_conv_date, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
          ON CONFLICT (platform, account_id, campaign_id, metric_date) DO UPDATE SET
            client_id = EXCLUDED.client_id, campaign_name = EXCLUDED.campaign_name,
            impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks, cost_micros = EXCLUDED.cost_micros,
-           conversions = EXCLUDED.conversions, synced_at = now()`,
-        [randomUUID(), clientId, PLATFORM, accountId, r.campaignId, r.campaignName, r.date, r.impressions, r.clicks, r.costMicros, r.conversions],
+           conversions = EXCLUDED.conversions, conversions_by_conv_date = EXCLUDED.conversions_by_conv_date, synced_at = now()`,
+        [randomUUID(), clientId, PLATFORM, accountId, r.campaignId, r.campaignName, r.date, r.impressions, r.clicks, r.costMicros, r.conversions, r.conversionsByConvDate],
       );
     }
     const prev = await loadCoverage(c, accountId);

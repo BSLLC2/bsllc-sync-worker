@@ -7,7 +7,7 @@ import { openCustomer } from "./apply-ads-changes.js";
 import { mappedAccounts } from "./ads/store.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 import {
-  DAILY_GAQL, MAX_DAILY_ROWS, NO_ACCOUNTS_NOTE, PLATFORM, accountLine, buildDailyRows,
+  DAILY_GAQL, DAILY_GAQL_CLICK_DATE_ONLY, MAX_DAILY_ROWS, NO_ACCOUNTS_NOTE, PLATFORM, accountLine, buildDailyRows,
   ensureDailyTables, hasSpan, loadCoverage, readWindow, recordDailyFailure, storeDaily,
 } from "./ads/daily-metrics.js";
 
@@ -67,7 +67,17 @@ async function main() {
         const prev = await loadCoverage(c, accountId).catch((e) => { if (dryRun) return null; throw e; });
         const window = readWindow(today, !hasSpan(prev), daysArg);
         const customer = await openCustomer(api, cfg, accountId);
-        const raw: any[] = await customer.query(DAILY_GAQL.replace("{{start}}", window.start).replace("{{end}}", window.end));
+        const fill = (q: string) => q.replace("{{start}}", window.start).replace("{{end}}", window.end);
+        let raw: any[];
+        let dateNote = "";
+        try {
+          raw = await customer.query(fill(DAILY_GAQL));
+        } catch (first) {
+          // The conversion-date column is the optional part. If the API refuses it, read the click-day record without it
+          // and say so: a refusal of the optional column must not cost the days that were always there.
+          raw = await customer.query(fill(DAILY_GAQL_CLICK_DATE_ONLY));
+          dateNote = `conversions by conversion date not read (${(first instanceof Error ? first.message : String(first)).slice(0, 80)})`;
+        }
         const list = Array.isArray(raw) ? raw : [];
         if (list.length >= MAX_DAILY_ROWS) {
           // A truncated read written as complete would turn every missing day into a nought.
@@ -77,7 +87,7 @@ async function main() {
         const campaigns = new Set(rows.map((r) => r.campaignId)).size;
         const nulls = rows.filter((r) => r.conversions == null).length;
         read += 1; totalRows += rows.length;
-        console.log(accountLine(t.clientName, rows.length, campaigns, window, nulls ? `${nulls} with no conversion evidence, stored as unanswered` : hasSpan(prev) ? "" : "first run, backfilled"));
+        console.log(accountLine(t.clientName, rows.length, campaigns, window, [nulls ? `${nulls} with no conversion evidence, stored as unanswered` : hasSpan(prev) ? "" : "first run, backfilled", dateNote].filter(Boolean).join("; ")));
         if (dryRun) { console.log(`      (dry run, nothing written)`); continue; }
         const cov = await storeDaily(c, t.clientId, accountId, rows, window, `${rows.length} campaign-days, ${window.start} to ${window.end}`);
         if (cov.restarted) problems.push(`${t.clientName}: the last good read was more than a day before this window, so coverage restarts at ${cov.coveredFrom}`);

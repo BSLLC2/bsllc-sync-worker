@@ -7,18 +7,12 @@ import { openCustomer } from "./apply-ads-changes.js";
 import { mappedAccounts } from "./ads/store.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 import {
-  AD_GROUP_GAQL, AD_GROUP_KEYWORD_GAQL, BID_STRATEGY_GAQL, BUDGET_GAQL,
-  CAMPAIGN_GAQL, CAMPAIGN_KEYWORD_GAQL, ENTITY_KINDS, FIRST_SNAPSHOT_NOTE,
-  MAX_ENTITIES_PER_KIND, NO_ACCOUNTS_NOTE,
-  AD_GAQL, AD_LABEL_GAQL, ACCOUNT_NEGATIVE_GAQL, SHARED_SET_GAQL, CAMPAIGN_SHARED_SET_GAQL,
-  SHARED_CRITERION_GAQL, CONVERSION_ACTION_GAQL, CAMPAIGN_CONVERSION_GOAL_GAQL,
-  assembleAds, assembleSharedSets, normalizeAccountNegative, normalizeAd,
-  normalizeCampaignConversionGoal, normalizeConversionAction, normalizeSharedNegative,
-  accountLine, applySnapshotPlan, loadOpenIntervals, normalizeAdGroup,
-  normalizeAdGroupKeyword, normalizeBidStrategy, normalizeBudget, normalizeCampaign,
-  normalizeCampaignKeyword, planCounts, reconcile, recordSnapshotFailure, recordSnapshotScan,
-  type EntityKind, type SnapshotEntity, type UnrecognisedEnum,
+  ENTITY_KINDS, FIRST_SNAPSHOT_NOTE, NO_ACCOUNTS_NOTE,
+  accountLine, applySnapshotPlan, loadOpenIntervals,
+  planCounts, reconcile, recordSnapshotFailure, recordSnapshotScan,
+  type UnrecognisedEnum,
 } from "./ads/structure-snapshot.js";
+import { CORE_KINDS, readAccount } from "./ads/structure-read.js";
 
 /**
  * Take a structural snapshot of every mapped ad account.
@@ -54,140 +48,6 @@ function arg(name: string): string | undefined {
   return hit ? hit.slice(p.length) : undefined;
 }
 const hasFlag = (name: string) => process.argv.slice(2).includes(`--${name}`);
-
-interface KindRead {
-  entities: SnapshotEntity[];
-  /** True only where the whole list came back: not a failed query, not a
-   *  response sitting at the row cap. Only a complete kind may close. */
-  complete: boolean;
-  problem: string | null;
-}
-
-/**
- * One kind, read and normalized.
- *
- * A QUERY THAT THREW RETURNS `complete: false` AND AN EMPTY LIST, which is not
- * the same as an account with none of that kind — the difference is the whole
- * point, and it is what stops a permissions hiccup closing every keyword on a
- * live account.
- */
-async function readKind(
-  customer: any,
-  label: string,
-  gaql: string,
-  normalize: (row: any, report?: UnrecognisedEnum[]) => SnapshotEntity | null,
-  report: UnrecognisedEnum[],
-): Promise<KindRead> {
-  let rows: any[];
-  try {
-    rows = await customer.query(gaql);
-  } catch (e: any) {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
-    return { entities: [], complete: false, problem: `${label} could not be read (${msg.slice(0, 160)}) — nothing of that kind was closed` };
-  }
-  const list = Array.isArray(rows) ? rows : [];
-  const capped = list.length >= MAX_ENTITIES_PER_KIND;
-  const entities = list.map((r) => normalize(r, report)).filter((e): e is SnapshotEntity => e !== null);
-  return {
-    entities,
-    complete: !capped,
-    problem: capped
-      ? `${label} came back at the ${MAX_ENTITIES_PER_KIND}-row ceiling, so this run cannot say it read them all — nothing of that kind was closed. Raise MAX_ENTITIES_PER_KIND once somebody has read this line.`
-      : null,
-  };
-}
-
-/**
- * Raw rows for a DEPENDENT query (ad labels, shared-list attachments). Null on
- * a failure or a response at the row ceiling: the caller then drops the kind it
- * feeds rather than storing it half-described.
- */
-async function readRaw(customer: any, label: string, gaql: string): Promise<{ rows: any[] | null; problem: string | null }> {
-  try {
-    const rows = await customer.query(gaql);
-    const list = Array.isArray(rows) ? rows : [];
-    if (list.length >= MAX_ENTITIES_PER_KIND) {
-      return { rows: null, problem: `${label} came back at the ${MAX_ENTITIES_PER_KIND}-row ceiling — the kind it feeds was not read this run` };
-    }
-    return { rows: list, problem: null };
-  } catch (e: any) {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
-    return { rows: null, problem: `${label} could not be read (${msg.slice(0, 160)}) — the kind it feeds was not read or closed this run` };
-  }
-}
-
-async function readAccount(customer: any): Promise<{
-  entities: SnapshotEntity[];
-  completeKinds: EntityKind[];
-  problems: string[];
-  unrecognised: UnrecognisedEnum[];
-}> {
-  const report: UnrecognisedEnum[] = [];
-  const campaigns = await readKind(customer, "campaigns", CAMPAIGN_GAQL, normalizeCampaign, report);
-  const adGroups = await readKind(customer, "ad groups", AD_GROUP_GAQL, normalizeAdGroup, report);
-  const agKeywords = await readKind(customer, "ad group keywords", AD_GROUP_KEYWORD_GAQL, normalizeAdGroupKeyword, report);
-  const campKeywords = await readKind(customer, "campaign negative keywords", CAMPAIGN_KEYWORD_GAQL, normalizeCampaignKeyword, report);
-  const budgets = await readKind(customer, "budgets", BUDGET_GAQL, normalizeBudget, report);
-  const strategies = await readKind(customer, "bid strategies", BID_STRATEGY_GAQL, normalizeBidStrategy, report);
-
-  const completeKinds: EntityKind[] = [];
-  if (campaigns.complete) completeKinds.push("campaign");
-  if (adGroups.complete) completeKinds.push("ad_group");
-  // ONE KIND, TWO QUERIES. `keyword` covers ad group criteria and campaign
-  // negatives, so it is complete only where BOTH came back in full — a
-  // half-read kind that closed on the half it did read would remove every
-  // campaign negative in the account on a morning the second query failed.
-  if (agKeywords.complete && campKeywords.complete) completeKinds.push("keyword");
-  if (budgets.complete) completeKinds.push("budget");
-  if (strategies.complete) completeKinds.push("bid_strategy");
-
-  // ── Newer kinds. Each dependent query that fails drops its kind ENTIRELY.
-  const extraProblems: string[] = [];
-  const extraEntities: SnapshotEntity[] = [];
-
-  const adsMain = await readKind(customer, "responsive search ads", AD_GAQL, normalizeAd, report);
-  const adLabels = await readRaw(customer, "ad labels", AD_LABEL_GAQL);
-  if (adLabels.problem) extraProblems.push(adLabels.problem);
-  if (adsMain.complete && adLabels.rows !== null) {
-    extraEntities.push(...assembleAds(adsMain.entities, adLabels.rows));
-    completeKinds.push("ad");
-  }
-
-  const acctNeg = await readKind(customer, "account negative keywords", ACCOUNT_NEGATIVE_GAQL, normalizeAccountNegative, report);
-  extraEntities.push(...acctNeg.entities);
-  if (acctNeg.complete) completeKinds.push("account_negative");
-
-  const sets = await readRaw(customer, "shared negative lists", SHARED_SET_GAQL);
-  const attach = await readRaw(customer, "shared list attachments", CAMPAIGN_SHARED_SET_GAQL);
-  const sharedCrit = await readKind(customer, "shared list negatives", SHARED_CRITERION_GAQL, normalizeSharedNegative, report);
-  for (const p of [sets.problem, attach.problem]) if (p) extraProblems.push(p);
-  if (sets.rows !== null && attach.rows !== null) {
-    extraEntities.push(...assembleSharedSets(sets.rows, attach.rows, report));
-    completeKinds.push("shared_set");
-  }
-  extraEntities.push(...sharedCrit.entities);
-  if (sharedCrit.complete) completeKinds.push("shared_negative");
-
-  const convActions = await readKind(customer, "conversion actions", CONVERSION_ACTION_GAQL, normalizeConversionAction, report);
-  extraEntities.push(...convActions.entities);
-  if (convActions.complete) completeKinds.push("conversion_action");
-
-  const convGoals = await readKind(customer, "campaign conversion goals", CAMPAIGN_CONVERSION_GOAL_GAQL, normalizeCampaignConversionGoal, report);
-  extraEntities.push(...convGoals.entities);
-  if (convGoals.complete) completeKinds.push("campaign_conversion_goal");
-
-  const reads = [campaigns, adGroups, agKeywords, campKeywords, budgets, strategies];
-  return {
-    entities: [...reads.flatMap((r) => r.entities), ...extraEntities],
-    completeKinds,
-    problems: [
-      ...reads.map((r) => r.problem),
-      adsMain.problem, acctNeg.problem, sharedCrit.problem, convActions.problem, convGoals.problem,
-      ...extraProblems,
-    ].filter((p): p is string => p !== null),
-    unrecognised: report,
-  };
-}
 
 /** Distinct field/value pairs, so one unknown enum on 400 keywords is one
  *  line rather than four hundred. */
@@ -231,6 +91,7 @@ async function main() {
 
     let read = 0, totalEntities = 0, totalChanged = 0, totalUnrecognised = 0;
     const problems: string[] = [];
+    const coreFailures: string[] = [];
 
     for (const t of targets) {
       const accountId = digitsOnly(t.accountId);
@@ -245,12 +106,19 @@ async function main() {
         totalChanged += counts.changed;
         totalUnrecognised += unrecognised.length;
 
+        // A campaign or a budget that was not read is not a quiet account: the dashboard's campaign, pacing and by-day
+        // tables are drawn from them. It is said in the scan row, the heartbeat note and the exit code, not only in a log line.
+        const coreFailed = CORE_KINDS.filter((k) => !completeKinds.includes(k));
         const notes: string[] = [];
         if (!open.length) notes.push(FIRST_SNAPSHOT_NOTE);
         if (plan.replaces.length) notes.push(`${plan.replaces.length} row(s) re-taken for today`);
         if (plan.incompleteKinds.length) notes.push(`not read in full: ${plan.incompleteKinds.join(", ")}`);
         console.log(accountLine(t.clientName, counts, notes));
         for (const p of kindProblems) problems.push(`${t.clientName}: ${p}`);
+        if (coreFailed.length) {
+          coreFailures.push(`${t.clientName}: ${coreFailed.join(" and ")}`);
+          problems.push(`${t.clientName}: ${coreFailed.join(" and ")} could not be read, so the dashboard shows no ${coreFailed.join(" or ")} for this account. ${kindProblems.find((p) => /^(campaigns|budgets) /.test(p)) ?? ""}`.trim());
+        }
         for (const u of summariseUnrecognised(unrecognised)) problems.push(`${t.clientName}: ${u}`);
 
         if (dryRun) { console.log(`      (dry run, nothing written)`); continue; }
@@ -258,7 +126,8 @@ async function main() {
         await recordSnapshotScan(
           c, t.clientId, PLATFORM, accountId, on, counts, unrecognised.length, true,
           `${counts.read} entities, ${counts.changed} changed, ${counts.opened} new, ${counts.closed} gone`
-          + (plan.incompleteKinds.length ? `; not read in full: ${plan.incompleteKinds.join(",")}` : ""),
+          + (plan.incompleteKinds.length ? `; not read in full: ${plan.incompleteKinds.join(",")}` : "")
+          + (coreFailed.length ? `; COULD NOT READ ${coreFailed.join(",").toUpperCase()}: ${(kindProblems.find((p) => /^(campaigns|budgets) /.test(p)) ?? "").slice(0, 160)}` : ""),
         );
       } catch (e) {
         // One account's credentials or API hiccup must not take the run down
@@ -282,11 +151,15 @@ async function main() {
     if (dryRun) { console.log(`\nDry run complete — nothing written.`); return; }
 
     emitJobSummary(formatJobSummary(
-      { accounts: targets.length, read, entities: totalEntities, changed: totalChanged, unrecognised: totalUnrecognised },
+      { accounts: targets.length, read, entities: totalEntities, changed: totalChanged, unrecognised: totalUnrecognised, core_failed: coreFailures.length },
       read === 0
         ? "no account could be read — no structure was captured for any client today"
-        : `${read}/${targets.length} account(s) read, ${totalEntities} entities, ${totalChanged} changed`,
+        : coreFailures.length
+          ? `CAMPAIGNS OR BUDGETS NOT READ for ${coreFailures.join("; ").slice(0, 120)}`
+          : `${read}/${targets.length} account(s) read, ${totalEntities} entities, ${totalChanged} changed`,
     ));
+    // A run that could not read the campaigns of an account is a failed run for that account, not a green one.
+    if (coreFailures.length) process.exitCode = 1;
   } finally {
     await c.end();
   }

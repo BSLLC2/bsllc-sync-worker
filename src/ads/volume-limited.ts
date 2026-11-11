@@ -163,7 +163,8 @@ export function statusFactsFromRow(row: any): CampaignVolumeFacts {
   const reasonsRaw = row?.campaign?.primary_status_reasons;
   const reasons = reasonsRaw != null ? decodeStatusReasons(reasonsRaw) : primaryStatus != null ? [] : null;
   const shared = row?.campaign_budget?.explicitly_shared;
-  const start = row?.campaign?.start_date;
+  // `campaign.start_date` is gone from the API version in use; the replacement answers "yyyy-MM-dd HH:mm:ss".
+  const start = String(row?.campaign?.start_date_time ?? row?.campaign?.start_date ?? "").slice(0, 10);
   return {
     primaryStatus,
     reasons,

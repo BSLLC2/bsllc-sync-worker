@@ -890,7 +890,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
     const throughDate = today ? addDaysYmd(today, -1) : null;
 
     const statusRows = await tryQuery(customer, "campaign status reasons", `
-      SELECT campaign.id, campaign.primary_status, campaign.primary_status_reasons, campaign.start_date,
+      SELECT campaign.id, campaign.primary_status, campaign.primary_status_reasons, campaign.start_date_time,
              campaign_budget.explicitly_shared
         FROM campaign
        WHERE campaign.status = 'ENABLED'`, log);

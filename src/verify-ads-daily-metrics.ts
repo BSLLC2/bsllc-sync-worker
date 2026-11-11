@@ -25,7 +25,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import {
-  BACKFILL_DAYS, DAILY_GAQL, MAX_DAILY_ROWS, RESTATE_DAYS, addDays, buildDailyRows, coverageAfter,
+  BACKFILL_DAYS, DAILY_GAQL, DAILY_GAQL_CLICK_DATE_ONLY, MAX_DAILY_ROWS, RESTATE_DAYS, addDays, buildDailyRows, coverageAfter,
   ensureDailyTables, hasSpan, loadCoverage, readWindow, recordDailyFailure, storeDaily, type DailyRow,
 } from "./ads/daily-metrics.js";
 
@@ -113,6 +113,38 @@ ok("a fractional conversion is kept (the platform counts fractions)", buildDaily
 ok("a non-finite measure is a nought, never NaN", buildDailyRows([api("1", "2026-10-01", { impressions: "x", clicks: 1, cost_micros: 1, conversions: 1 })])[0]!.impressions === 0);
 ok("an empty read stores nothing", buildDailyRows([]).length === 0);
 
+// ── 4b. Two dates for a conversion ───────────────────────────────────────────
+section("4b. A conversion has two dates, and both are stored");
+ok("the query asks for conversions by the day they happened", /metrics\.conversions_by_conversion_date/.test(DAILY_GAQL));
+ok("the fallback query is the same read without that column and nothing else removed",
+  !/conversions_by_conversion_date/.test(DAILY_GAQL_CLICK_DATE_ONLY) && ["metrics.impressions", "metrics.clicks", "metrics.cost_micros", "metrics.conversions", "segments.date", "campaign.id"].every((m) => DAILY_GAQL_CLICK_DATE_ONLY.includes(m)) && /campaign\.status != 'REMOVED'/.test(DAILY_GAQL_CLICK_DATE_ONLY));
+// THE DPG SHAPE: clicks every day, the click-day column reads nought on the newest days because the conversions are credited back
+// to earlier clicks, and the conversion-day column shows them arriving.
+const late = buildDailyRows([
+  api("1", "2026-10-01", { impressions: 900, clicks: 70, cost_micros: 1, conversions: 3, conversions_by_conversion_date: 1 }),
+  api("1", "2026-10-02", { impressions: 900, clicks: 68, cost_micros: 1, conversions: 0, conversions_by_conversion_date: 2 }),
+  api("1", "2026-10-03", { impressions: 900, clicks: 71, cost_micros: 1, conversions: 0, conversions_by_conversion_date: 3 }),
+]);
+ok("a day's click-day count and conversion-day count are separate numbers", late[2]!.conversions === 0 && late[2]!.conversionsByConvDate === 3);
+ok("the conversion-day column keeps a nought once the account recorded one", late[0]!.conversionsByConvDate === 1);
+const noDate = buildDailyRows([api("1", "2026-10-01", { impressions: 5, clicks: 1, cost_micros: 1, conversions: 2 })]);
+ok("a read that did not ask for the column stores it as unanswered, not nought", noDate[0]!.conversionsByConvDate === null);
+const nonePlanted = buildDailyRows([
+  api("1", "2026-10-01", { impressions: 5, clicks: 1, cost_micros: 1, conversions: 2, conversions_by_conversion_date: 0 }),
+  api("1", "2026-10-02", { impressions: 5, clicks: 1, cost_micros: 1, conversions: 0, conversions_by_conversion_date: 0 }),
+]);
+ok("an account that recorded none by conversion day anywhere stores null there, not nought", nonePlanted.every((r) => r.conversionsByConvDate === null));
+ok("a repeated campaign-day sums the conversion-day count too", buildDailyRows([
+  api("1", "2026-10-01", { impressions: 5, clicks: 1, cost_micros: 1, conversions: 1, conversions_by_conversion_date: 2 }),
+  api("1", "2026-10-01", { impressions: 5, clicks: 1, cost_micros: 1, conversions: 1, conversions_by_conversion_date: 3 }),
+])[0]!.conversionsByConvDate === 5);
+ok("a conversion that arrives on a day with no click still makes a row", buildDailyRows([
+  api("1", "2026-10-01", { impressions: 0, clicks: 0, cost_micros: 0, conversions: 0, conversions_by_conversion_date: 2 }),
+  api("1", "2026-10-02", { impressions: 9, clicks: 3, cost_micros: 1, conversions: 1, conversions_by_conversion_date: 0 }),
+]).some((r) => r.date === "2026-10-01" && r.clicks === 0 && r.conversionsByConvDate === 2));
+ok("the job retries without the column if the platform refuses it, and says so", /DAILY_GAQL_CLICK_DATE_ONLY/.test(codeOnly(read("ads-daily-metrics.ts"))) && /conversions by conversion date not read/.test(read("ads-daily-metrics.ts")));
+ok("the store writes the column (INSERT and the upsert)", /conversions_by_conv_date, synced_at/.test(read("ads/daily-metrics.ts")) && /conversions_by_conv_date = EXCLUDED\.conversions_by_conv_date/.test(read("ads/daily-metrics.ts")));
+
 // ── 5. Coverage ──────────────────────────────────────────────────────────────
 section("5. Coverage: a gap restarts the span");
 ok("the first run starts at its own window", coverageAfter(null, { start: "2026-08-15", end: "2026-10-13" }).coveredFrom === "2026-08-15");
@@ -175,7 +207,7 @@ async function storeSection(url: string) {
     ok("the tables are created, twice, without error", true);
     const ACCT = "1112223334";
     const win = { start: "2026-10-01", end: "2026-10-05" };
-    const mk = (id: string, date: string, imp: number, conv: number | null): DailyRow => ({ campaignId: id, campaignName: `C${id}`, date, impressions: imp, clicks: Math.round(imp / 10), costMicros: imp * 1000, conversions: conv });
+    const mk = (id: string, date: string, imp: number, conv: number | null): DailyRow => ({ campaignId: id, campaignName: `C${id}`, date, impressions: imp, clicks: Math.round(imp / 10), costMicros: imp * 1000, conversions: conv, conversionsByConvDate: conv == null ? null : conv + 1 });
     const first = [mk("1", "2026-10-01", 1000, 2), mk("1", "2026-10-02", 900, null), mk("2", "2026-10-01", 50, 0)];
     const cov = await storeDaily(c, "CL", ACCT, first, win, "first");
     ok("the first store covers its window", cov.coveredFrom === "2026-10-01" && !cov.restarted);
@@ -183,6 +215,8 @@ async function storeSection(url: string) {
     ok("three campaign-days are stored", n === "3");
     const nulls = (await c.query<{ conversions: number | null }>(`SELECT conversions FROM ads_daily_metrics WHERE campaign_id='1' AND metric_date='2026-10-02'`)).rows[0]!;
     ok("a null conversion is stored as NULL, not 0", nulls.conversions === null);
+    const byDate = (await c.query<{ metric_date: string; conversions_by_conv_date: number | null }>(`SELECT metric_date, conversions_by_conv_date FROM ads_daily_metrics WHERE campaign_id='1' ORDER BY metric_date`)).rows;
+    ok("the conversion-day column is stored, and null stays null", byDate[0]!.conversions_by_conv_date === 3 && byDate[1]!.conversions_by_conv_date === null);
     const bigint = (await c.query<{ cost_micros: string }>(`SELECT cost_micros FROM ads_daily_metrics WHERE campaign_id='1' AND metric_date='2026-10-01'`)).rows[0]!;
     ok("money is stored as micros", bigint.cost_micros === "1000000");
 

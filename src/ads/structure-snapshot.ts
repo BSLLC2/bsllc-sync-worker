@@ -461,14 +461,37 @@ export const NO_ACCOUNTS_NOTE =
 // is one the account no longer holds, and reconciliation closes its interval
 // on the date it was last seen, which is the same statement in the right place.
 
+/**
+ * THE CAMPAIGN QUERY IS THE SMALLEST ONE THAT STILL NAMES A CAMPAIGN (2026-11-11).
+ *
+ * This used to be one query carrying `campaign.start_date` and `campaign.end_date`. Those fields do not exist on the
+ * API version the installed library speaks (v23 has `start_date_time` and `end_date_time`), so the whole query was
+ * refused, the campaign kind came back "not read", and the snapshot of a live account held budgets, ad groups and
+ * keywords and NOT ONE CAMPAIGN. Every table the dashboard draws from the campaign list (campaigns, budget pacing,
+ * statistics by day) was empty and the run was green: the problem was one line in a log nobody reads.
+ *
+ * So the query that makes a campaign exist carries nothing optional. Bidding settings and dates are read by queries of
+ * their own and merged on; one of them being refused costs those columns and never the campaigns. `npm run
+ * verify-gaql-fields` checks every selected field against the field list of the installed library.
+ */
 export const CAMPAIGN_GAQL = `
   SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
-         campaign.bidding_strategy_type, campaign.bidding_strategy,
-         campaign.start_date, campaign.end_date,
+         campaign_budget.id, campaign_budget.amount_micros
+    FROM campaign
+   WHERE campaign.status != 'REMOVED'`;
+
+/** What each campaign bids on and at what target. Optional: refused, the campaigns still stand without it. */
+export const CAMPAIGN_BIDDING_GAQL = `
+  SELECT campaign.id, campaign.bidding_strategy_type, campaign.bidding_strategy,
          campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas,
          campaign.maximize_conversions.target_cpa_micros,
-         campaign.maximize_conversion_value.target_roas,
-         campaign_budget.id, campaign_budget.amount_micros
+         campaign.maximize_conversion_value.target_roas
+    FROM campaign
+   WHERE campaign.status != 'REMOVED'`;
+
+/** When each campaign starts and ends. Optional, for the same reason. The API answers "yyyy-MM-dd HH:mm:ss". */
+export const CAMPAIGN_DATES_GAQL = `
+  SELECT campaign.id, campaign.start_date_time, campaign.end_date_time
     FROM campaign
    WHERE campaign.status != 'REMOVED'`;
 
@@ -530,11 +553,41 @@ const tailId = (v: unknown): string | null => {
   return /^\d+$/.test(last) ? last : null;
 };
 
+/** The date part of the API's "yyyy-MM-dd HH:mm:ss", or of a plain date. Null where there is no date. */
+const datePart = (v: unknown): string | null => {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(v ?? "").trim());
+  return m ? m[1]! : null;
+};
+
+/** Bidding settings onto a campaign entity. A field the row does not carry stays what it was (null on a core-only row). */
+export function applyCampaignBidding(e: SnapshotEntity, row: any, report?: UnrecognisedEnum[]): SnapshotEntity {
+  const c = row?.campaign ?? {};
+  e.attrs.bid_strategy_type = snapshotEnum(BID_STRATEGY_TYPE, c.bidding_strategy_type, "campaign.bidding_strategy_type", report);
+  e.attrs.portfolio_strategy_id = tailId(c.bidding_strategy);
+  e.attrs.target_cpa_micros = micros(c.target_cpa?.target_cpa_micros);
+  e.attrs.maximize_conversions_target_cpa_micros = micros(c.maximize_conversions?.target_cpa_micros);
+  e.attrs.target_roas = micros(c.target_roas?.target_roas);
+  e.attrs.maximize_conversion_value_target_roas = micros(c.maximize_conversion_value?.target_roas);
+  return e;
+}
+
+/** Dates onto a campaign entity, under the attribute names the dashboard already reads (`start_date`, `end_date`). */
+export function applyCampaignDates(e: SnapshotEntity, row: any): SnapshotEntity {
+  const c = row?.campaign ?? {};
+  e.attrs.start_date = datePart(c.start_date_time ?? c.start_date);
+  e.attrs.end_date = datePart(c.end_date_time ?? c.end_date);
+  return e;
+}
+
+/**
+ * One campaign. The row may carry only the core fields (the job's own query) or all of them (a single combined row, as the
+ * tests and any older caller pass): the optional groups are applied from whatever the row holds.
+ */
 export function normalizeCampaign(row: any, report?: UnrecognisedEnum[]): SnapshotEntity | null {
   const c = row?.campaign ?? {};
   const id = str(c.id);
   if (!id) return null;
-  return {
+  const e: SnapshotEntity = {
     kind: "campaign",
     entityId: id,
     parentId: null,
@@ -543,19 +596,13 @@ export function normalizeCampaign(row: any, report?: UnrecognisedEnum[]): Snapsh
     status: snapshotEnum(CAMPAIGN_STATUS, c.status, "campaign.status", report),
     attrs: {
       channel_type: snapshotEnum(ADVERTISING_CHANNEL_TYPE, c.advertising_channel_type, "campaign.advertising_channel_type", report),
-      bid_strategy_type: snapshotEnum(BID_STRATEGY_TYPE, c.bidding_strategy_type, "campaign.bidding_strategy_type", report),
-      /** The PORTFOLIO strategy this campaign is on, where it is on one. */
-      portfolio_strategy_id: tailId(c.bidding_strategy),
-      start_date: str(c.start_date),
-      end_date: str(c.end_date),
-      target_cpa_micros: micros(c.target_cpa?.target_cpa_micros),
-      maximize_conversions_target_cpa_micros: micros(c.maximize_conversions?.target_cpa_micros),
-      target_roas: micros(c.target_roas?.target_roas),
-      maximize_conversion_value_target_roas: micros(c.maximize_conversion_value?.target_roas),
       budget_id: str(row?.campaign_budget?.id),
       budget_amount_micros: micros(row?.campaign_budget?.amount_micros),
     },
   };
+  applyCampaignBidding(e, row, report);
+  applyCampaignDates(e, row);
+  return e;
 }
 
 export function normalizeAdGroup(row: any, report?: UnrecognisedEnum[]): SnapshotEntity | null {
