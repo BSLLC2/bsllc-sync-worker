@@ -49,9 +49,17 @@ export interface LeadRow {
   utmMedium: string | null;
   rawJson: string | null;
   submittedAt: Date;
+  /**
+   * The call tracker's own label for the number that rang (v255
+   * `call_tracking_label`), set only on a row that is a tracked phone call.
+   * A call from the Google Ads or Business Profile number carries no gclid and
+   * no utm, so without this it could never make an admission ours.
+   */
+  callLabel?: string | null;
+  isCall?: boolean;
 }
 
-export type LeadEvidence = "gclid" | "utm" | "none";
+export type LeadEvidence = "gclid" | "utm" | "call" | "none";
 
 export interface Lead {
   submittedAt: Date;
@@ -87,12 +95,17 @@ export function buildLeadIndex(rows: LeadRow[]): LeadIndex {
     const hasGclid = !!row.gclid?.trim();
     const utmWords = `${row.utmSource ?? ""} ${row.utmMedium ?? ""}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     const utmAttributable = utmWords.some((w) => ATTRIBUTABLE_UTM_WORDS.has(w));
+    // A tracked call counts only when the tracker's label for the number names a
+    // marketing channel (same word set as utm text). "Direct", a main line or a
+    // blank label prove nothing and never attribute.
+    const callWords = (row.callLabel ?? "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const callAttributable = !!row.isCall && callWords.some((w) => ATTRIBUTABLE_UTM_WORDS.has(w));
     const lead: Lead = {
       submittedAt: row.submittedAt,
       // A typed-in row asserts no channel even when its columns carry one: the
       // export it came from never held a click. Excluded BY PROVENANCE, not by
       // the columns happening to look empty.
-      evidence: typedIn ? "none" : hasGclid ? "gclid" : utmAttributable ? "utm" : "none",
+      evidence: typedIn ? "none" : hasGclid ? "gclid" : utmAttributable ? "utm" : callAttributable ? "call" : "none",
       utm: [row.utmSource, row.utmMedium].filter((x) => x?.trim()).join("/"),
       typedIn,
     };
@@ -145,7 +158,7 @@ export function matchAdmission(index: LeadIndex, keys: { phone: string | null; l
 
 /** How the readout says what a lead proves, in a person's words. */
 export function leadLine(v: LeadVerdict): string {
-  if (v.attributing) return v.attributing.evidence === "gclid" ? "our lead, ad click" : "our lead, captured form";
+  if (v.attributing) return v.attributing.evidence === "gclid" ? "our lead, ad click" : v.attributing.evidence === "call" ? "our lead, tracked call" : "our lead, captured form";
   if (v.known?.typedIn) return "our lead, typed in";
   if (v.known) return "our lead, no tracking";
   return "—";

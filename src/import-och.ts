@@ -46,14 +46,15 @@ async function loadLeadIndex(databaseUrl: string, clientSlug: string): Promise<L
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null; raw_json: string | null; submitted_at: Date }>(
-      `SELECT phone, dob, last_name, gclid, utm_source, utm_medium, raw_json, submitted_at FROM web_inquiries WHERE client_slug = $1`,
+    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null; raw_json: string | null; submitted_at: Date; call_tracking_label: string | null; form_name: string | null }>(
+      `SELECT phone, dob, last_name, gclid, utm_source, utm_medium, raw_json, submitted_at, call_tracking_label, form_name FROM web_inquiries WHERE client_slug = $1`,
       [clientSlug],
     );
     const index = buildLeadIndex(rows.map((r) => ({
       phone: r.phone, dob: r.dob, lastName: r.last_name, gclid: r.gclid,
       utmSource: r.utm_source, utmMedium: r.utm_medium, rawJson: r.raw_json,
       submittedAt: new Date(r.submitted_at),
+      callLabel: r.call_tracking_label, isCall: /^phone:/i.test(r.form_name ?? ""),
     })));
     if (index.counts.typedIn) console.log(`  ${backfillExclusionLine(index.counts.typedIn)}`);
     return index;

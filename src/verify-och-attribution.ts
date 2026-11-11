@@ -128,6 +128,18 @@ console.log("\n5. An admission with no recognised Referent is still ours when a 
   // Nothing at all reads as nothing at all.
   ok("no lead reads as a dash", leadLine(matchAdmission(buildLeadIndex([]), keys, admittedOn)) === "—");
 
+  // A tracked call: only the tracker's label for the number can make it ours.
+  const call = (label: string | null, over: Partial<LeadRow> = {}) => lead({ isCall: true, callLabel: label, ...over });
+  const adCall = buildLeadIndex([call("Google Ads - Main")]);
+  ok("a call on the Google Ads number makes an admission ours", matchAdmission(adCall, keys, admittedOn).attributing !== null && leadLine(matchAdmission(adCall, keys, admittedOn)) === "our lead, tracked call");
+  const gbpCall = buildLeadIndex([call("GBP North")]);
+  ok("  …and so does the Business Profile number", matchAdmission(gbpCall, keys, admittedOn).attributing !== null);
+  const directCall = buildLeadIndex([call("Direct")]);
+  ok("a call on a Direct or unlabelled number never attributes", matchAdmission(directCall, keys, admittedOn).attributing === null && matchAdmission(buildLeadIndex([call(null)]), keys, admittedOn).attributing === null);
+  ok("  …but it is still a lead we hold", matchAdmission(directCall, keys, admittedOn).known !== null);
+  ok("a label on a row that is not a call is ignored", matchAdmission(buildLeadIndex([lead({ isCall: false, callLabel: "Google Ads" })]), keys, admittedOn).attributing === null);
+  ok("a typed-in call row never attributes", matchAdmission(buildLeadIndex([call("Google Ads", { rawJson: JSON.stringify({ source: "elementor-log-export" }) })]), keys, admittedOn).attributing === null);
+
   // The window: a lead has to come first, and not from another era.
   const after = buildLeadIndex([lead({ gclid: "Cj0KEQ", submittedAt: new Date(Date.UTC(2026, 9, 30)) })]);
   ok("a lead captured after the admission does not explain it", matchAdmission(after, keys, admittedOn).attributing === null);
