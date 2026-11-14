@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import { credsFromEnv, type DfsCreds } from "./dataforseo.js";
+import { JWT } from "google-auth-library";
 
 /**
  * READ-ONLY organic growth probe through DataForSEO. Writes nothing anywhere. A cost cap
@@ -123,6 +124,36 @@ async function main() {
             for (const it of r?.items ?? []) console.log(`### KWS ${J({ seed: s, k: it.keyword, vol: n(it.keyword_info?.search_volume), cpc: n(it.keyword_info?.cpc), kd: n(it.keyword_properties?.keyword_difficulty), intent: it.search_intent_info?.main_intent ?? null })}`);
           } catch (e) { console.log(`### PHASEERR ${J({ phase: "expand", seed: s, err: trim(String(e), 200) })}`); }
         }
+      }
+      if (ph === "gsc") {
+        // Read-only Search Console: which properties the service account can read, then
+        // per-query and per-page clicks for the last 90 days and the 90 before.
+        try {
+          const sa = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "{}");
+          const jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: ["https://www.googleapis.com/auth/webmasters.readonly"] });
+          const { token } = await jwt.getAccessToken();
+          const H = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+          const sl: any = await (await fetch("https://searchconsole.googleapis.com/webmasters/v3/sites", { headers: H })).json();
+          const sites: string[] = (sl.siteEntry ?? []).map((e: any) => e.siteUrl);
+          console.log(`### GSCSITES ${J(sites.filter((u) => /bsllc/i.test(u)).concat(sites.length ? [`(total readable: ${sites.length})`] : []))}`);
+          const hit = sites.find((u) => u === "sc-domain:bsllc.biz") || sites.find((u) => /bsllc\.biz/i.test(u));
+          if (!hit) { console.log(`### PHASEERR ${J({ phase: "gsc", err: "no readable bsllc.biz property for this service account" })}`); }
+          else {
+            const day = (d: number) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
+            const q = async (dimensions: string[], start: string, end: string, rowLimit = 250) => {
+              const r = await fetch(`https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(hit)}/searchAnalytics/query`, { method: "POST", headers: H, body: JSON.stringify({ startDate: start, endDate: end, dimensions, rowLimit }) });
+              if (!r.ok) throw new Error(`GSC ${r.status} ${trim(await r.text(), 160)}`);
+              return ((await r.json()) as any).rows ?? [];
+            };
+            const cur: [string, string] = [day(93), day(3)], prev: [string, string] = [day(186), day(94)];
+            const tot = async (a: [string, string]) => { const r = await q([], a[0], a[1], 1); return r[0] ? { c: r[0].clicks, i: r[0].impressions, ctr: r[0].ctr, pos: r[0].position } : null; };
+            console.log(`### GSCTOT ${J({ site: hit, cur, prev, now: await tot(cur), before: await tot(prev) })}`);
+            for (const [lab, rng] of [["cur", cur], ["prev", prev]] as const) {
+              for (const row of await q(["page"], rng[0], rng[1], 100)) console.log(`### GSCPAGE ${J({ w: lab, u: trim(row.keys[0], 110), c: row.clicks, i: row.impressions, p: Math.round(row.position * 10) / 10 })}`);
+            }
+            for (const row of await q(["query"], cur[0], cur[1], 250)) console.log(`### GSCQ ${J({ k: trim(row.keys[0], 80), c: row.clicks, i: row.impressions, p: Math.round(row.position * 10) / 10 })}`);
+          }
+        } catch (e) { console.log(`### PHASEERR ${J({ phase: "gsc", err: trim(String(e), 220) })}`); }
       }
       if (ph === "serp") {
         for (const q of PARAMS.serps || []) {
