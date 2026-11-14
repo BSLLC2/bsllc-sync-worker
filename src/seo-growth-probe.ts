@@ -118,17 +118,22 @@ async function main() {
           for (const it of r?.items ?? []) console.log(`### KWO ${J({ k: it.keyword, vol: n(it.keyword_info?.search_volume), cpc: n(it.keyword_info?.cpc), kd: n(it.keyword_properties?.keyword_difficulty), intent: it.search_intent_info?.main_intent ?? null, trend: it.keyword_info?.monthly_searches ? it.keyword_info.monthly_searches.slice(0, 12).map((m: any) => m.search_volume) : null })}`);
         }
         for (const s of PARAMS.expand || []) {
-          const r = await post(creds, "/dataforseo_labs/google/keyword_suggestions/live", [{ keyword: s, location_code: LOC, language_code: "en", limit: Number(PARAMS.expandLimit || 60), order_by: ["keyword_info.search_volume,desc"], filters: [["keyword_info.search_volume", ">=", 20]] }]);
-          for (const it of r?.items ?? []) console.log(`### KWS ${J({ seed: s, k: it.keyword, vol: n(it.keyword_info?.search_volume), cpc: n(it.keyword_info?.cpc), kd: n(it.keyword_properties?.keyword_difficulty), intent: it.search_intent_info?.main_intent ?? null })}`);
+          try {
+            const r = await post(creds, "/dataforseo_labs/google/keyword_suggestions/live", [{ keyword: s, location_code: LOC, language_code: "en", limit: Number(PARAMS.expandLimit || 60), order_by: ["keyword_info.search_volume,desc"], filters: [["keyword_info.search_volume", ">=", 20]] }]);
+            for (const it of r?.items ?? []) console.log(`### KWS ${J({ seed: s, k: it.keyword, vol: n(it.keyword_info?.search_volume), cpc: n(it.keyword_info?.cpc), kd: n(it.keyword_properties?.keyword_difficulty), intent: it.search_intent_info?.main_intent ?? null })}`);
+          } catch (e) { console.log(`### PHASEERR ${J({ phase: "expand", seed: s, err: trim(String(e), 200) })}`); }
         }
       }
       if (ph === "serp") {
         for (const q of PARAMS.serps || []) {
-          const body: any = { keyword: q, language_code: "en", device: "desktop", os: "windows", depth: 10 };
-          if (PARAMS.serpLocation) body.location_name = PARAMS.serpLocation; else body.location_code = LOC;
-          const r = await post(creds, "/serp/google/organic/live/advanced", [body]);
-          const items = (r?.items ?? []);
-          console.log(`### SERP ${J({ q, loc: PARAMS.serpLocation || LOC, types: [...new Set(items.map((x: any) => x.type))], org: items.filter((x: any) => x.type === "organic").slice(0, 10).map((x: any) => ({ p: x.rank_group, d: x.domain, t: trim(x.title, 70) })), paa: items.filter((x: any) => x.type === "people_also_ask").flatMap((x: any) => (x.items || []).map((i: any) => trim(i.title, 90))).slice(0, 6), pack: items.filter((x: any) => x.type === "local_pack").flatMap((x: any) => (x.items || []).map((i: any) => trim(i.title, 50))).slice(0, 5), aio: items.some((x: any) => x.type === "ai_overview") })}`);
+          try {
+            const body: any = { keyword: q, language_code: "en", device: "desktop", os: "windows", depth: 20 };
+            if (PARAMS.serpLocation) body.location_name = PARAMS.serpLocation; else body.location_code = LOC;
+            let r: any = null;
+            for (let a = 0; a < 3 && !r; a++) { try { r = await post(creds, "/serp/google/organic/live/advanced", [body]); } catch (e) { if (a === 2) throw e; await sleep(4000); } }
+            const items = (r?.items ?? []);
+            console.log(`### SERP ${J({ q, loc: PARAMS.serpLocation || LOC, types: [...new Set(items.map((x: any) => x.type))], org: items.filter((x: any) => x.type === "organic").slice(0, 20).map((x: any) => ({ p: x.rank_group, d: x.domain, u: trim(x.url, 100), t: trim(x.title, 70) })), paa: items.filter((x: any) => x.type === "people_also_ask").flatMap((x: any) => (x.items || []).map((i: any) => trim(i.title, 90))).slice(0, 6), pack: items.filter((x: any) => x.type === "local_pack").flatMap((x: any) => (x.items || []).map((i: any) => trim(i.title, 50))).slice(0, 5), aio: items.some((x: any) => x.type === "ai_overview") })}`);
+          } catch (e) { console.log(`### PHASEERR ${J({ phase: "serp", q, err: trim(String(e), 200) })}`); }
         }
       }
     } catch (e) { console.log(`### PHASEERR ${J({ phase: ph, err: trim(String(e), 300) })}`); }
