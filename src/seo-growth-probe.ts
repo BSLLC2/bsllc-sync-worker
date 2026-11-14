@@ -257,6 +257,42 @@ async function main() {
           }
         } catch (e) { console.log(`### PHASEERR ${J({ phase: "gsctrend", err: trim(String(e), 220) })}`); }
       }
+      if (ph === "inspect") {
+        // Read-only Search Console URL Inspection plus month-by-month rows for exact queries.
+        try {
+          const sa = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "{}");
+          const jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: ["https://www.googleapis.com/auth/webmasters.readonly"] });
+          const { token } = await jwt.getAccessToken();
+          const H = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+          const site = "sc-domain:bsllc.biz";
+          for (const u of PARAMS.urls || ["https://bsllc.biz/"]) {
+            try {
+              const r = await fetch("https://searchconsole.googleapis.com/v1/urlInspection/index:inspect", { method: "POST", headers: H, body: JSON.stringify({ inspectionUrl: u, siteUrl: site }) });
+              const j: any = await r.json();
+              const ix = j?.inspectionResult?.indexStatusResult ?? {};
+              console.log(`### INSPECT ${J({ u, http: r.status, verdict: ix.verdict, cov: ix.coverageState, robots: ix.robotsTxtState, indexing: ix.indexingState, fetch: ix.pageFetchState, gCanon: ix.googleCanonical, uCanon: ix.userCanonical, crawled: ix.lastCrawlTime, as: ix.crawledAs, refs: (ix.referringUrls ?? []).length, sitemaps: (ix.sitemap ?? []).length, rich: (j?.inspectionResult?.richResultsResult?.detectedItems ?? []).map((d: any) => d.richResultType), mob: j?.inspectionResult?.mobileUsabilityResult?.verdict, err: j?.error?.message ? trim(j.error.message, 120) : undefined })}`);
+            } catch (e) { console.log(`### PHASEERR ${J({ phase: "inspect", u, err: trim(String(e), 160) })}`); }
+          }
+          const day = (d: number) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
+          const q = async (body: any) => {
+            const r = await fetch(`https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}/searchAnalytics/query`, { method: "POST", headers: H, body: JSON.stringify(body) });
+            if (!r.ok) throw new Error(`GSC ${r.status} ${trim(await r.text(), 160)}`);
+            return ((await r.json()) as any).rows ?? [];
+          };
+          for (const kw of PARAMS.exact || []) {
+            for (const dev of ["DESKTOP", "MOBILE"]) {
+              const rows = await q({ startDate: day(485), endDate: day(3), dimensions: ["date"], rowLimit: 600, dimensionFilterGroups: [{ filters: [{ dimension: "query", operator: "equals", expression: kw }, { dimension: "device", operator: "equals", expression: dev }] }] });
+              const mo = new Map<string, { c: number; i: number; ps: number }>();
+              for (const r of rows) { const k = String(r.keys[0]).slice(2, 7); const w = mo.get(k) ?? { c: 0, i: 0, ps: 0 }; w.c += r.clicks; w.i += r.impressions; w.ps += r.position * r.impressions; mo.set(k, w); }
+              console.log(`### GSCEXACT ${J({ kw, dev, m: [...mo.entries()].sort().map(([k, v]) => [k, v.c, v.i, v.i ? Math.round((v.ps / v.i) * 10) / 10 : null]) })}`);
+            }
+            const pg = await q({ startDate: day(93), endDate: day(3), dimensions: ["page"], rowLimit: 10, dimensionFilterGroups: [{ filters: [{ dimension: "query", operator: "equals", expression: kw }] }] });
+            console.log(`### GSCEXACTPG ${J({ kw, rows: pg.map((r: any) => [trim(r.keys[0], 70), r.clicks, r.impressions, Math.round(r.position * 10) / 10]) })}`);
+            const ap = await q({ startDate: day(93), endDate: day(3), dimensions: ["searchAppearance"], rowLimit: 10, dimensionFilterGroups: [{ filters: [{ dimension: "query", operator: "equals", expression: kw }] }] }).catch(() => []);
+            if (ap.length) console.log(`### GSCEXACTAP ${J({ kw, rows: ap.map((r: any) => [r.keys[0], r.clicks, r.impressions]) })}`);
+          }
+        } catch (e) { console.log(`### PHASEERR ${J({ phase: "inspect", err: trim(String(e), 220) })}`); }
+      }
       if (ph === "local") {
         // Read-only: the live Google Business Profile record and Google Maps results around PARAMS.coord.
         for (const kw of PARAMS.biz || []) {
@@ -278,11 +314,19 @@ async function main() {
       if (ph === "serp") {
         for (const q of PARAMS.serps || []) {
           try {
-            const body: any = { keyword: q, language_code: "en", device: "desktop", os: "windows", depth: 20 };
+            const body: any = { keyword: q, language_code: "en", device: PARAMS.device === "mobile" ? "mobile" : "desktop", os: PARAMS.device === "mobile" ? "android" : "windows", depth: Number(PARAMS.depth || 20) };
             if (PARAMS.serpLocation) body.location_name = PARAMS.serpLocation; else body.location_code = LOC;
             let r: any = null;
             for (let a = 0; a < 3 && !r; a++) { try { r = await post(creds, "/serp/google/organic/live/advanced", [body]); } catch (e) { if (a === 2) throw e; await sleep(4000); } }
             const items = (r?.items ?? []);
+            if (PARAMS.brief) {
+              const hay = (x: any) => JSON.stringify(x).toLowerCase();
+              const dom = (x: any) => String(x.breadcrumb || x.domain || "").replace(/^https?:\/\//, "").split(" ")[0];
+              const mine = items.filter((x: any) => /bsllc\.biz/.test(hay(x))).map((x: any) => [x.type, x.rank_group, x.rank_absolute, trim(x.title || x.breadcrumb, 50), trim(x.breadcrumb, 50)]);
+              const kg = items.filter((x: any) => x.type === "knowledge_graph").map((x: any) => [trim(x.title, 40), trim(x.sub_title, 40), x.url ? trim(x.url, 60) : null, /bsllc\.biz/.test(hay(x))]);
+              console.log(`### SERPB ${J({ q, loc: PARAMS.serpLocation || LOC, dev: body.device, n: items.length, types: [...new Set(items.map((x: any) => x.type))], mine, kg, org: items.filter((x: any) => x.type === "organic").slice(0, Number(PARAMS.show || 10)).map((x: any) => [x.rank_group, dom(x), trim(x.title, 46)]) })}`);
+              continue;
+            }
             console.log(`### SERP ${J({ q, loc: PARAMS.serpLocation || LOC, types: [...new Set(items.map((x: any) => x.type))], org: items.filter((x: any) => x.type === "organic").slice(0, 20).map((x: any) => ({ p: x.rank_group, d: x.domain, w: x.website_name, b: trim(x.breadcrumb, 70), u: trim(x.url, 100), t: trim(x.title, 70) })), paa: items.filter((x: any) => x.type === "people_also_ask").flatMap((x: any) => (x.items || []).map((i: any) => trim(i.title, 90))).slice(0, 6), pack: items.filter((x: any) => x.type === "local_pack").map((x: any) => [trim(x.title, 50), x.domain, x.rating?.value]).slice(0, 5), aio: items.some((x: any) => x.type === "ai_overview") })}`);
           } catch (e) { console.log(`### PHASEERR ${J({ phase: "serp", q, err: trim(String(e), 200) })}`); }
         }
