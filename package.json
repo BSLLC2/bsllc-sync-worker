@@ -260,7 +260,8 @@
     "dpg-backlinks": "tsx src/dpg-backlinks.ts",
     "dpg-aeo-probe": "tsx src/dpg-aeo-probe.ts",
     "hightec-aeo-probe": "tsx src/hightec-aeo-probe.ts",
-    "hightec-local-probe": "tsx src/hightec-local-probe.ts"
+    "hightec-local-probe": "tsx src/hightec-local-probe.ts",
+    "seo-growth-probe": "tsx src/seo-growth-probe.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

@@ -1,0 +1,43 @@
+name: SEO growth probe (READ ONLY)
+
+# DataForSEO only. Ranked keywords, competitors, gaps, backlinks, keyword ideas and SERPs for a
+# target domain. Writes nothing anywhere. A cost cap stops new calls.
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: "comma list: ranked | overview | competitors | gap | backlinks | keywords | serp"
+        required: true
+        default: "ranked,overview,competitors,backlinks"
+      cost_cap:
+        description: "USD cap; no new call starts once spend passes it"
+        required: true
+        default: "3"
+      params:
+        description: "Optional JSON (target, compare, competitors, seeds, expand, serps, serpLocation)"
+        required: false
+        default: "{}"
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Run probe
+        env:
+          PHASE: ${{ inputs.phase }}
+          COST_CAP: ${{ inputs.cost_cap }}
+          PARAMS: ${{ inputs.params }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+        run: npm run seo-growth-probe 2>&1 | tee seo-growth-probe.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: seo-growth-probe
+          path: seo-growth-probe.txt
