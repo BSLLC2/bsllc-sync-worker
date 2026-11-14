@@ -155,6 +155,38 @@ async function main() {
           }
         } catch (e) { console.log(`### PHASEERR ${J({ phase: "gsc", err: trim(String(e), 220) })}`); }
       }
+      if (ph === "ga4") {
+        // Read-only analytics: find the BS LLC property, then organic vs other sessions and key events by landing page.
+        try {
+          const sa = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "{}");
+          const jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: ["https://www.googleapis.com/auth/analytics.readonly"] });
+          const { token } = await jwt.getAccessToken();
+          const H = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+          const sr = await fetch("https://analyticsadmin.googleapis.com/v1beta/accountSummaries?pageSize=200", { headers: H });
+          if (!sr.ok) throw new Error(`admin ${sr.status} ${trim(await sr.text(), 200)}`);
+          const sums: any[] = ((await sr.json()) as any).accountSummaries ?? [];
+          const props: { id: string; name: string; acct: string }[] = [];
+          for (const a of sums) for (const pr of a.propertySummaries ?? []) props.push({ id: String(pr.property).replace("properties/", ""), name: pr.displayName, acct: a.displayName });
+          console.log(`### GA4PROPS ${J(props.slice(0, 40))}`);
+          const hit = props.find((x) => /bs\s*llc|bsllc/i.test(x.name)) || props.find((x) => /bsllc/i.test(x.acct));
+          if (!hit) { console.log(`### PHASEERR ${J({ phase: "ga4", err: "no property named like BS LLC readable by this service account" })}`); }
+          else {
+            const day = (d: number) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
+            const run = async (body: any) => {
+              const r = await fetch(`https://analyticsdata.googleapis.com/v1beta/properties/${hit.id}:runReport`, { method: "POST", headers: H, body: JSON.stringify(body) });
+              if (!r.ok) throw new Error(`data ${r.status} ${trim(await r.text(), 200)}`);
+              return ((await r.json()) as any).rows ?? [];
+            };
+            const dr = [{ startDate: day(90), endDate: day(1) }];
+            const chan = await run({ dateRanges: dr, dimensions: [{ name: "sessionDefaultChannelGroup" }], metrics: [{ name: "sessions" }, { name: "engagedSessions" }, { name: "keyEvents" }], limit: 20 });
+            console.log(`### GA4CHAN ${J({ prop: hit.id, name: hit.name, rows: chan.map((r: any) => ({ ch: r.dimensionValues[0].value, s: +r.metricValues[0].value, e: +r.metricValues[1].value, k: +r.metricValues[2].value })) })}`);
+            const land = await run({ dateRanges: dr, dimensions: [{ name: "landingPage" }], metrics: [{ name: "sessions" }, { name: "engagedSessions" }, { name: "keyEvents" }], dimensionFilter: { filter: { fieldName: "sessionDefaultChannelGroup", stringFilter: { value: "Organic Search" } } }, orderBys: [{ metric: { metricName: "sessions" }, desc: true }], limit: 40 });
+            for (const r of land) console.log(`### GA4LAND ${J({ u: trim(r.dimensionValues[0].value, 90), s: +r.metricValues[0].value, e: +r.metricValues[1].value, k: +r.metricValues[2].value })}`);
+            const ev = await run({ dateRanges: dr, dimensions: [{ name: "eventName" }], metrics: [{ name: "keyEvents" }, { name: "eventCount" }], orderBys: [{ metric: { metricName: "eventCount" }, desc: true }], limit: 25 });
+            console.log(`### GA4EVENTS ${J(ev.map((r: any) => ({ n: r.dimensionValues[0].value, k: +r.metricValues[0].value, c: +r.metricValues[1].value })))}`);
+          }
+        } catch (e) { console.log(`### PHASEERR ${J({ phase: "ga4", err: trim(String(e), 260) })}`); }
+      }
       if (ph === "serp") {
         for (const q of PARAMS.serps || []) {
           try {
