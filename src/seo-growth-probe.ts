@@ -162,13 +162,17 @@ async function main() {
           const jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: ["https://www.googleapis.com/auth/analytics.readonly"] });
           const { token } = await jwt.getAccessToken();
           const H = { authorization: `Bearer ${token}`, "content-type": "application/json" };
-          const sr = await fetch("https://analyticsadmin.googleapis.com/v1beta/accountSummaries?pageSize=200", { headers: H });
-          if (!sr.ok) throw new Error(`admin ${sr.status} ${trim(await sr.text(), 200)}`);
-          const sums: any[] = ((await sr.json()) as any).accountSummaries ?? [];
           const props: { id: string; name: string; acct: string }[] = [];
-          for (const a of sums) for (const pr of a.propertySummaries ?? []) props.push({ id: String(pr.property).replace("properties/", ""), name: pr.displayName, acct: a.displayName });
-          console.log(`### GA4PROPS ${J(props.slice(0, 40))}`);
-          const hit = props.find((x) => /bs\s*llc|bsllc/i.test(x.name)) || props.find((x) => /bsllc/i.test(x.acct));
+          const given = String((PARAMS as any).property || "").replace(/\D/g, "");
+          if (given) props.push({ id: given, name: "bsllc (given)", acct: "" });
+          else {
+            const sr = await fetch("https://analyticsadmin.googleapis.com/v1beta/accountSummaries?pageSize=200", { headers: H });
+            if (!sr.ok) throw new Error(`admin ${sr.status} ${trim(await sr.text(), 120)} (pass params {"property":"<GA4 property id>"} to skip the listing)`);
+            const sums: any[] = ((await sr.json()) as any).accountSummaries ?? [];
+            for (const a of sums) for (const pr of a.propertySummaries ?? []) props.push({ id: String(pr.property).replace("properties/", ""), name: pr.displayName, acct: a.displayName });
+            console.log(`### GA4PROPS ${J(props.slice(0, 40))}`);
+          }
+          const hit = given ? props[0] : (props.find((x) => /bs\s*llc|bsllc/i.test(x.name)) || props.find((x) => /bsllc/i.test(x.acct)));
           if (!hit) { console.log(`### PHASEERR ${J({ phase: "ga4", err: "no property named like BS LLC readable by this service account" })}`); }
           else {
             const day = (d: number) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
