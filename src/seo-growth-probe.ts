@@ -13,6 +13,8 @@ import { JWT } from "google-auth-library";
  *   backlinks    backlink summary, referring domains and anchors for the target and PARAMS.compare
  *   keywords     keyword overview for PARAMS.seeds plus suggestions for PARAMS.expand
  *   serp         live Google top 10 for PARAMS.serps from PARAMS.serpLocation
+ *   gsctrend     weekly Search Console history for the homepage, tagged links, brand and city queries
+ *   local        live Business Profile record for PARAMS.biz and Google Maps results for PARAMS.maps near PARAMS.coord
  * PARAMS (JSON): target, compare[], competitors[], seeds[], expand[], serps[], serpLocation, location (code), limit.
  */
 const PHASES = (process.env.PHASE || "ranked").toLowerCase().split(",").map((s) => s.trim());
@@ -188,8 +190,90 @@ async function main() {
             for (const r of land) console.log(`### GA4LAND ${J({ u: trim(r.dimensionValues[0].value, 90), s: +r.metricValues[0].value, e: +r.metricValues[1].value, k: +r.metricValues[2].value })}`);
             const ev = await run({ dateRanges: dr, dimensions: [{ name: "eventName" }], metrics: [{ name: "keyEvents" }, { name: "eventCount" }], orderBys: [{ metric: { metricName: "eventCount" }, desc: true }], limit: 25 });
             console.log(`### GA4EVENTS ${J(ev.map((r: any) => ({ n: r.dimensionValues[0].value, k: +r.metricValues[0].value, c: +r.metricValues[1].value })))}`);
+            // Form funnel by page and by week, and organic homepage sessions by week.
+            const formF = { filter: { fieldName: "eventName", inListFilter: { values: ["form_start", "form_submit", "form_success", "generate_lead"] } } };
+            const fp = await run({ dateRanges: dr, dimensions: [{ name: "eventName" }, { name: "pagePath" }], metrics: [{ name: "eventCount" }, { name: "totalUsers" }], dimensionFilter: formF, orderBys: [{ metric: { metricName: "eventCount" }, desc: true }], limit: 60 });
+            console.log(`### GA4FORMPAGE ${J(fp.map((r: any) => [r.dimensionValues[0].value, trim(r.dimensionValues[1].value, 60), +r.metricValues[0].value, +r.metricValues[1].value]))}`);
+            const fc = await run({ dateRanges: dr, dimensions: [{ name: "eventName" }, { name: "sessionDefaultChannelGroup" }], metrics: [{ name: "eventCount" }, { name: "totalUsers" }], dimensionFilter: formF, limit: 60 });
+            console.log(`### GA4FORMCHAN ${J(fc.map((r: any) => [r.dimensionValues[0].value, r.dimensionValues[1].value, +r.metricValues[0].value, +r.metricValues[1].value]))}`);
+            const long = [{ startDate: day(420), endDate: day(1) }];
+            const hw = await run({ dateRanges: long, dimensions: [{ name: "yearMonth" }, { name: "sessionSourceMedium" }], metrics: [{ name: "sessions" }, { name: "keyEvents" }], dimensionFilter: { filter: { fieldName: "sessionSourceMedium", stringFilter: { matchType: "PARTIAL_REGEXP", value: "google / organic|gmb|bing / organic" } } }, orderBys: [{ dimension: { dimensionName: "yearMonth" } }], limit: 200 });
+            console.log(`### GA4MONTHLY ${J(hw.map((r: any) => [r.dimensionValues[0].value, r.dimensionValues[1].value, +r.metricValues[0].value, +r.metricValues[1].value]))}`);
+            const camp = await run({ dateRanges: long, dimensions: [{ name: "yearMonth" }, { name: "sessionCampaignName" }], metrics: [{ name: "sessions" }, { name: "keyEvents" }], dimensionFilter: { filter: { fieldName: "sessionCampaignName", stringFilter: { matchType: "CONTAINS", value: "local_listing" } } }, orderBys: [{ dimension: { dimensionName: "yearMonth" } }], limit: 60 });
+            console.log(`### GA4GMBCAMP ${J(camp.map((r: any) => [r.dimensionValues[0].value, r.dimensionValues[1].value, +r.metricValues[0].value, +r.metricValues[1].value]))}`);
           }
         } catch (e) { console.log(`### PHASEERR ${J({ phase: "ga4", err: trim(String(e), 260) })}`); }
+      }
+      if (ph === "gsctrend") {
+        // Read-only Search Console history: weekly clicks and impressions for the homepage, the
+        // Business Profile tagged link, brand and Cincinnati queries, plus homepage queries for two windows.
+        try {
+          const sa = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "{}");
+          const jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: ["https://www.googleapis.com/auth/webmasters.readonly"] });
+          const { token } = await jwt.getAccessToken();
+          const H = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+          const site = "sc-domain:bsllc.biz";
+          const day = (d: number) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
+          const q = async (body: any) => {
+            const r = await fetch(`https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}/searchAnalytics/query`, { method: "POST", headers: H, body: JSON.stringify(body) });
+            if (!r.ok) throw new Error(`GSC ${r.status} ${trim(await r.text(), 160)}`);
+            return ((await r.json()) as any).rows ?? [];
+          };
+          const f = (dimension: string, operator: string, expression: string) => ({ dimensionFilterGroups: [{ filters: [{ dimension, operator, expression }] }] });
+          const start = day(485), end = day(3);
+          const series: [string, any][] = [
+            ["site", {}],
+            ["home", f("page", "equals", "https://bsllc.biz/")],
+            ["gmbtag", f("page", "contains", "utm_source=gmb")],
+            ["anytag", f("page", "contains", "utm_")],
+            ["brand", f("query", "includingRegex", "bs ?llc|bsllc|b\\.s\\. ?llc")],
+            ["cincy", f("query", "contains", "cincinnati")],
+            ["nearme", f("query", "contains", "near me")],
+          ];
+          for (const [name, flt] of series) {
+            const rows = await q({ startDate: start, endDate: end, dimensions: ["date"], rowLimit: 600, ...flt });
+            const wk = new Map<string, { c: number; i: number; ps: number }>();
+            for (const r of rows) {
+              const d = new Date(r.keys[0] + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+              const k = d.toISOString().slice(0, 10); const w = wk.get(k) ?? { c: 0, i: 0, ps: 0 };
+              w.c += r.clicks; w.i += r.impressions; w.ps += r.position * r.impressions; wk.set(k, w);
+            }
+            console.log(`### GSCWK ${J({ s: name, w: [...wk.entries()].sort().map(([k, v]) => [k.slice(2), v.c, v.i, v.i ? Math.round((v.ps / v.i) * 10) / 10 : null]) })}`);
+          }
+          const wins: [string, string, string][] = [["cur", day(93), day(3)], ["prev", day(186), day(94)], ["yago", day(458), day(368)]];
+          for (const [lab, a, b] of wins) {
+            for (const [pn, flt] of [["home", f("page", "equals", "https://bsllc.biz/")], ["gmbtag", f("page", "contains", "utm_source=gmb")]] as [string, any][]) {
+              const rows = await q({ startDate: a, endDate: b, dimensions: ["query"], rowLimit: 60, ...flt });
+              console.log(`### GSCPQ ${J({ w: lab, pg: pn, rows: rows.map((r: any) => [trim(r.keys[0], 60), r.clicks, r.impressions, Math.round(r.position * 10) / 10]) })}`);
+              const dv = await q({ startDate: a, endDate: b, dimensions: ["device"], rowLimit: 5, ...flt });
+              console.log(`### GSCPDEV ${J({ w: lab, pg: pn, rows: dv.map((r: any) => [r.keys[0], r.clicks, r.impressions, Math.round(r.position * 10) / 10]) })}`);
+            }
+            const tot = await q({ startDate: a, endDate: b, dimensions: [], rowLimit: 1 });
+            console.log(`### GSCWIN ${J({ w: lab, a, b, c: tot[0]?.clicks, i: tot[0]?.impressions, p: tot[0]?.position })}`);
+            for (const [qn, flt] of [["brand", f("query", "includingRegex", "bs ?llc|bsllc|b\\.s\\. ?llc")], ["cincy", f("query", "contains", "cincinnati")]] as [string, any][]) {
+              const rows = await q({ startDate: a, endDate: b, dimensions: ["query"], rowLimit: 40, ...flt });
+              console.log(`### GSCQSET ${J({ w: lab, set: qn, rows: rows.map((r: any) => [trim(r.keys[0], 60), r.clicks, r.impressions, Math.round(r.position * 10) / 10]) })}`);
+            }
+          }
+        } catch (e) { console.log(`### PHASEERR ${J({ phase: "gsctrend", err: trim(String(e), 220) })}`); }
+      }
+      if (ph === "local") {
+        // Read-only: the live Google Business Profile record and Google Maps results around PARAMS.coord.
+        for (const kw of PARAMS.biz || []) {
+          try {
+            const r: any = await post(creds, "/business_data/google/my_business_info/live", [{ keyword: kw, location_name: PARAMS.serpLocation || "Cincinnati,Ohio,United States", language_code: "en" }]);
+            for (const it of (r?.items ?? []).slice(0, 3)) console.log(`### GBP ${J({ kw, title: it.title, cat: it.category, more: it.additional_categories, addr: it.address, url: it.url, domain: it.domain, phone: it.phone, claimed: it.is_claimed, rating: it.rating?.value, votes: it.rating?.votes_count, cid: it.cid, place: it.place_id, lat: it.latitude, lng: it.longitude, photos: it.total_photos, desc: trim(it.description, 300), status: it.work_time?.work_hours?.current_status })}`);
+            if (!(r?.items ?? []).length) console.log(`### GBP ${J({ kw, none: true })}`);
+          } catch (e) { console.log(`### PHASEERR ${J({ phase: "local-gbp", kw, err: trim(String(e), 200) })}`); }
+        }
+        for (const q of PARAMS.maps || []) {
+          try {
+            const r: any = await post(creds, "/serp/google/maps/live/advanced", [{ keyword: q, location_coordinate: PARAMS.coord || "39.1031,-84.5120,13z", language_code: "en", depth: Number(PARAMS.mapDepth || 40) }]);
+            const items = (r?.items ?? []).filter((x: any) => x.type === "maps_search");
+            const me = items.find((x: any) => /bsllc\.biz/i.test(String(x.domain || x.url || "")) || /^bs\s*llc/i.test(String(x.title || "")));
+            console.log(`### MAPS ${J({ q, n: items.length, me: me ? { p: me.rank_group, title: me.title, url: me.url, cat: me.category, r: me.rating?.value, v: me.rating?.votes_count } : null, top: items.slice(0, 12).map((x: any) => [x.rank_group, trim(x.title, 40), x.domain, x.rating?.value, x.rating?.votes_count, trim(x.category, 30)]) })}`);
+          } catch (e) { console.log(`### PHASEERR ${J({ phase: "local-maps", q, err: trim(String(e), 200) })}`); }
+        }
       }
       if (ph === "serp") {
         for (const q of PARAMS.serps || []) {
@@ -199,7 +283,7 @@ async function main() {
             let r: any = null;
             for (let a = 0; a < 3 && !r; a++) { try { r = await post(creds, "/serp/google/organic/live/advanced", [body]); } catch (e) { if (a === 2) throw e; await sleep(4000); } }
             const items = (r?.items ?? []);
-            console.log(`### SERP ${J({ q, loc: PARAMS.serpLocation || LOC, types: [...new Set(items.map((x: any) => x.type))], org: items.filter((x: any) => x.type === "organic").slice(0, 20).map((x: any) => ({ p: x.rank_group, d: x.domain, u: trim(x.url, 100), t: trim(x.title, 70) })), paa: items.filter((x: any) => x.type === "people_also_ask").flatMap((x: any) => (x.items || []).map((i: any) => trim(i.title, 90))).slice(0, 6), pack: items.filter((x: any) => x.type === "local_pack").flatMap((x: any) => (x.items || []).map((i: any) => trim(i.title, 50))).slice(0, 5), aio: items.some((x: any) => x.type === "ai_overview") })}`);
+            console.log(`### SERP ${J({ q, loc: PARAMS.serpLocation || LOC, types: [...new Set(items.map((x: any) => x.type))], org: items.filter((x: any) => x.type === "organic").slice(0, 20).map((x: any) => ({ p: x.rank_group, d: x.domain, w: x.website_name, b: trim(x.breadcrumb, 70), u: trim(x.url, 100), t: trim(x.title, 70) })), paa: items.filter((x: any) => x.type === "people_also_ask").flatMap((x: any) => (x.items || []).map((i: any) => trim(i.title, 90))).slice(0, 6), pack: items.filter((x: any) => x.type === "local_pack").map((x: any) => [trim(x.title, 50), x.domain, x.rating?.value]).slice(0, 5), aio: items.some((x: any) => x.type === "ai_overview") })}`);
           } catch (e) { console.log(`### PHASEERR ${J({ phase: "serp", q, err: trim(String(e), 200) })}`); }
         }
       }

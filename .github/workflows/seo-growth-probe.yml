@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: "comma list: ranked | overview | competitors | gap | backlinks | keywords | serp"
+        description: "comma list: ranked | overview | competitors | gap | backlinks | keywords | serp | gsc | gsctrend | ga4 | local"
         required: true
         default: "ranked,overview,competitors,backlinks"
       cost_cap:
