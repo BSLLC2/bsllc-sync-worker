@@ -3,7 +3,8 @@
  * pretend server can stand in for the real one, one Google token door.
  *
  * The readers are Search Console URL Inspection, Google Business Profile
- * performance, Bing Webmaster Tools and the CallTrackingMetrics call log. Each is
+ * performance, Bing Webmaster Tools, the CallTrackingMetrics call log and the
+ * Google Tag Manager container reader. Each is
  * its own job with its own workflow and heartbeat. They share this file because
  * "what a run of a source can end as" must mean the same thing in all four, and
  * because the app reads one status table (`signal_runs`) for all of them.
@@ -16,13 +17,13 @@
  * "nothing there" and "never looked" lead to opposite conclusions.
  *
  * THE TEST SEAM. When SIGNALS_FAKE_BASE is set (and only then) every call to one of
- * the four services goes to that address, under /gsc, /gbp, /bing or /ctm, and a
+ * the four services goes to that address, under /gsc, /gbp, /bing, /ctm or /gtm, and a
  * Google token is asked of `<base>/token`. No workflow sets it, and each reader's
  * guard fails if one does.
  */
 import type { Queryable } from "../page-behaviour/store.js";
 
-export const SIGNAL_SOURCES = ["gsc_inspect", "gbp", "bing", "ctm"] as const;
+export const SIGNAL_SOURCES = ["gsc_inspect", "gbp", "bing", "ctm", "gtm"] as const;
 export type SignalSource = (typeof SIGNAL_SOURCES)[number];
 
 /** What a run of one source can end as. The same words as `seo_ux_runs`. */
@@ -59,7 +60,7 @@ export async function writeSignalRun(c: Queryable, clientId: string, r: SignalRu
 export const signalsFakeBase = (): string | null => process.env.SIGNALS_FAKE_BASE?.trim() || null;
 
 /** The address to call: the real one, or the pretend server's path for the same service. */
-export function serviceUrl(service: "gsc" | "gbp" | "bing" | "ctm" | "oauth", real: string): string {
+export function serviceUrl(service: "gsc" | "gbp" | "bing" | "ctm" | "oauth" | "gtm", real: string): string {
   const fake = signalsFakeBase();
   if (!fake) return real;
   const u = new URL(real);
