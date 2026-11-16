@@ -13,7 +13,7 @@
  * written on its own as an error, so a failed write never claims `ok`.
  */
 import { createHash } from "node:crypto";
-import type { ClientReportResult, DailyRowOut, ReportKind, ReportRowOut } from "./types.js";
+import { AUDIENCE_KINDS, ROLLING_MONTH, type ClientReportResult, type DailyRowOut, type ReportKind, type ReportRowOut } from "./types.js";
 
 export interface Queryable { query: (sql: string, params?: unknown[]) => Promise<unknown> }
 
@@ -28,11 +28,11 @@ export const INSERT_SITE_DAY = `INSERT INTO ga4_site_days
    key_events = EXCLUDED.key_events, synced_at = EXCLUDED.synced_at`;
 
 export const INSERT_REPORT_ROW = `INSERT INTO ga4_report_rows
-  (id, client_id, month, kind, parent, key, sessions, engaged_sessions, engagement_seconds, events, synced_at)
- VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+  (id, client_id, month, kind, parent, key, sessions, engaged_sessions, engagement_seconds, events, synced_at, users)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
  ON CONFLICT (client_id, month, kind, parent, key) DO UPDATE SET
    sessions = EXCLUDED.sessions, engaged_sessions = EXCLUDED.engaged_sessions,
-   engagement_seconds = EXCLUDED.engagement_seconds, events = EXCLUDED.events, synced_at = EXCLUDED.synced_at`;
+   engagement_seconds = EXCLUDED.engagement_seconds, events = EXCLUDED.events, synced_at = EXCLUDED.synced_at, users = EXCLUDED.users`;
 
 export const DELETE_KIND_MONTHS = `DELETE FROM ga4_report_rows WHERE client_id = $1 AND kind = $2 AND month = ANY($3::text[])`;
 
@@ -98,10 +98,12 @@ async function writeDaily(c: Queryable, clientId: string, rows: readonly DailyRo
 }
 
 async function writeKind(c: Queryable, clientId: string, kind: ReportKind, months: readonly string[], rows: readonly ReportRowOut[], at: Date) {
-  await c.query(DELETE_KIND_MONTHS, [clientId, kind, [...months]]);
+  // The audience kinds also hold the last-28-days rows, which are replaced with the months.
+  const replaced = AUDIENCE_KINDS.includes(kind) ? [...months, ROLLING_MONTH] : [...months];
+  await c.query(DELETE_KIND_MONTHS, [clientId, kind, replaced]);
   await insertBatched(c, INSERT_REPORT_ROW, rows.map((r) => [
     id("r", clientId, r.month, r.kind, r.parent, r.key), clientId, r.month, r.kind, r.parent, r.key,
-    r.sessions, r.engagedSessions, r.engagementSeconds, r.events, at,
+    r.sessions, r.engagedSessions, r.engagementSeconds, r.events, at, r.users ?? null,
   ]));
 }
 

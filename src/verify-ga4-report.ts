@@ -35,7 +35,7 @@ import { processClients } from "./ga4-report/pipeline.js";
 import {
   BATCH_ROWS, DELETE_KIND_MONTHS, INSERT_REPORT_ROW, INSERT_RUN, INSERT_RUN_KEEP, INSERT_SITE_DAY, batchSql, writeClientReport, type Queryable,
 } from "./ga4-report/store.js";
-import { CONFIG_LIMITS, DEFAULT_FORM_EVENT, REPORT_KINDS, RETRY_WAITS_MS, ROW_CEILING, PAGE_SIZE, TOP_N, type ClientReportResult, type FetchLike, type ReportRowOut } from "./ga4-report/types.js";
+import { AUDIENCE_KINDS, CONFIG_LIMITS, DEFAULT_FORM_EVENT, REPORT_KINDS, RETRY_WAITS_MS, ROW_CEILING, PAGE_SIZE, TOP_N, type ClientReportResult, type FetchLike, type ReportRowOut } from "./ga4-report/types.js";
 
 let failures = 0;
 const ok = (label: string, pass: boolean, detail = "") => {
@@ -58,7 +58,7 @@ CREATE UNIQUE INDEX idx_ga4_site_days_key ON ga4_site_days(client_id, day);
 CREATE TABLE ga4_report_rows (
   id text PRIMARY KEY, client_id text NOT NULL REFERENCES clients(id), month text NOT NULL, kind text NOT NULL,
   parent text NOT NULL DEFAULT '', key text NOT NULL, sessions integer, engaged_sessions integer, engagement_seconds double precision,
-  events integer, synced_at timestamptz NOT NULL DEFAULT now());
+  events integer, synced_at timestamptz NOT NULL DEFAULT now(), users integer);
 CREATE UNIQUE INDEX idx_ga4_report_rows_key ON ga4_report_rows(client_id, month, kind, parent, key);
 CREATE TABLE ga4_report_runs (
   id text PRIMARY KEY, client_id text NOT NULL UNIQUE REFERENCES clients(id), status text NOT NULL, detail text,
@@ -69,7 +69,7 @@ CREATE TABLE ga4_report_runs (
 
 /* ───────────────────────── a pretend property ───────────────────────── */
 
-interface SRow { date: string; country: string; region: string; sm: string; landing: string; sessions: number; engaged: number; secs: number; users: number; keyEvents: number }
+interface SRow { date: string; country: string; region: string; sm: string; landing: string; sessions: number; engaged: number; secs: number; users: number; keyEvents: number; nvr?: string; device?: string }
 interface ERow { date: string; country: string; page: string; event: string; count: number; channel: string }
 interface Dataset { sessions: SRow[]; events: ERow[] }
 
@@ -124,7 +124,7 @@ function property(data: Dataset, opts: Opts = {}): { fetch: FetchLike; calls: Ca
     const rowsIn: Array<{ f: Record<string, string | undefined>; m: Record<string, number> }> = isEvents
       ? data.events.map((e) => ({ f: { date: e.date, country: e.country, pagePath: e.page, eventName: e.event, sessionDefaultChannelGroup: e.channel }, m: { eventCount: e.count } }))
       : data.sessions.map((s) => ({
-          f: { date: s.date, country: s.country, region: s.region, sessionSourceMedium: s.sm, landingPage: s.landing, pagePath: s.landing, sessionDefaultChannelGroup: channelOf(s.sm) },
+          f: { date: s.date, country: s.country, region: s.region, sessionSourceMedium: s.sm, landingPage: s.landing, pagePath: s.landing, sessionDefaultChannelGroup: channelOf(s.sm), newVsReturning: s.nvr ?? "new", deviceCategory: s.device ?? "desktop" },
           m: { sessions: s.sessions, engagedSessions: s.engaged, userEngagementDuration: s.secs, totalUsers: s.users, keyEvents: s.keyEvents, conversions: s.keyEvents },
         }));
     for (const r of rowsIn) {
@@ -258,18 +258,20 @@ hr("3. what is asked: the country exclusion rides on every request");
   // Every request of a real run, with and without the exclusion.
   const run = async (config: ReturnType<typeof cfg>) => { const p = property(dataset()); await readClientReport(CTX, config, deps(p.fetch)); return p.calls; };
   const full = await run(cfg({ excludeCountries: India, groups: [GROUP, { name: "Lps", prefix: "/lp/" }] }));
-  ok("a configured run makes the daily, the nine reports and four requests per group", full.length === 1 + 9 + 4 * 2, `${full.length} requests`);
+  ok("a configured run makes the daily, the nine reports, the six audience reads and four requests per group", full.length === 1 + 9 + 6 + 4 * 2, `${full.length} requests`);
   const rawCall = (c: { body: Record<string, any> }) => (c.body.dimensions as any[]).length === 1 && c.body.dimensions[0].name === "yearMonth" && !("dimensionFilter" in c.body);
   const hostCall = (c: { body: Record<string, any> }) => (c.body.dimensions as any[]).some((d) => d.name === "hostName") && !("dimensionFilter" in c.body);
   ok("EVERY request of the run carries the exclusion, except the unfiltered monthly total and the unfiltered host breakdown", full.filter((c) => !rawCall(c) && !hostCall(c)).every((c) => JSON.stringify(c.body.dimensionFilter ?? {}).includes("inListFilter") && JSON.stringify(c.body.dimensionFilter).includes("Russia")) && full.filter(rawCall).length === 1 && full.filter(hostCall).length === 1);
   const plain = await run(cfg({ groups: [GROUP] }));
   ok("with nothing excluded no request names a country filter", plain.every((c) => !JSON.stringify(c.body).includes("inListFilter")));
   ok("every request goes to the property's runReport with the token", full.every((c) => c.url === "https://analyticsdata.googleapis.com/v1beta/properties/111222333:runReport" && c.headers.Authorization === `Bearer ${SECRET}`));
-  ok("every report request carries yearMonth as its first dimension", full.slice(1).every((c) => (c.body.dimensions as any)[0].name === "yearMonth"));
+  const AUD = new Set(["newVsReturning", "deviceCategory"]);
+  const rollingCall = (c: { body: Record<string, any> }) => { const d = (c.body.dimensions as any[]).map((x) => x.name); return d.length === 1 && (AUD.has(d[0]) || d[0] === "country"); };
+  ok("every report request carries yearMonth as its first dimension, except the three last-28-days audience reads", full.slice(1).filter((c) => !rollingCall(c)).every((c) => (c.body.dimensions as any)[0].name === "yearMonth") && full.filter(rollingCall).length === 3);
 
   const specs = kindSpecs([GROUP], "form_submit");
   const kinds = specs.map((s) => s.kind);
-  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "month_raw", "host_sessions", "group_page", "group_visits", "group_sessions", "group_form"]));
+  ok("one spec per kind, plus a landing, a visits and a form spec per group", JSON.stringify(kinds) === JSON.stringify(["region", "source_medium", "landing_page", "form_page", "event_name", "channel_sessions", "channel_forms", "month_raw", "host_sessions", "audience_returning", "audience_returning", "audience_device", "audience_device", "audience_country", "audience_country", "group_page", "group_visits", "group_sessions", "group_form"]));
   const hostReq = reportRequest(w, specs.find((x) => x.kind === "landing_page")!, specs.find((x) => x.kind === "landing_page")!.ladder[0]!, [], [], ["www.example.com"]);
   ok("own hostnames add a hostName inList filter to a report request", JSON.stringify(hostReq.dimensionFilter).includes("hostName") && JSON.stringify(hostReq.dimensionFilter).includes("www.example.com"));
   const hostBreak = reportRequest(w, specs.find((x) => x.kind === "host_sessions")!, specs.find((x) => x.kind === "host_sessions")!.ladder[0]!, [], [], ["www.example.com"]);
@@ -435,9 +437,9 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
   ok("a failed daily read is an error with nothing to write", d.status === "error" && d.daily === null && Object.keys(d.kinds).length === 0 && d.rows === 0);
   ok("and nothing else is even asked for", failDaily.calls.length === 1);
 
-  const failAll = property(dataset(), { fail: (b) => ((b.dimensions as any[])[0].name === "yearMonth" ? { status: 403, body: "denied" } : null) });
+  const failAll = property(dataset(), { fail: (b) => ((b.dimensions as any[])[0].name !== "date" ? { status: 403, body: "denied" } : null) });
   const all = await readClientReport(CTX, defaultConfig(), deps(failAll.fetch));
-  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 9);
+  ok("every report failing is an error, the daily totals still written", all.status === "error" && all.daily!.length > 0 && all.failedKinds.length === 12);
 
   // Retries.
   let n = 0;
@@ -480,7 +482,7 @@ hr("7. failures: a kind that fails keeps its rows; a daily failure writes nothin
     return endless(u, init);
   };
   const hb = await readClientReport(CTX, defaultConfig(), deps(halfEndless));
-  ok("reports past the ceiling are `capped`, named failed and left untouched, never written cut", hb.status === "capped" && hb.failedKinds.length === 8 && hb.daily!.length > 0 && hb.kinds.region === undefined);
+  ok("reports past the ceiling are `capped`, named failed and left untouched, never written cut", hb.status === "capped" && hb.failedKinds.length === 11 && hb.daily!.length > 0 && hb.kinds.region === undefined);
 }
 
 /* ═════════════════════════ 8. no secret and no row text in anything said ═════════════════════════ */
@@ -537,18 +539,18 @@ const kindOf = (sql: string) => (/^INSERT INTO ga4_site_days/.test(sql) ? "day" 
   ok("the run row is written last before the commit", seq[seq.length - 2] === "run");
   const delIdx = (k: string) => rec.q.findIndex((x) => kindOf(x.sql) === "delete" && x.params[1] === k);
   ok("every kind that read in full is deleted for the months read, before its rows", REPORT_KINDS.every((k) => delIdx(k) >= 0));
-  ok("each delete names the client, the kind and the months read", rec.q.filter((x) => kindOf(x.sql) === "delete").every((x) => x.params[0] === "client-a" && JSON.stringify(x.params[2]) === JSON.stringify(ok1.months)));
+  ok("each delete names the client, the kind and the months read", rec.q.filter((x) => kindOf(x.sql) === "delete").every((x) => x.params[0] === "client-a" && JSON.stringify(x.params[2]) === JSON.stringify(AUDIENCE_KINDS.includes(x.params[1] as any) ? [...ok1.months, "last28"] : ok1.months)));
   ok("a kind's rows come after its delete and before the next kind's", REPORT_KINDS.every((k, i) => { const d = delIdx(k); const rowsOf = rec.q.map((x, j) => ({ x, j })).filter(({ x }) => kindOf(x.sql) === "row" && x.params[3] === k); return rowsOf.every(({ j }) => j > d) && (i === REPORT_KINDS.length - 1 || rowsOf.every(({ j }) => j < delIdx(REPORT_KINDS[i + 1]!))); }));
   const tuplesOf = (k: string, width: number) => rec.q.filter((x) => kindOf(x.sql) === k).reduce((n, x) => n + x.params.length / width, 0);
   ok("daily rows are upserts keyed on client and day, written in batches", tuplesOf("day", 9) === ok1.daily!.length && rec.q.filter((x) => kindOf(x.sql) === "day").length < ok1.daily!.length && /ON CONFLICT \(client_id, day\)/.test(INSERT_SITE_DAY));
-  ok("a batch holds at most BATCH_ROWS rows", rec.q.filter((x) => kindOf(x.sql) === "day" || kindOf(x.sql) === "row").every((x) => x.params.length / (kindOf(x.sql) === "day" ? 9 : 11) <= BATCH_ROWS));
+  ok("a batch holds at most BATCH_ROWS rows", rec.q.filter((x) => kindOf(x.sql) === "day" || kindOf(x.sql) === "row").every((x) => x.params.length / (kindOf(x.sql) === "day" ? 9 : 12) <= BATCH_ROWS));
   const two = batchSql(INSERT_SITE_DAY, 2);
   ok("a batch statement repeats the tuple with the placeholders running on, and keeps the conflict clause", two.includes("($1, $2, $3, $4, $5, $6, $7, $8, $9), ($10, $11, $12, $13, $14, $15, $16, $17, $18)") && two.endsWith(INSERT_SITE_DAY.slice(INSERT_SITE_DAY.indexOf("ON CONFLICT"))));
   ok("a row id repeated inside one write is sent once, the last one winning", await (async () => { const r = recorder(); const dup = { ...ok1, daily: [...ok1.daily!, { ...ok1.daily![0]!, sessions: 999 }] }; await writeClientReport(r.db, "client-a", dup as ClientReportResult, at); const days = r.q.filter((x) => kindOf(x.sql) === "day"); const ids: unknown[] = []; for (const x of days) for (let k = 0; k < x.params.length; k += 9) ids.push(x.params[k]); const first = days.flatMap((x) => { const out: unknown[][] = []; for (let k = 0; k < x.params.length; k += 9) out.push(x.params.slice(k, k + 9)); return out; }).find((t) => t[2] === ok1.daily![0]!.day)!; return ids.length === ok1.daily!.length && new Set(ids).size === ids.length && first[3] === 999; })());
   const run = rec.q.find((x) => kindOf(x.sql) === "run")!;
   ok("the run row records the applied config as the contract says", run.params[11] === JSON.stringify(["India"]) && run.params[12] === "form_submit" && run.params[13] === JSON.stringify([GROUP]));
   ok("the run row records the spans and rows", run.params[4] === ok1.firstDay && run.params[5] === ok1.lastDay && run.params[6] === "2026-06" && run.params[7] === "2026-10" && run.params[8] === ok1.rows);
-  { const ids: unknown[] = []; for (const x of rec.q.filter((y) => kindOf(y.sql) === "row")) for (let i = 0; i < x.params.length; i += 11) ids.push(x.params[i]); ok("a fixed id per row so a rerun is the same row", ids.length > 0 && new Set(ids).size === ids.length); }
+  { const ids: unknown[] = []; for (const x of rec.q.filter((y) => kindOf(y.sql) === "row")) for (let i = 0; i < x.params.length; i += 12) ids.push(x.params[i]); ok("a fixed id per row so a rerun is the same row", ids.length > 0 && new Set(ids).size === ids.length); }
 
   // A failed kind is never deleted.
   const failedRegion = await cl({}, { fail: (b) => ((b.dimensions as any[]).some((d) => d.name === "region") ? { status: 403, body: "no" } : null) });
@@ -593,7 +595,7 @@ const kindOf = (sql: string) => (/^INSERT INTO ga4_site_days/.test(sql) ? "day" 
   ok("the delete is scoped to the client, the kind and the months", /WHERE client_id = \$1 AND kind = \$2 AND month = ANY\(\$3::text\[\]\)/.test(DELETE_KIND_MONTHS));
   const colsOf = (sql: string) => /\(([^)]*)\)\s*VALUES/s.exec(sql)![1]!.split(",").map((c) => c.trim());
   ok("the day columns are the contract's", colsOf(INSERT_SITE_DAY).join() === "id,client_id,day,sessions,engaged_sessions,engagement_seconds,users,key_events,synced_at");
-  ok("the row columns are the contract's", colsOf(INSERT_REPORT_ROW).join() === "id,client_id,month,kind,parent,key,sessions,engaged_sessions,engagement_seconds,events,synced_at");
+  ok("the row columns are the contract's", colsOf(INSERT_REPORT_ROW).join() === "id,client_id,month,kind,parent,key,sessions,engaged_sessions,engagement_seconds,events,synced_at,users");
   ok("the run columns are the contract's", colsOf(INSERT_RUN).join() === "id,client_id,status,detail,first_day,last_day,first_month,last_month,rows,capped_kinds,failed_kinds,excluded_countries,form_event,groups_json,ran_at,excluded_channels,own_hostnames");
 }
 
@@ -635,7 +637,7 @@ hr("10. the workflow, the scripts and CI");
     const p = property(dataset());
     await readClientReport(CTX, cfg({ groups: [GROUP], excludeCountries: ["India"] }), deps(p.fetch));
     const used = new Set(p.calls.flatMap((c) => (c.body.dimensions as Array<{ name: string }>).map((d) => d.name)));
-    const allowed = new Set(["date", "yearMonth", "country", "region", "sessionSourceMedium", "landingPage", "pagePath", "eventName", "sessionDefaultChannelGroup", "hostName"]);
+    const allowed = new Set(["date", "yearMonth", "country", "region", "sessionSourceMedium", "landingPage", "pagePath", "eventName", "sessionDefaultChannelGroup", "hostName", "newVsReturning", "deviceCategory"]);
     ok("no visitor-level dimension is ever requested (only dates, places, sources and pages)", Array.from(used).every((n) => allowed.has(n)), Array.from(used).join());
     const metricsUsed = new Set(p.calls.flatMap((c) => (c.body.metrics as Array<{ name: string }>).map((m) => m.name)));
     ok("and only counts are asked for", Array.from(metricsUsed).every((n) => ["sessions", "engagedSessions", "userEngagementDuration", "totalUsers", "keyEvents", "eventCount"].includes(n)), Array.from(metricsUsed).join());
@@ -931,6 +933,44 @@ hr("own hostnames: the site on record is the default, a typed list wins");
 
   const dryP = await processClients({ clients: [{ id: "client-a", name: "Alpine Travel Test", property: "111222333", site: "example.com" }], settings: new Map(), deps: deps(property(dataset()).fetch), db: recorder().db, dryRun: true });
   ok("a dry run says where the hostname list came from", dryP.lines.some((l) => l.includes("from the site on record")));
+}
+
+/* ═════════════════════════ audience: new against returning, device, country ═════════════════════════ */
+hr("13. audience kinds: visits by new or returning, device and country, by month and for the last 28 days");
+{
+  const data = dataset();
+  data.sessions.push(
+    S("20260915", "United States", "Ohio", "google / organic", "/", 30, 20, 600, 22, 0),
+    { ...S("20260916", "United States", "Ohio", "google / organic", "/", 10, 7, 200, 6, 0), nvr: "returning", device: "mobile" },
+    { ...S("20261005", "Canada", "Ontario", "google / organic", "/", 8, 4, 80, 5, 0), nvr: "returning", device: "tablet" },
+    { ...S("20261008", "United States", "Ohio", "google / organic", "/", 12, 9, 300, 8, 0), device: "mobile" },
+  );
+  const p = property(data);
+  const r = await readClientReport(CTX, cfg({ excludeCountries: ["India"] }), deps(p.fetch));
+  const nvr = r.kinds.audience_returning ?? [], dev = r.kinds.audience_device ?? [], ctry = r.kinds.audience_country ?? [];
+  ok("each audience kind read in full is present", nvr.length > 0 && dev.length > 0 && ctry.length > 0 && r.failedKinds.length === 0);
+  ok("every audience row is a month or the last 28 days, nothing else", [...nvr, ...dev, ...ctry].every((x) => /^\d{4}-\d{2}$/.test(x.month) || x.month === "last28"));
+  const sep = nvr.filter((x) => x.month === "2026-09");
+  ok("September: new 30 and returning 10 visits, kept apart", sep.find((x) => x.key === "new")?.sessions === 30 + 15 && sep.find((x) => x.key === "returning")?.sessions === 10, JSON.stringify(sep.map((x) => [x.key, x.sessions])));
+  const l28 = nvr.filter((x) => x.month === "last28");
+  ok("the last 28 days run from 28 days before the read's end, counting 2026-09-15 to 2026-10-12 and leaving India out", l28.reduce((n, x) => n + (x.sessions ?? 0), 0) === 30 + 10 + 9 + 8 + 12 + 6, JSON.stringify(l28.map((x) => [x.key, x.sessions])));
+  ok("a country left out by the exclusion is absent from the country rows", ctry.every((x) => x.key !== "India"));
+  ok("the user count is kept on the row for the team and is null only where the property did not return it", nvr.every((x) => x.users == null || x.users >= 0) && nvr.some((x) => x.users != null));
+  ok("the device split names desktop, mobile and tablet as GA4 does", new Set(dev.map((x) => x.key)).has("mobile") && new Set(dev.map((x) => x.key)).has("tablet"));
+  const rolling = p.calls.filter((c) => (c.body.dimensions as any[]).length === 1 && ["newVsReturning", "deviceCategory", "country"].includes((c.body.dimensions as any[])[0].name));
+  ok("the three last-28-days reads carry a 28 day range, the country exclusion and no month dimension", rolling.length === 3 && rolling.every((c) => { const dr = (c.body.dateRanges as any[])[0]; const days = (Date.parse(dr.endDate) - Date.parse(dr.startDate)) / 86_400_000 + 1; return days === 28 && JSON.stringify(c.body.dimensionFilter ?? {}).includes("India"); }));
+  ok("no demographic dimension (age, gender, interests) is ever requested", p.calls.every((c) => !/userAge|userGender|interest|affinity|inMarket/i.test(((c.body.dimensions as any[]).map((d) => d.name)).join())));
+  const noUsers = await readClientReport(CTX, cfg({}), deps(property(data, { reject: new Set(["totalUsers"]) }).fetch));
+  ok("a property that refuses the user metric still gives the visits, with the user count null", (noUsers.kinds.audience_returning ?? []).length > 0 && (noUsers.kinds.audience_returning ?? []).every((x) => x.users == null) && (noUsers.kinds.audience_returning ?? []).some((x) => (x.sessions ?? 0) > 0));
+  const rec = recorder();
+  await writeClientReport(rec.db, "client-a", r, new Date("2026-10-14T07:40:00Z"));
+  const dels = rec.q.filter((x) => kindOf(x.sql) === "delete" && AUDIENCE_KINDS.includes(x.params[1] as any));
+  ok("each audience kind's delete also names the last-28-days key, so it is replaced with the months", dels.length === 3 && dels.every((x) => (x.params[2] as string[]).includes("last28")));
+  { let withUsers = 0; for (const x of rec.q.filter((y) => kindOf(y.sql) === "row")) for (let i = 0; i < x.params.length; i += 12) if (AUDIENCE_KINDS.includes(x.params[i + 3] as any) && typeof x.params[i + 11] === "number") withUsers++; ok("the user count reaches the row writer for audience rows", withUsers > 0, String(withUsers)); }
+  const colsLine = /\(([^)]*)\)\s*VALUES/s.exec(INSERT_REPORT_ROW)![1]!.split(",").map((c) => c.trim());
+  ok("the row writer carries the user count column last", colsLine[colsLine.length - 1] === "users");
+  const down = await readClientReport(CTX, cfg({}), deps(property(data, { fail: (b) => ((b.dimensions as any[]).some((d) => d.name === "deviceCategory") ? { status: 403, body: "no" } : null) }).fetch));
+  ok("a failed audience kind is named and keeps its earlier rows, the others are read", down.failedKinds.includes("audience_device") && down.kinds.audience_device === undefined && down.kinds.audience_returning !== undefined);
 }
 
 console.log("\n" + "─".repeat(72));

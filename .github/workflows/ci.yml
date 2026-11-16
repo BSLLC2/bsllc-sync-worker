@@ -70,6 +70,8 @@ jobs:
         run: npm run verify-bing
       - name: CallTrackingMetrics guard, against a pretend CTM
         run: npm run verify-ctm
+      - name: Backlinks guard (cost guard, competitors, store), against a pretend DataForSEO
+        run: npm run verify-backlinks
       - name: Page history guard (top results, pages above a client, pages by month)
         run: npm run verify-page-history
       - name: Branded-search months guard (pure half; the real job runs in ads-store)

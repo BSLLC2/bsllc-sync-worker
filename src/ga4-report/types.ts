@@ -22,14 +22,24 @@ export const RUN_STATUSES = ["ok", "off", "no_key", "error", "no_data", "capped"
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** The report kinds written to ga4_report_rows. */
-export const REPORT_KINDS = ["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form", "group_visits", "group_sessions", "channel_sessions", "channel_forms", "month_raw", "host_sessions"] as const;
+export const REPORT_KINDS = ["region", "source_medium", "landing_page", "form_page", "event_name", "group_page", "group_form", "group_visits", "group_sessions", "channel_sessions", "channel_forms", "month_raw", "host_sessions", "audience_returning", "audience_device", "audience_country"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
 
 /** Rows kept per month per kind. The ceiling cuts the smallest. OURS. */
 export const TOP_N: Record<ReportKind, number> = {
   region: 100, source_medium: 100, landing_page: 100, form_page: 100, event_name: 100, group_page: 300, group_form: 300, group_visits: 300, group_sessions: 5,
   channel_sessions: 40, channel_forms: 40, month_raw: 1, host_sessions: 20,
+  audience_returning: 4, audience_device: 6, audience_country: 40,
 };
+
+/**
+ * The three audience kinds (new against returning, device category, country) are each written twice: once per finished
+ * month and once for the last 28 days read, filed under the month key "last28". Counts of visits only; the user count
+ * is kept for the team and is not additive across months. Mirrored in the dashboard's shared/schema.ts.
+ */
+export const AUDIENCE_KINDS: readonly ReportKind[] = ["audience_returning", "audience_device", "audience_country"];
+export const ROLLING_MONTH = "last28";
+export const ROLLING_DAYS = 28;
 
 /** Months of history read by default, and the most a run may be asked for. */
 export const DEFAULT_MONTHS = 24;
@@ -98,6 +108,8 @@ export interface ReportRowOut {
   engagedSessions: number | null;
   engagementSeconds: number | null;
   events: number | null;
+  /** Distinct users GA4 counted in the period, on the audience kinds only. Never added across months. */
+  users?: number | null;
 }
 
 export interface ClientCtx {

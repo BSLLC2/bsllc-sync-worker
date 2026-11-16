@@ -41,6 +41,18 @@ uses).
    | `month_raw` | none (one row a month), NO country or channel exclusion | sessions, engaged, seconds | '' | `all` | 1 |
    | `channel_sessions` | sessionDefaultChannelGroup | sessions | '' | the channel group | 40 |
    | `channel_forms` | sessionDefaultChannelGroup (filter eventName = form event) | eventCount -> `events` | '' | the channel group | 40 |
+   | `audience_returning` | newVsReturning | sessions, engaged, `users` | '' | `new`, `returning` or `(not set)` | 4 |
+   | `audience_device` | deviceCategory | sessions, engaged, `users` | '' | `desktop`, `mobile`, `tablet` as GA4 names them | 6 |
+   | `audience_country` | country | sessions, engaged, `users` | '' | the country, with the country exclusion applied | 40 |
+
+   **The three audience kinds are each read twice**: once per finished month (month key `YYYY-MM`) and once for the
+   last 28 days read, ending where the read ends (month key `last28`, no month dimension). A delete for these kinds
+   names `last28` too, so the rolling rows are replaced with the months. `users` is GA4's `totalUsers`, kept for the
+   team; it is not additive across months or across rows, and the client's page never shows it (the page speaks of
+   visits). No age, gender, interest or affinity dimension is ever requested: those need Google signals and are
+   thresholded, so they are not read. A property that rejects `totalUsers` still gives the visits (the user count is
+   null). Added with schema v304 (provisional): `ga4_report_rows.users`. UNVERIFIED LIVE: `newVsReturning` and
+   `deviceCategory` with these metrics, and `totalUsers` beside `engagedSessions` in one report.
 
    `month_raw` is every session of the month with nothing left out, so the page can set the figure it shows
    against the raw one. **Page group match modes** (`src/ga4-report/groups.ts`, copied byte for byte into the app):

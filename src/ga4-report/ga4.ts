@@ -21,11 +21,11 @@
  *  5. An error message names no token and no row.
  */
 import { HttpError, postJson } from "../page-behaviour/http.js";
-import { isRealPath, normPath } from "../page-behaviour/paths.js";
+import { addDays, isRealPath, normPath } from "../page-behaviour/paths.js";
 import { childBase, cleanMatch, groupKey } from "./groups.js";
 import { dayFromGa4Date, daysBetween, monthFromYearMonth } from "./months.js";
 import {
-  PAGE_SIZE, RETRY_WAITS_MS, ROW_CEILING, TOP_N,
+  AUDIENCE_KINDS, PAGE_SIZE, RETRY_WAITS_MS, ROLLING_DAYS, ROLLING_MONTH, ROW_CEILING, TOP_N,
   type DailyRowOut, type FetchLike, type ReportGroup, type ReportKind, type ReportRowOut,
 } from "./types.js";
 import type { ReadWindow } from "./months.js";
@@ -48,6 +48,12 @@ export const SESSION_METRIC_LADDER: ReadonlyArray<readonly string[]> = [
   ["sessions"],
 ];
 export const EVENT_METRICS: readonly string[] = ["eventCount"];
+/** Visits, engaged visits and the user count; a property that rejects the user metric still gives the visits. */
+export const AUDIENCE_LADDER: ReadonlyArray<readonly string[]> = [
+  ["sessions", "engagedSessions", "totalUsers"],
+  ["sessions", "engagedSessions"],
+  ["sessions"],
+];
 
 /* ───────────────────────── filters ───────────────────────── */
 
@@ -145,6 +151,8 @@ export interface KindSpec {
   ignoreCountries?: boolean;
   /** True for the unfiltered monthly total and the hostname breakdown: the own-hostname filter is not applied, so the page can say what it left out. */
   ignoreHosts?: boolean;
+  /** The audience kinds' last-28-days read: no month dimension, rows filed under ROLLING_MONTH. */
+  rolling?: boolean;
 }
 
 /** The report requests a client's config calls for, in the order they are read. */
@@ -165,6 +173,11 @@ export function kindSpecs(groups: readonly ReportGroup[], formEvent: string): Ki
     // Sessions by the hostname they were counted on, with nothing left out: the difference from the own hostnames is the foreign traffic.
     { kind: "host_sessions", dimensions: ["hostName"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: null, parent: "", ignoreChannels: true, ignoreCountries: true, ignoreHosts: true },
   ];
+  // Who the visits were: new or returning, the device, the country. Each read by finished month and again for the last 28 days. Visits only.
+  for (const [kind, dim] of [["audience_returning", "newVsReturning"], ["audience_device", "deviceCategory"], ["audience_country", "country"]] as const) {
+    specs.push({ kind, dimensions: [dim], ladder: AUDIENCE_LADDER, orderBy: "sessions", filter: null, parent: "" });
+    specs.push({ kind, dimensions: [dim], ladder: AUDIENCE_LADDER, orderBy: "sessions", filter: null, parent: "", rolling: true });
+  }
   for (const g of groups) {
     specs.push({ kind: "group_page", dimensions: ["landingPage"], ladder: SESSION_METRIC_LADDER, orderBy: "sessions", filter: groupFilter("landingPage", g), parent: groupKey(g) });
   }
@@ -186,8 +199,23 @@ export function kindSpecs(groups: readonly ReportGroup[], formEvent: string): Ki
   return specs;
 }
 
+/** The last 28 days the read covers, ending where the read ends. */
+export function rollingWindow(w: ReadWindow): ReadWindow {
+  return { start: addDays(w.end, -(ROLLING_DAYS - 1)), end: w.end };
+}
+
 export function reportRequest(w: ReadWindow, spec: KindSpec, metrics: readonly string[], countries: readonly string[], channels: readonly string[] = [], hosts: readonly string[] = []) {
   const dimensionFilter = andFilters(spec.filter, spec.ignoreCountries ? null : exclusionFilter(countries), spec.ignoreChannels ? null : channelExclusionFilter(channels), spec.ignoreHosts ? null : hostFilter(hosts));
+  if (spec.rolling) {
+    const r = rollingWindow(w);
+    return {
+      dateRanges: [{ startDate: r.start, endDate: r.end }],
+      dimensions: spec.dimensions.map((name) => ({ name })),
+      metrics: metrics.map((name) => ({ name })),
+      orderBys: [{ metric: { metricName: spec.orderBy }, desc: true }],
+      ...(dimensionFilter ? { dimensionFilter } : {}),
+    };
+  }
   return {
     dateRanges: [{ startDate: w.start, endDate: w.end }],
     dimensions: [{ name: "yearMonth" }, ...spec.dimensions.map((name) => ({ name }))],
@@ -316,6 +344,33 @@ export function parseReport(report: unknown, spec: KindSpec, validMonths: Readon
   return Array.from(by.values());
 }
 
+/**
+ * The audience reports to rows. Monthly specs carry yearMonth first; the rolling spec has no month and its rows are filed
+ * under ROLLING_MONTH. A value GA4 labels "(not set)" is kept as that, never merged into another. Visits, engaged visits and
+ * the user count; a metric the report did not carry stays null.
+ */
+export function parseAudience(report: unknown, spec: KindSpec, validMonths: ReadonlySet<string>): ReportRowOut[] {
+  const r = (report ?? {}) as GaReport;
+  const ix = metricIndex(r);
+  const at = spec.rolling ? 0 : 1;
+  const by = new Map<string, ReportRowOut>();
+  for (const row of r.rows ?? []) {
+    const dv = row.dimensionValues ?? [];
+    const month = spec.rolling ? ROLLING_MONTH : monthFromYearMonth(dv[0]?.value);
+    if (!month || (!spec.rolling && !validMonths.has(month))) continue;
+    const key = keyText(dv[at]?.value, 120).toLowerCase() === "(not set)" ? "(not set)" : keyText(dv[at]?.value, 120);
+    const mv = row.metricValues ?? [];
+    const get = (i: number) => (i >= 0 ? num(mv[i]?.value) : null);
+    const id = `${month}\u0000${key}`;
+    const cur = by.get(id) ?? { month, kind: spec.kind, parent: "", key, sessions: null, engagedSessions: null, engagementSeconds: null, events: null, users: null };
+    cur.sessions = add(cur.sessions, whole(get(ix.sessions)));
+    cur.engagedSessions = add(cur.engagedSessions, whole(get(ix.engaged)));
+    cur.users = add(cur.users ?? null, whole(get(ix.users)));
+    by.set(id, cur);
+  }
+  return Array.from(by.values());
+}
+
 /** The busiest `n` rows of each month (and each parent, for groups), ties by key. Says whether anything was cut. */
 export function topPerMonth(rows: readonly ReportRowOut[], kind: ReportKind, n: number = TOP_N[kind]): { kept: ReportRowOut[]; cut: boolean } {
   const value = (r: ReportRowOut) => (r.events ?? r.sessions ?? 0);
@@ -415,7 +470,7 @@ export async function readKind(io: Io, w: ReadWindow, specs: readonly KindSpec[]
   for (const spec of specs) {
     const paged = await ladder(spec.ladder, (metrics) => postAll(io, reportRequest(w, spec, metrics, countries, channels, hosts), `GA4 runReport (${spec.kind})`));
     if (paged.truncated) return { rows: [], cut: false, tooBig: true };
-    all.push(...parseReport(paged.report, spec, months));
+    all.push(...(AUDIENCE_KINDS.includes(spec.kind) ? parseAudience(paged.report, spec, months) : parseReport(paged.report, spec, months)));
   }
   const kind = specs[0]!.kind;
   const { kept, cut } = topPerMonth(all, kind);
