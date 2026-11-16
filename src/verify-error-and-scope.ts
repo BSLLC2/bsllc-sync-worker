@@ -66,8 +66,11 @@ const secrets = [
   "client_secret: GOCSPX-abcdefghijklmnop",
   "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----",
   "key 0123456789abcdef0123456789abcdef0123 leaked",
+  "Authorization: Bearer opaqueTokenValue99",
+  "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+  "got ya29.a0AfH6SMBabcdefghij1234 back",
 ];
-ok("every secret shape is removed", secrets.every((s) => !/ya29|0gAbCd|SuperSecretKey|abcd1234efgh|DEVTOKEN123456|GOCSPX|MIIEvQ|0123456789abcdef0123456789abcdef/.test(describeError(new Error(s)))),
+ok("every secret shape is removed", secrets.every((s) => !/ya29|0gAbCd|SuperSecretKey|abcd1234efgh|DEVTOKEN123456|GOCSPX|MIIEvQ|opaqueTokenValue99|dXNlcjpwYXNzd29yZA|a0AfH6SMBabcdefghij|0123456789abcdef0123456789abcdef/.test(describeError(new Error(s)))),
   secrets.map((s) => describeError(s)).join(" | ").slice(0, 160));
 ok("an ordinary email is removed", describeError("sent to alex.rivera@example.com failed") === "sent to [email] failed");
 ok("a service account address is kept (the fix names it)", /reader@proj-1\.iam\.gserviceaccount\.com/.test(describeError("add reader@proj-1.iam.gserviceaccount.com as a Viewer")));
@@ -104,7 +107,7 @@ const SCOPED = [
 ];
 for (const file of SCOPED) {
   const t = src(file).split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
-  ok(`${file} decides through the one rule`, /client-scope/.test(t) || /status <> 'churned'|COALESCE\(\w*\.?status, ''\) <> 'churned'/.test(t));
+  ok(`${file} decides through the one rule`, /\b(splitClients|notChurnedSql|churnedSlugs)\(/.test(t) || /status <> 'churned'|COALESCE\(\w*\.?status, ''\) <> 'churned'/.test(t));
   ok(`${file} says how many churned it skipped`, /skippedLine\(|logChurnedSkipped\(|churned skipped/.test(t));
 }
 ok("the Meta importer's header no longer says churned clients are read", !/NOT filtered by client status/.test(src("import-meta.ts")));
