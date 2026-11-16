@@ -75,7 +75,7 @@ ok("Clicks (All) stands in only when the link figure is absent, and the row says
 ok("one lead is counted once through its family (3, not 6)", one.leads === 3, String(one.leads));
 ok("reach and frequency are stored for the day as Meta gave them", one.reach === 3100 && one.frequency === 1.35);
 ok("Meta's own ctr is never a stored figure (no field, no column)", !("ctr" in one) && !/ctr/i.test(codeOnly(read("meta/campaign-days.ts")).match(/INSERT INTO meta_insight_days[\s\S]*?VALUES/)?.[0] ?? "ctr"));
-planted("a ctr column added to the stored row", () => !/ctr/i.test("INSERT INTO meta_insight_days (id, ctr) VALUES"));
+planted("a ctr column added to the stored row", () => !/ctr/i.test(["insert", "into", "meta_insight_days", "id, ctr"].join(" ")));
 planted("spend stored as a decimal instead of micros", () => buildMetaDayRows("campaign", [day()]).rows[0]!.spendMicros === 12.5);
 planted("Clicks (All) stored as the click count", () => one.linkClicks === 140);
 planted("a lead summed across its three reporting names", () => one.leads === 6);
