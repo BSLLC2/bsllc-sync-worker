@@ -184,6 +184,8 @@
     "verify-ads-structure-read": "tsx src/verify-ads-structure-read.ts",
     "verify-gaql-fields": "tsx src/verify-gaql-fields.ts",
     "verify-error-and-scope": "tsx src/verify-error-and-scope.ts",
+    "data-landed": "tsx src/data-landed.ts",
+    "verify-data-landed": "tsx src/verify-data-landed.ts",
     "ads-search-term-days": "tsx src/ads-search-term-days.ts",
     "read-wp-changes": "tsx src/read-wp-changes.ts",
     "verify-term-days-wp": "tsx src/verify-term-days-wp.ts",

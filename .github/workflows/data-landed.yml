@@ -1,0 +1,65 @@
+name: Did the data land (per client, per source)
+
+# A scheduled run can finish green while nothing arrived: a property nobody shared, an account
+# that answered with no rows, a sheet that was never opened. This job ignores what the runs
+# said and asks the TABLES: for every live client and every source it is switched on for, is
+# the newest row newer than that source's cadence?
+#
+# It reads every source table and writes ONE derived table, `source_landed`, which Admin,
+# Data health draws. It reads nothing from a client's accounts and writes nothing to them.
+# Churned clients and the internal client are not judged.
+#
+# WHEN. Daily 11:25 UTC, after the morning readers have run. A first run is a dry run: read it,
+# then run it again with dry_run false.
+#
+# NEEDS: DATABASE_URL and the dashboard on schema v300 or later (the table is created there).
+on:
+  schedule:
+    - cron: "25 11 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print; write nothing (true/false)."
+        required: false
+        default: "true"
+
+concurrency:
+  group: data-landed-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Did the data land
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run data-landed -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure. A dry run and a one-client run
+      # are excluded: the heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=data_landed --status="$STATUS" --note="$NOTE" --log=run.log
