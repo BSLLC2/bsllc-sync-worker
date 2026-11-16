@@ -88,6 +88,7 @@ if (WF_DIR) {
     ads_daily_metrics: { hours: 24, why: "daily 05:10 UTC" },
     ads_keyword_metrics: { hours: 24, why: "daily 05:40 UTC" },
     ads_search_term_days: { hours: 24, why: "daily 05:55 UTC" },
+    ads_share_reads: { hours: 24, why: "daily 06:10 UTC" },
   };
   for (const [job, exp] of Object.entries(EXPECT)) {
     const c = cad.get(job);
