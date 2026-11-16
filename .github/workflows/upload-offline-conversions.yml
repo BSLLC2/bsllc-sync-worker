@@ -1,0 +1,60 @@
+name: Upload offline conversions (secondary action, allow-listed)
+
+# Closed sales from a client's sales sheet, sent to Google Ads as offline click
+# conversions. OWNER-APPROVED 2026-11-16 with safeguards:
+#   - DRY RUN BY DEFAULT. Nothing is sent unless mode is send.
+#   - The FIRST real run is `validate` (Google checks the rows, nothing is sent).
+#     `send` refuses without a validate pass in the last 14 days.
+#   - Only clients named in the repository variable OFFLINE_UPLOAD_CLIENTS.
+#   - Only to a SECONDARY upload-from-clicks action that already exists.
+#   - Dispatch only: no schedule, so nothing runs by itself.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "One client slug from the allow-list. Blank = every allowed client."
+        required: false
+        default: ""
+      mode:
+        description: "dry, validate or send. Defaults to dry."
+        required: false
+        default: "dry"
+
+concurrency:
+  group: upload-offline-conversions
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Upload
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          OFFLINE_UPLOAD_CLIENTS: ${{ vars.OFFLINE_UPLOAD_CLIENTS }}
+          IN_CLIENT: ${{ inputs.client }}
+          IN_MODE: ${{ inputs.mode }}
+        run: |
+          ARGS="--mode=${IN_MODE:-dry}"
+          [ -n "$IN_CLIENT" ] && ARGS="$ARGS --client=$IN_CLIENT"
+          set -o pipefail
+          npm run upload-offline-conversions -- $ARGS 2>&1 | tee run.log
+
+      # A dry run and a one-client run do not stamp the heartbeat: it is one row
+      # for the whole job, and a scoped run would claim every client was handled.
+      - name: Heartbeat
+        if: always() && inputs.mode != 'dry' && inputs.mode != '' && inputs.client == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run heartbeat -- --job=upload_offline_conversions --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log
