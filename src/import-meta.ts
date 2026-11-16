@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { splitClients, skippedLine } from "./client-scope.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { monthSnapshot, ymd } from "./dates.js";
 import { loadMetaConfig } from "./ads/meta-adapter.js";
@@ -9,6 +10,7 @@ import {
   META_GRAPH, META_MAX_LOOKBACK_MONTHS, META_MONTHLY_FIELDS, META_METRIC_KEYS,
   metaAccountId, metaEvidenceWindow, metaMonthlyMetrics, monthsBackStart,
 } from "./meta/insights.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Meta (Facebook / Instagram) paid social -> dashboard metrics importer.
@@ -93,18 +95,18 @@ interface MetaTarget { clientId: string; clientName: string; accountId: string; 
  * (source='meta', external_id = the ad account id). Read-only -- the worker
  * never writes to the database directly.
  *
- * Deliberately NOT filtered by client status. The findings audit reads only
- * `launch` and `active` accounts because a finding is advice somebody has to
- * act on; a metric is a record of money that was spent, and a paused client's
- * last two months of spend is exactly the figure somebody needs when they ask
- * what the account cost. A churned client keeps its history either way.
+ * Filtered only by the churned rule (src/client-scope.ts). The findings audit
+ * reads only `launch` and `active` accounts because a finding is advice somebody
+ * has to act on; a metric is a record of money that was spent, so a paused
+ * client is still read. A churned client is not: its stored history stays and
+ * nothing new is asked of an account nobody is running.
  */
-async function targetsFromDb(databaseUrl: string, onlyClient: string): Promise<MetaTarget[]> {
+async function targetsFromDb(databaseUrl: string, onlyClient: string): Promise<{ targets: MetaTarget[]; skipped: string }> {
   const c = new pg.Client({ connectionString: databaseUrl });
   await c.connect();
   try {
-    const { rows } = await c.query<{ client_id: string; name: string | null; external_id: string }>(
-      `SELECT cm.client_id, c.name, cm.external_id
+    const { rows } = await c.query<{ client_id: string; name: string | null; external_id: string; status: string | null }>(
+      `SELECT cm.client_id, c.name, cm.external_id, c.status
          FROM connector_mappings cm
          JOIN clients c ON c.id = cm.client_id
         WHERE cm.source = 'meta' AND cm.enabled = true
@@ -113,7 +115,8 @@ async function targetsFromDb(databaseUrl: string, onlyClient: string): Promise<M
     );
     const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const want = slug(onlyClient);
-    return rows
+    const split = splitClients(rows, (r) => ({ status: r.status }));
+    const targets = split.live
       .map((r) => ({
         clientId: r.client_id,
         clientName: r.name ?? r.client_id,
@@ -121,6 +124,7 @@ async function targetsFromDb(databaseUrl: string, onlyClient: string): Promise<M
         rawId: r.external_id.trim(),
       }))
       .filter((t) => !onlyClient || t.clientId === onlyClient || slug(t.clientName).startsWith(want));
+    return { targets, skipped: skippedLine(split) };
   } finally {
     await c.end();
   }
@@ -169,7 +173,8 @@ async function main() {
   const dashboardDir = process.env.DASHBOARD_DIR?.trim();
   if (!databaseUrl || !dashboardDir) throw new Error("Missing DATABASE_URL / DASHBOARD_DIR.");
 
-  const targets = await targetsFromDb(databaseUrl, args.onlyClient);
+  const { targets, skipped } = await targetsFromDb(databaseUrl, args.onlyClient);
+  console.log(`Meta connectors: ${skipped}`);
 
   // NOTHING MAPPED IS NOT A FAILURE, and it must not read as one. Nobody has
   // wired a Meta ad account in Admin -> Connectors yet, so there is no work and
@@ -233,7 +238,7 @@ async function main() {
       // either: it lands as a data_state='error' row for the current month, so
       // the connector row and the freshness monitor both see it. The same
       // shape src/index.ts uses for a Google Ads account that will not answer.
-      const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+      const msg = (describeError(e)).slice(0, 300);
       const { start, end, syncedAt } = monthSnapshot(until.slice(0, 7), now);
       syncs.push({ ...base, period_start: start, period_end: end, synced_at: syncedAt, data_state: "error", error_message: msg, metrics: {} });
       failures.push(`${t.clientName} [${t.accountId}] → ${msg}`);
@@ -333,6 +338,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
+  console.error(describeError(e));
   process.exit(1);
 });

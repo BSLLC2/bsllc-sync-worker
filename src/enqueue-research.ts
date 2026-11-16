@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
+import { describeError } from "./describe-error.js";
 
 /**
  * Enqueue a research_requests row (the same thing the app's SEO research page
@@ -72,4 +73,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ enqueue-research failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ enqueue-research failed:", describeError(e)); process.exit(1); });

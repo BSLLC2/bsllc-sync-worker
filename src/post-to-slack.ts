@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
+import { describeError } from "./describe-error.js";
 
 /**
  * Posts CRM→Slack updates the app enqueues in client_slack_posts to each
@@ -65,7 +66,7 @@ async function main() {
         }
         console.log(`  ✓ ${r.client_name} → posted`); sent++;
       } catch (e) {
-        console.log(`  ✗ ${r.client_name}: ${e instanceof Error ? e.message : e} — stays pending, retries next run`);
+        console.log(`  ✗ ${r.client_name}: ${describeError(e)} — stays pending, retries next run`);
       }
     }
     console.log(`Done: ${sent} posted, ${skipped} skipped.`);
@@ -73,4 +74,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

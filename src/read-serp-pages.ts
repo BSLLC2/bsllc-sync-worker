@@ -2,11 +2,13 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { makeReader } from "./serp-pages/read.js";
 import {
   chooseSearches, resultsToRead, reusable, SERP_PAGES_PER_SEARCH, SERP_REREAD_DAYS, SERP_SEARCHES_PER_CLIENT,
   type SearchFact,
 } from "./serp-pages/select.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Read the pages that rank above a client for the searches where it matters, and
@@ -51,6 +53,7 @@ async function main() {
   try {
     const has = (await c.query(`SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'seo_serp_results'`)).rowCount === 1;
     if (!has) throw new Error("The table seo_serp_results does not exist yet. Deploy the dashboard app (schema v256), let a weekly rank pull run, then run this again.");
+    await logChurnedSkipped(c, "Top results");
     const clients = (await c.query<{ id: string; name: string; seo_domain: string }>(
       `SELECT id, name, seo_domain FROM clients WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> '' AND status <> 'churned' ORDER BY name`)).rows;
     const chosenClients = clients.filter((x) => !only || slugify(x.name) === only.toLowerCase() || x.id === only);
@@ -116,4 +119,4 @@ async function main() {
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `summary=${line}\n`);
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

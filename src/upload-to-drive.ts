@@ -3,6 +3,7 @@ import "dotenv/config";
 import { readFileSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { JWT } from "google-auth-library";
+import { describeError } from "./describe-error.js";
 
 /**
  * Uploads a file (the encrypted nightly DB dump) to a Google Drive folder, and
@@ -84,7 +85,7 @@ async function main() {
       if (pruned) console.log(`Pruned ${pruned} backup(s) older than ${retentionDays} days.`);
     }
   } catch (e) {
-    console.log(`Prune skipped: ${e instanceof Error ? e.message : e}`);
+    console.log(`Prune skipped: ${describeError(e)}`);
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

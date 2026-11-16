@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { QboClient } from "./qbo.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Syncs QuickBooks' real Products/Services catalog into Postgres
@@ -63,4 +64,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

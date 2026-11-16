@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { JWT } from "google-auth-library";
+import { describeError } from "./describe-error.js";
 
 /**
  * Freezes ("snapshots") a plan Google Doc to an immutable PDF the moment a
@@ -186,7 +187,7 @@ async function main() {
         console.log(`  ✓ ${r.id}: "${title}" → ${url}`);
         done++;
       } catch (e) {
-        console.log(`  FAILED ${r.id}: ${e instanceof Error ? e.message : e} — leaving unsent, will retry next run`);
+        console.log(`  FAILED ${r.id}: ${describeError(e)} — leaving unsent, will retry next run`);
         failed++;
       }
     }
@@ -195,4 +196,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { describeError } from "./describe-error.js";
 
 /**
  * Replay a call-tracking or form export into the dashboard's webform endpoint.
@@ -364,4 +365,4 @@ async function main(): Promise<void> {
   console.log("Re-running is safe: every row carries call_id, so nothing would be written twice.");
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : String(e)); process.exit(2); });
+main().catch((e) => { console.error(describeError(e)); process.exit(2); });

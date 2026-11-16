@@ -18,6 +18,7 @@ import {
 import type { PlatformAdapter } from "./ads/platform.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 import { planSeeds, seedSourceLine } from "./ads/keyword-sourcing.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * The cadenced deep audit — the job that gives the ads analysis a memory.
@@ -481,7 +482,7 @@ async function main() {
           // One account's credentials or API hiccup must not take the whole
           // weekly run down for every other client.
           accountsFailed++;
-          console.log(`  ⚠ ${t.clientName} [${accountId}] failed: ${e instanceof Error ? e.message : e}`);
+          console.log(`  ⚠ ${t.clientName} [${accountId}] failed: ${describeError(e)}`);
           if (!dryRun) {
             const failed = await writeRunRecord(c, {
               clientId: t.clientId, platform, accountId, startedAt: accountStart, scoped: Boolean(onlyClient),
@@ -553,4 +554,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

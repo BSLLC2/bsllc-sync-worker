@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { QboClient } from "./qbo.js";
 import { planInvoiceReconcile, closeLines, type OpenInvoiceRow } from "./qbo/invoice-reconcile.js";
 import { appendFileSync } from "node:fs";
+import { describeError } from "./describe-error.js";
 
 /**
  * Pull-side QBO billing sync — distinct from import-qbo-invoices.ts, which
@@ -221,7 +222,7 @@ async function main() {
     try {
       quickBooksCount = await qbo.countInvoices();
     } catch (e) {
-      console.log(`  … couldn't ask QuickBooks how many invoices it holds: ${e instanceof Error ? e.message : e}`);
+      console.log(`  … couldn't ask QuickBooks how many invoices it holds: ${describeError(e)}`);
     }
     const { rows: openRows } = await c.query<{ id: string; doc_number: string | null; customer_name: string | null; balance_cents: number }>(
       `SELECT id, doc_number, customer_name, balance_cents FROM qbo_invoices WHERE balance_cents > 0`,
@@ -322,4 +323,4 @@ async function main() {
     }
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

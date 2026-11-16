@@ -1,9 +1,11 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { splitClients, skippedLine } from "./client-scope.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { monthSnapshot } from "./dates.js";
 import { fetchHubspotDealsWithContacts, hsFetchAll, hubspotBucket, hubspotDealSource, hubspotDealStage, isAttributed, loadWebInquiryIndex, matchWebInquiry, looksLikeSample, resolveHubspotToken, type Bucket, type HSObj } from "./attribution.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Per-CLIENT HubSpot metrics importer — distinct from import-hubspot.ts,
@@ -70,13 +72,16 @@ async function main() {
   const pgc = new pg.Client({ connectionString: databaseUrl });
   await pgc.connect();
   let clients: { id: string; name: string }[];
+  let skippedNote = "";
   try {
-    const { rows } = await pgc.query<{ id: string; name: string }>(
-      `SELECT c.id, c.name FROM clients c
+    const { rows } = await pgc.query<{ id: string; name: string; status: string | null }>(
+      `SELECT c.id, c.name, c.status FROM clients c
          JOIN connector_mappings cm ON cm.client_id = c.id AND cm.source = 'hubspot' AND cm.enabled = true
         ORDER BY c.name`,
     );
-    clients = args.onlyClient ? rows.filter((r) => r.id === args.onlyClient) : rows;
+    const split = splitClients(rows, (r) => ({ status: r.status }));
+    skippedNote = skippedLine(split);
+    clients = args.onlyClient ? split.live.filter((r) => r.id === args.onlyClient) : split.live;
   } finally {
     // token resolution below needs the same connection; keep it open until then
     await pgc.end();
@@ -86,6 +91,7 @@ async function main() {
     console.log("No clients have an enabled HubSpot connector — nothing to do.");
     process.exit(0);
   }
+  console.log(`HubSpot connectors: ${skippedNote}`);
   console.log(`HubSpot metrics import — ${clients.length} client(s) with HubSpot enabled, since ${args.since}${args.dryRun ? " (dry-run)" : ""}`);
 
   const syncs: SyncEntry[] = [];
@@ -116,7 +122,7 @@ async function main() {
         hsFetchAll(token, "contacts", ["createdate"]),
       ]);
     } catch (e) {
-      const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+      const msg = (describeError(e)).slice(0, 300);
       console.error(`  ${client.name} — FAILED: ${msg}`);
       skipped.push(client.name);
       continue;
@@ -219,4 +225,4 @@ async function main() {
   process.exit(code || (skipped.length ? 1 : 0));
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

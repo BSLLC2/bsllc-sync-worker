@@ -3,6 +3,7 @@ import "dotenv/config";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { QboClient, findReportTotal, type QboReport, type QboReportRow } from "./qbo.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Financials tab (Phase 1 actuals): pulls P&L (month-to-date, quarter-to-date,
@@ -157,7 +158,7 @@ async function main() {
         await upsertFinancialSnapshot(c, { reportType: "profit_and_loss", periodType: p.periodType, periodStart: p.start, periodEnd: p.end, data: report, summary });
         console.log(`  ✓ P&L ${p.periodType} (${p.start}..${p.end}) — net income ${summary.netIncomeCents != null ? `$${(summary.netIncomeCents / 100).toLocaleString("en-US")}` : "(unavailable)"}`);
       } catch (e) {
-        console.log(`  ✗ P&L ${p.periodType} (${p.start}..${p.end}): ${e instanceof Error ? e.message : e}`);
+        console.log(`  ✗ P&L ${p.periodType} (${p.start}..${p.end}): ${describeError(e)}`);
       }
     }
 
@@ -176,7 +177,7 @@ async function main() {
           console.log(`    (debug) actual group names in this report: ${collectGroupNames(bs).join(", ") || "(none found)"}`);
         }
       } catch (e) {
-        console.log(`  ✗ Balance Sheet: ${e instanceof Error ? e.message : e}`);
+        console.log(`  ✗ Balance Sheet: ${describeError(e)}`);
       }
 
       try {
@@ -185,7 +186,7 @@ async function main() {
         await upsertFinancialSnapshot(c, { reportType: "cash_flow", periodType: "trailing_90", periodStart: ninetyDaysAgo, periodEnd: todayIso, data: cf, summary });
         console.log(`  ✓ Cash Flow (trailing 90d)`);
       } catch (e) {
-        console.log(`  ✗ Cash Flow: ${e instanceof Error ? e.message : e}`);
+        console.log(`  ✗ Cash Flow: ${describeError(e)}`);
       }
 
       try {
@@ -199,7 +200,7 @@ async function main() {
         );
         console.log(`  ✓ Cash position — $${(cashCents / 100).toLocaleString("en-US")} across ${accounts.length} account(s)`);
       } catch (e) {
-        console.log(`  ✗ Cash position: ${e instanceof Error ? e.message : e}`);
+        console.log(`  ✗ Cash position: ${describeError(e)}`);
       }
     }
     console.log("Done.");
@@ -207,4 +208,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

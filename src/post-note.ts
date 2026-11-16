@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
+import { describeError } from "./describe-error.js";
 
 /** Post one plain-text note to the team Slack channel via SLACK_WEBHOOK_URL.
  *  Used by the morning agent session to report what it fixed, since the
@@ -16,4 +17,4 @@ async function main() {
   console.log(res.ok ? "Posted." : `Slack post failed (${res.status}).`);
   if (!res.ok) process.exit(1);
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

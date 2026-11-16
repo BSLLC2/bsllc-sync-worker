@@ -2,10 +2,12 @@
 import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
+import { splitClients, skippedLine } from "./client-scope.js";
 import { runDashboardSync, type SyncEntry, type ChannelMetricRow } from "./emit.js";
 import { monthSnapshot } from "./dates.js";
 import { evidencedMetric } from "./metric-evidence.js";
 import { channelRows, channelSince, DEFAULT_CHANNEL_MONTHS } from "./ga4/channel-rows.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * GA4 → dashboard conversions importer. For clients where we have no CRM to
@@ -67,21 +69,22 @@ function parseArgs(argv: string[]): Args {
  * admin" just works — no secret to maintain. The GA4_PROPERTY_MAP secret and
  * --map arg are merged in as optional extras/overrides.
  */
-async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
+async function mapFromDb(databaseUrl: string): Promise<{ map: Record<string, string>; skipped: string }> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    const { rows } = await client.query<{ client_id: string; external_id: string; name: string | null }>(
-      `SELECT cm.client_id, cm.external_id, c.name
+    const { rows: all } = await client.query<{ client_id: string; external_id: string; name: string | null; status: string | null }>(
+      `SELECT cm.client_id, cm.external_id, c.name, c.status
          FROM connector_mappings cm LEFT JOIN clients c ON c.id = cm.client_id
         WHERE cm.source = 'ga4' AND cm.enabled = true
           AND cm.external_id IS NOT NULL AND cm.external_id <> ''`,
     );
+    const split = splitClients(all, (r) => ({ status: r.status }));
     const m: Record<string, string> = {};
     // Keep a client_id → name side table purely so failures can name the client.
     // A bare UUID in an error tells whoever reads the log nothing they can act on.
-    for (const r of rows) { m[r.client_id] = propertyId(r.external_id); if (r.name) CLIENT_NAMES[r.client_id] = r.name; }
-    return m;
+    for (const r of split.live) { m[r.client_id] = propertyId(r.external_id); if (r.name) CLIENT_NAMES[r.client_id] = r.name; }
+    return { map: m, skipped: skippedLine(split) };
   } finally {
     await client.end();
   }
@@ -163,7 +166,8 @@ async function main() {
 
   // Source of truth: GA4 property IDs entered in the dashboard (Admin →
   // Connectors). Merge in the optional secret + --map as extras/overrides.
-  const map: Record<string, string> = await mapFromDb(databaseUrl);
+  const { map, skipped } = await mapFromDb(databaseUrl);
+  console.log(`GA4 connectors: ${skipped}`);
   const fromDb = Object.keys(map).length;
   if (process.env.GA4_PROPERTY_MAP) {
     try { Object.assign(map, JSON.parse(process.env.GA4_PROPERTY_MAP)); } catch { throw new Error("GA4_PROPERTY_MAP is not valid JSON."); }
@@ -213,7 +217,7 @@ async function main() {
       // the whole run — and the log named only that first property, hiding how
       // many others were also broken. Record it, keep going, and report the
       // full list at the end so every grant can be fixed in one pass.
-      const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+      const msg = (describeError(e)).slice(0, 300);
       console.error(`  ${label(slug)} (property ${propertyId}) — FAILED: ${msg}`);
       denied.push(`${label(slug)} → GA4 property ${propertyId}`);
       continue;
@@ -314,7 +318,7 @@ async function main() {
       // aggregate report and refuses the dimensioned one is a real state (a
       // permission, a quota, a custom channel grouping), and losing the three
       // blended keys over it would blank figures the dashboard already shows.
-      const msg = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+      const msg = (describeError(e)).slice(0, 200);
       channelNotes.push(`${label(slug)} — channel breakdown FAILED, the monthly totals above still imported: ${msg}`);
     }
   }
@@ -356,6 +360,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
+  console.error(describeError(e));
   process.exit(1);
 });

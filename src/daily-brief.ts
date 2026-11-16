@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * One Slack message every weekday morning instead of a transcript: per
@@ -196,4 +197,4 @@ async function main() {
     } else console.log(dryRun ? `[dry-run] would post:\n${text}` : "SLACK_WEBHOOK_URL not set — skipping post.");
   } finally { await c.end(); }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

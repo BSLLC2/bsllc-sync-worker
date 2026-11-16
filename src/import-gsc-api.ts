@@ -2,8 +2,10 @@
 import "dotenv/config";
 import { JWT } from "google-auth-library";
 import pg from "pg";
+import { splitClients, skippedLine } from "./client-scope.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { monthSnapshot } from "./dates.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Google Search Console → dashboard importer (LIVE API). Replaces the CSV-only
@@ -50,16 +52,19 @@ async function gscToken(): Promise<string> {
 }
 
 /** Which client uses which GSC property — from Admin → Connectors. */
-async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
+async function mapFromDb(databaseUrl: string): Promise<{ map: Record<string, string>; skipped: string }> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    const { rows } = await client.query<{ client_id: string; external_id: string }>(
-      "SELECT client_id, external_id FROM connector_mappings WHERE source = 'gsc' AND enabled = true AND external_id IS NOT NULL AND external_id <> ''",
+    const { rows } = await client.query<{ client_id: string; external_id: string; status: string | null }>(
+      `SELECT cm.client_id, cm.external_id, c.status
+         FROM connector_mappings cm LEFT JOIN clients c ON c.id = cm.client_id
+        WHERE cm.source = 'gsc' AND cm.enabled = true AND cm.external_id IS NOT NULL AND cm.external_id <> ''`,
     );
+    const split = splitClients(rows, (r) => ({ status: r.status }));
     const m: Record<string, string> = {};
-    for (const r of rows) m[r.client_id] = r.external_id.trim();
-    return m;
+    for (const r of split.live) m[r.client_id] = r.external_id.trim();
+    return { map: m, skipped: skippedLine(split) };
   } finally {
     await client.end();
   }
@@ -152,7 +157,9 @@ async function main() {
   const dashboardDir = process.env.DASHBOARD_DIR?.trim();
   if (!databaseUrl || !dashboardDir) throw new Error("Missing DATABASE_URL / DASHBOARD_DIR.");
 
-  let map = await mapFromDb(databaseUrl);
+  const scoped = await mapFromDb(databaseUrl);
+  let map = scoped.map;
+  console.log(`Search Console connectors: ${scoped.skipped}`);
   if (onlyClient) map = Object.fromEntries(Object.entries(map).filter(([clientId]) => clientId === onlyClient));
   if (!Object.keys(map).length) { console.log("No GSC properties in Admin → Connectors — nothing to import."); return; }
 
@@ -206,9 +213,9 @@ async function main() {
         syncs.push({
           client_id: slug, source: "gsc", external_id: siteUrl,
           period_start: sinceEff, period_end: end, synced_at: new Date().toISOString(),
-          data_state: "error", error_message: (e instanceof Error ? e.message : String(e)).slice(0, 300), metrics: {},
+          data_state: "error", error_message: (describeError(e)).slice(0, 300), metrics: {},
         });
-        console.log(`  ✗ ${slug} (${siteUrl}) — ${e instanceof Error ? e.message : e}`);
+        console.log(`  ✗ ${slug} (${siteUrl}) — ${describeError(e)}`);
       }
     }
   } else {
@@ -247,8 +254,8 @@ async function main() {
           });
           console.log(`  ${slug} (${siteUrl}) ${w.label} — ${t.clicks} clicks · ${t.impressions} impr · pos ${t.position.toFixed(1)}`);
         } catch (e) {
-          syncs.push({ ...base, data_state: "error", error_message: (e instanceof Error ? e.message : String(e)).slice(0, 300), metrics: {} });
-          console.log(`  ✗ ${slug} (${siteUrl}) ${w.label} — ${e instanceof Error ? e.message : e}`);
+          syncs.push({ ...base, data_state: "error", error_message: (describeError(e)).slice(0, 300), metrics: {} });
+          console.log(`  ✗ ${slug} (${siteUrl}) ${w.label} — ${describeError(e)}`);
           break; // a 403 will repeat for every window; record it once
         }
       }
@@ -273,4 +280,4 @@ async function main() {
   process.exit(code);
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

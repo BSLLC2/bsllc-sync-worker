@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * The one backlog for getting every priority client's data streams (leads,
@@ -110,4 +111,4 @@ async function main() {
     console.log("done.");
   } finally { await c.end(); }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import {
   reqEnv, serviceAccount, tokenFor, gmailGet, toFetched, type FetchedMessage,
 } from "./import-email";
+import { describeError } from "./describe-error.js";
 
 /**
  * Fetch the bodies of SPECIFIC already-logged emails, named by the dashboard.
@@ -126,7 +127,7 @@ export function readManifest(text: string): { messages: ManifestMessage[]; note:
   try {
     json = JSON.parse(text);
   } catch (e) {
-    throw new Error(`the manifest is not valid JSON — ${e instanceof Error ? e.message : e}`);
+    throw new Error(`the manifest is not valid JSON — ${describeError(e)}`);
   }
   const root = json as { messages?: unknown; scope?: { contactsInScope?: number; stillOutstanding?: number } };
   if (!Array.isArray(root.messages)) throw new Error("the manifest has no `messages` array.");
@@ -173,7 +174,7 @@ async function tokenForMailbox(tokens: Tokens, sa: { client_email: string; priva
     tokens.set(mailbox, t);
     return t;
   } catch (e) {
-    console.error(`  ${mailbox}: could not mint a token — ${e instanceof Error ? e.message : e}`);
+    console.error(`  ${mailbox}: could not mint a token — ${describeError(e)}`);
     tokens.set(mailbox, "");
     return null;
   }
@@ -246,7 +247,7 @@ async function main() {
   try {
     text = readFileSync(args.manifest, "utf8");
   } catch (e) {
-    console.error(`backfill-email-bodies: cannot read ${args.manifest} — ${e instanceof Error ? e.message : e}`);
+    console.error(`backfill-email-bodies: cannot read ${args.manifest} — ${describeError(e)}`);
     process.exit(1);
   }
 
@@ -254,7 +255,7 @@ async function main() {
   try {
     parsed = readManifest(text);
   } catch (e) {
-    console.error(`backfill-email-bodies: ${e instanceof Error ? e.message : e}`);
+    console.error(`backfill-email-bodies: ${describeError(e)}`);
     process.exit(1);
   }
 
@@ -310,7 +311,7 @@ async function main() {
       if (status === 401 || status === 403) {
         console.error(`  ${m.gmailId}: ${status} — check domain-wide delegation (gmail.readonly) is authorized for this service account.`);
       } else {
-        console.error(`  ${m.gmailId}: ${e instanceof Error ? e.message : e}`);
+        console.error(`  ${m.gmailId}: ${describeError(e)}`);
       }
       // A run of 401s means the credential is wrong and every later call will
       // fail the same way; stop rather than burn the whole manifest on it.
@@ -358,7 +359,7 @@ async function main() {
 const isDirectRun = process.argv[1]?.endsWith("backfill-email-bodies.ts") || process.argv[1]?.endsWith("backfill-email-bodies.js");
 if (isDirectRun) {
   main().catch((e) => {
-    console.error(e instanceof Error ? e.message : e);
+    console.error(describeError(e));
     process.exit(2);
   });
 }

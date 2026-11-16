@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import { credsFromEnv, type DfsCreds } from "./dataforseo.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * READ-ONLY: DataForSEO Labs ranked_keywords (Google, US, live) for a list of
@@ -40,7 +41,7 @@ async function main() {
         row(target, kd?.keyword ?? "", n(se?.rank_absolute), n(kd?.keyword_info?.search_volume), n(kd?.keyword_info?.cpc), n(kd?.keyword_properties?.keyword_difficulty), kd?.search_intent_info?.main_intent ?? "", se?.url ?? "", n(se?.etv), "dataforseo_labs/google/ranked_keywords/live", RUN, "");
       }
     } catch (e) {
-      row(target, "", "", "", "", "", "", "", "", "dataforseo_labs/google/ranked_keywords/live", RUN, `ERROR ${e instanceof Error ? e.message : String(e)}`);
+      row(target, "", "", "", "", "", "", "", "", "dataforseo_labs/google/ranked_keywords/live", RUN, `ERROR ${describeError(e)}`);
     }
   }
   console.log("### END");

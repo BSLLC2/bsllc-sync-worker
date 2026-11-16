@@ -3,6 +3,7 @@ import { resolveTargets, type Target } from "./targets.js";
 import { makeAdsApi, pullWindow, pullVerifiedConversions } from "./google-ads.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { weeklyAsOfDates, windowFor, calendarWindows, type Window } from "./dates.js";
+import { describeError } from "./describe-error.js";
 
 // Must match CONVERSION_ACTION_NAME in import-offline-conversions.ts — that's
 // the only action fed exclusively by real, sheet-matched admissions.
@@ -192,30 +193,7 @@ function sleep(ms: number): Promise<void> {
  * and a human message. Fall back to JSON so nothing is ever lost.
  */
 function formatError(err: unknown): string {
-  if (err instanceof Error && err.message) return err.message;
-  if (err && typeof err === "object") {
-    const anyErr = err as { errors?: unknown; message?: unknown };
-    if (Array.isArray(anyErr.errors) && anyErr.errors.length > 0) {
-      return anyErr.errors
-        .map((e) => {
-          const ge = e as { error_code?: Record<string, unknown>; message?: string };
-          const code = ge.error_code
-            ? Object.entries(ge.error_code)
-                .map(([k, v]) => `${k}=${v}`)
-                .join(",")
-            : "";
-          return [code, ge.message].filter(Boolean).join(" ");
-        })
-        .join(" | ");
-    }
-    if (typeof anyErr.message === "string" && anyErr.message) return anyErr.message;
-    try {
-      return JSON.stringify(err);
-    } catch {
-      /* fall through */
-    }
-  }
-  return String(err);
+  return describeError(err, 600);
 }
 
 main().catch((err) => {

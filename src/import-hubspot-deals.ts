@@ -4,6 +4,7 @@ import pg from "pg";
 import { resolveAllowedPipelines, pipelineVerdict, PIPELINE_ENV_VAR } from "./deal-pipeline";
 import { dealStatus, dealStageLabel, dealClosedAt, type DealStatus } from "./hubspot-deal-status";
 import { randomUUID } from "node:crypto";
+import { describeError } from "./describe-error.js";
 
 /**
  * Syncs HubSpot deals into the app's `deals` table (and the companies they
@@ -371,4 +372,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

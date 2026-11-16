@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import webpush from "web-push";
+import { describeError } from "./describe-error.js";
 
 /**
  * Sends browser push notifications for new client comments. The deployed app
@@ -84,4 +85,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

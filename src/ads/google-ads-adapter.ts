@@ -34,6 +34,7 @@ import {
   shapeCampaignNegativeRules, shapeSharedNegativeRules, shapeAccountNegativeRules, combineNegativeRules,
   type NegativeRuleFacts,
 } from "./negative-match.js";
+import { describeError } from "../describe-error.js";
 
 /** The API returns enums as integers over REST, not their string names, so a
  *  `=== "BROAD"` comparison silently never matches. Map both forms. */
@@ -238,7 +239,7 @@ async function safeQuery(customer: any, label: string, gaql: string, onLog?: (s:
   try {
     return await customer.query(gaql);
   } catch (e: any) {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
+    const msg = describeError(e);
     (onLog ?? console.log)(`    ⚠ ${label} query failed: ${msg.slice(0, 200)}`);
     return [];
   }
@@ -254,7 +255,7 @@ async function tryQuery(customer: any, label: string, gaql: string, onLog?: (s: 
   try {
     return await customer.query(gaql);
   } catch (e: any) {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
+    const msg = describeError(e);
     (onLog ?? console.log)(`    ⚠ ${label} query failed: ${msg.slice(0, 200)}`);
     return null;
   }
@@ -1021,7 +1022,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
       const out = await applyChangeSet(customer, this.accountForOps, this.changeSetFor(op, body), { apply: false, onLog: this.onLog });
       return { ok: true, serverValidated: true, message: out.log.join("\n") };
     } catch (e: any) {
-      const msg = e?.errors?.map((x: any) => x.message).join("; ") || (e instanceof Error ? e.message : String(e));
+      const msg = describeError(e);
       return { ok: false, serverValidated: true, message: msg };
     }
   }
@@ -1047,7 +1048,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
         rollbackPlan: out.rollback,
       };
     } catch (e: any) {
-      const msg = e?.errors?.map((x: any) => x.message).join("; ") || (e instanceof Error ? e.message : String(e));
+      const msg = describeError(e);
       return { ok: false, message: msg, result: null, priorValues: null, rollbackPlan: [] };
     }
   }
@@ -1066,7 +1067,7 @@ export class GoogleAdsAdapter implements PlatformAdapter {
         rollbackPlan: out.manual,
       };
     } catch (e: any) {
-      const msg = e?.errors?.map((x: any) => x.message).join("; ") || (e instanceof Error ? e.message : String(e));
+      const msg = describeError(e);
       return { ok: false, message: msg, result: null, priorValues: null, rollbackPlan: [] };
     }
   }

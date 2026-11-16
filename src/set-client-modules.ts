@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Set a client's module entitlement flags (ads/seo/aeo/revenue_roi) — what the
@@ -65,4 +66,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ set-client-modules failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ set-client-modules failed:", describeError(e)); process.exit(1); });

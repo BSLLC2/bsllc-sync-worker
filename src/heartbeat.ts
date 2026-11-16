@@ -18,6 +18,7 @@ import pg from "pg";
  * instead of the bare "job status: failure" it showed until now.
  */
 import { existsSync, readFileSync } from "node:fs";
+import { describeError } from "./describe-error.js";
 
 function lastLogLine(file: string): string | null {
   if (!existsSync(file)) return null;
@@ -76,4 +77,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

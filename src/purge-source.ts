@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Scoped, deliberate cleanup: deletes metric_snapshots for ONE client + ONE
@@ -59,6 +60,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error("purge failed:", e instanceof Error ? e.message : e);
+  console.error("purge failed:", describeError(e));
   process.exit(1);
 });

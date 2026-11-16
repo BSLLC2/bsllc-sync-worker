@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Correct a connector_mappings.external_id that was entered wrong (e.g. a
@@ -63,4 +64,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ fix-connector-external-id failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ fix-connector-external-id failed:", describeError(e)); process.exit(1); });

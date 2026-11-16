@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Turn a specific task into a client e-signature sign-off. The client report
@@ -67,4 +68,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ enable-signoff failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ enable-signoff failed:", describeError(e)); process.exit(1); });

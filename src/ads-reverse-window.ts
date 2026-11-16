@@ -9,6 +9,7 @@ import type { DerivedFinding } from "./ads/rules.js";
 import {
   planReversal, type ReversalFacts, type ReversalItem, type StoredChange,
 } from "./ads/change-reversal.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Propose putting a window of recorded changes back.
@@ -193,7 +194,7 @@ async function main() {
         [account.platform, account.account_id],
       );
       const { names, from } = await campaignNames(c, account, live).catch((e) => {
-        console.log(`   (campaign names could not be read: ${e instanceof Error ? e.message : String(e)})`);
+        console.log(`   (campaign names could not be read: ${describeError(e)})`);
         return { names: {} as Record<string, string>, from: "no campaign names" };
       });
 
@@ -247,7 +248,7 @@ async function main() {
 const isEntry = process.argv[1] && /ads-reverse-window\.[tj]s$/.test(process.argv[1]);
 if (isEntry) {
   main().catch((e) => {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || (e instanceof Error ? e.message : String(e));
+    const msg = describeError(e);
     console.error(msg);
     process.exit(1);
   });

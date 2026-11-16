@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import pg from "pg";
 import { GoogleAdsApi } from "google-ads-api";
 import { loadConfig, digitsOnly } from "./config.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Applies a reviewed change set to one Google Ads account.
@@ -643,7 +644,7 @@ async function main() {
 const isEntry = process.argv[1] && /apply-ads-changes\.[tj]s$/.test(process.argv[1]);
 if (isEntry) {
   main().catch((e) => {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || (e instanceof Error ? e.message : String(e));
+    const msg = describeError(e);
     console.error(msg);
     process.exit(1);
   });

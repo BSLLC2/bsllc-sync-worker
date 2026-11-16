@@ -4,6 +4,7 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { QboClient, type QboReport, type QboReportRow, type QboReportCol } from "./qbo.js";
 import { qboTxnUrl, nameSideForTxnType } from "./qbo-links.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * QBO depth — the layer under the Financials tab's summary numbers.
@@ -317,7 +318,7 @@ async function main() {
       stats.pnlMonthAccountLines = rows.filter((r) => r.line.lineType === "account").length;
       console.log(`  ✓ P&L by month: ${columns.length} month column(s), ${lines.filter((l) => l.lineType === "account").length} account line(s), ${lines.filter((l) => l.lineType === "section").length} section total(s)`);
       if (dryRun) for (const l of lines.slice(0, 8)) console.log(`    ${l.lineType.padEnd(7)} ${l.section ?? "-"} ${l.accountId} ${l.accountName}: ${l.amounts.map((a) => (a / 100).toFixed(0)).join(" | ")}`);
-    } catch (e) { const m = `P&L by month: ${e instanceof Error ? e.message : e}`; errors.push(m); console.log(`  ✗ ${m}`); }
+    } catch (e) { const m = `P&L by month: ${describeError(e)}`; errors.push(m); console.log(`  ✗ ${m}`); }
 
     // 3. P&L by customer / class / vendor — one call per month per dimension.
     const dims: { key: string; by: "Customers" | "Classes" | "Vendors"; nameOf: (id: string) => string | undefined }[] = [
@@ -346,7 +347,7 @@ async function main() {
           await writePnl(dim.key, [m], rows);
           lineCount += rows.length;
           if (dryRun && m === months[months.length - 1]) for (const r of rows.slice(0, 6)) console.log(`    ${dim.key} ${r.dimensionName} · ${r.line.accountName}: $${(r.amount / 100).toFixed(2)}`);
-        } catch (e) { const msg = `P&L by ${dim.key} ${m.start}: ${e instanceof Error ? e.message : e}`; errors.push(msg); console.log(`  ✗ ${msg}`); }
+        } catch (e) { const msg = `P&L by ${dim.key} ${m.start}: ${describeError(e)}`; errors.push(msg); console.log(`  ✗ ${msg}`); }
       }
       stats[`pnl_${dim.key}_lines`] = lineCount;
       console.log(`  ✓ P&L by ${dim.key}: ${lineCount} line(s) across ${months.length} month(s)`);
@@ -393,7 +394,7 @@ async function main() {
           for (const r of rows.slice(0, 8)) console.log(`    ${r.txnDate} ${r.txnType.padEnd(14)} ${(r.accountName ?? "").slice(0, 28).padEnd(28)} ${(r.name ?? "").slice(0, 24).padEnd(24)} $${(r.amountCents / 100).toFixed(2)}  ${r.url}`);
         }
         txnCount += rows.length;
-      } catch (e) { const msg = `General ledger ${m.start}: ${e instanceof Error ? e.message : e}`; errors.push(msg); console.log(`  ✗ ${msg}`); }
+      } catch (e) { const msg = `General ledger ${m.start}: ${describeError(e)}`; errors.push(msg); console.log(`  ✗ ${msg}`); }
     }
     stats.transactions = txnCount; stats.unresolvedNames = unresolvedNames;
     console.log(`  ✓ General ledger: ${txnCount} line(s) over ${months.length} month(s)${unresolvedNames ? ` (${unresolvedNames} with a name that matched neither a customer nor a vendor)` : ""}`);
@@ -423,7 +424,7 @@ async function main() {
         stats[`aging_${kind}_rows`] = rows.length - (total ? 1 : 0);
         console.log(`  ✓ ${kind.toUpperCase()} aging: ${stats[`aging_${kind}_rows`]} ${kind === "ar" ? "customer" : "vendor"} row(s), rows sum $${(sumRows / 100).toFixed(2)}, report total ${total ? `$${(total.total / 100).toFixed(2)}` : "(no total row)"}`);
         if (dryRun) for (const r of rows.slice(0, 5)) console.log(`    ${r.entityName}: ${r.buckets.map((b) => (b / 100).toFixed(0)).join(" | ")} = $${(r.total / 100).toFixed(2)}`);
-      } catch (e) { const msg = `${kind.toUpperCase()} aging: ${e instanceof Error ? e.message : e}`; errors.push(msg); console.log(`  ✗ ${msg}`); }
+      } catch (e) { const msg = `${kind.toUpperCase()} aging: ${describeError(e)}`; errors.push(msg); console.log(`  ✗ ${msg}`); }
     }
 
     const ok = errors.length === 0;
@@ -431,10 +432,10 @@ async function main() {
     console.log(`${ok ? "Done." : `Done with ${errors.length} error(s).`} ${JSON.stringify(stats)}`);
     if (!ok) process.exitCode = 1;
   } catch (e) {
-    if (!dryRun) await c.query(`UPDATE qbo_import_runs SET finished_at = now(), ok = false, stats_json = $2, note = $3 WHERE id = $1`, [runId, JSON.stringify(stats), (e instanceof Error ? e.message : String(e)).slice(0, 900)]).catch(() => {});
+    if (!dryRun) await c.query(`UPDATE qbo_import_runs SET finished_at = now(), ok = false, stats_json = $2, note = $3 WHERE id = $1`, [runId, JSON.stringify(stats), (describeError(e)).slice(0, 900)]).catch(() => {});
     throw e;
   } finally {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

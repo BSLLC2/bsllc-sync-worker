@@ -25,6 +25,7 @@ export interface Doors {
 }
 
 import { sheetsBase, driveBase } from "./och-google.js";
+import { describeError } from "./describe-error.js";
 const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly";
 const down = (s: number | null) => s == null || s === 429 || s >= 500;
@@ -111,7 +112,7 @@ export async function gatherFacts(
       else if (!stored) skipped.push("the comparison with the figures we stored last time (nothing stored to compare with)");
       facts.board = { unrecognizedStatuses: reading.unrecognizedStatuses, dropped: stored ? droppedMonths(reading.admittedByMonth, stored, o.today) : null };
     } catch (e) {
-      facts.columns = { ok: false, detail: (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200) };
+      facts.columns = { ok: false, detail: (describeError(e)).replace(/\s+/g, " ").slice(0, 200) };
     }
   }
   return { facts, skipped, tab };

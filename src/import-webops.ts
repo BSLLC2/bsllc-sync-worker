@@ -1,6 +1,8 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { splitClients, skippedLine } from "./client-scope.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * WebOps site-health importer. For every client with the WebOps add-on AND a WP
@@ -93,10 +95,13 @@ async function main() {
   const c = new pg.Client({ connectionString: databaseUrl });
   await c.connect();
   try {
-    let clients = (await c.query<{ id: string; name: string; web_ops_site_id: string }>(
-      `SELECT id, name, web_ops_site_id FROM clients
+    let clients = (await c.query<{ id: string; name: string; web_ops_site_id: string; status: string | null }>(
+      `SELECT id, name, web_ops_site_id, status FROM clients
         WHERE web_ops_add_on = true AND web_ops_site_id IS NOT NULL AND btrim(web_ops_site_id) <> ''`,
     )).rows;
+    const split = splitClients(clients, (r) => ({ status: r.status }));
+    console.log(`WebOps clients: ${skippedLine(split)}`);
+    clients = split.live;
     if (onlyClient) clients = clients.filter((c) => c.id === onlyClient);
     if (!clients.length) { console.log("No WebOps clients with a WP Umbrella site id — nothing to do."); return; }
 
@@ -117,7 +122,7 @@ async function main() {
         ok++;
       } catch (e) {
         failed++;
-        console.log(`✗ ${client.name}: ${e instanceof Error ? e.message : e}`);
+        console.log(`✗ ${client.name}: ${describeError(e)}`);
       }
     }
     console.log(`WebOps: ${ok} ok, ${failed} failed${dryRun ? " (dry-run, nothing written)" : ""}.`);
@@ -126,4 +131,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

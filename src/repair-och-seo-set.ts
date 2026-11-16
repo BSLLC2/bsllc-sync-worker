@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * One-off repair of OHC's tracked keyword set. Two defects, both found by
@@ -126,4 +127,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

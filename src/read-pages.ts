@@ -2,8 +2,10 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { readSite, summaryLine, type ReadSummary } from "./page-reader/run.js";
 import { writePageRow } from "./page-reader/store.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Read a client's own public pages and keep facts about them.
@@ -107,6 +109,7 @@ async function main() {
       throw new Error("The table seo_page_facts does not exist yet. Deploy the dashboard app (schema v240) first, then run this again.");
     }
     const hasRankingUrl = await columnExists(c, "seo_rank_history", "ranking_url");
+    await logChurnedSkipped(c, "Page reader");
     const clients = (await c.query<ClientRow>(
       `SELECT id, name, seo_domain FROM clients
         WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> '' AND status <> 'churned' AND is_internal = false
@@ -155,4 +158,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

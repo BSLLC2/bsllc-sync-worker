@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Seed client-facing task visibility for a client. The client report is opt-in
@@ -44,4 +45,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ seed-client-visibility failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ seed-client-visibility failed:", describeError(e)); process.exit(1); });

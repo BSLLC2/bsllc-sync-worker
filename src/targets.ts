@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import pg from "pg";
 import { digitsOnly, type Config } from "./config.js";
+import { splitClients, skippedLine } from "./client-scope.js";
 
 /**
  * One account to pull: which dashboard client it maps to, and which Google Ads
@@ -30,8 +31,9 @@ export async function targetsFromDb(cfg: Config): Promise<Target[]> {
       client_id: string;
       name: string;
       external_id: string;
+      status: string | null;
     }>(
-      `SELECT cm.client_id, c.name, cm.external_id
+      `SELECT cm.client_id, c.name, cm.external_id, c.status
          FROM connector_mappings cm
          JOIN clients c ON c.id = cm.client_id
         WHERE cm.source = 'google_ads'
@@ -40,7 +42,9 @@ export async function targetsFromDb(cfg: Config): Promise<Target[]> {
           AND cm.external_id <> ''
         ORDER BY c.name`,
     );
-    return rows.map((r) => ({
+    const split = splitClients(rows, (r) => ({ status: r.status }));
+    console.log(`Google Ads connectors: ${skippedLine(split)}`);
+    return split.live.map((r) => ({
       clientRef: r.client_id,
       clientLabel: r.name,
       customerId: digitsOnly(r.external_id),

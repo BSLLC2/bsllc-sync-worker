@@ -4,6 +4,7 @@ import pg from "pg";
 import { phone10 } from "./lead-keys.js";
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 import { accessToken, sheetsBase, sheetsFetch } from "./och-google.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Writes OCH's website leads into a tab WE own inside their intake sheet —
@@ -192,4 +193,4 @@ async function main() {
   ] });
   console.log(`Wrote ${values.length - 2} lead row(s) to "${OUR_TAB}".`);
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

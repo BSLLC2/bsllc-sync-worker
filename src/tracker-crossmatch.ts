@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { TRACKER_CONFIGS, type TrackerConfig } from "./tracker/config.js";
 import { openSource } from "./tracker/source.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Aggregates-only cross-check of a client's two sales sheets: which rows in the quote log belong to a person who
@@ -109,4 +110,4 @@ async function main() {
   const wonOurs = [...table].filter(([k]) => /^won \| tagged ours/.test(k)).reduce((s, [, b]) => s + b.n, 0);
   console.log(`\nCheck: of ${wonOurs} won rows the log tags as ours, ${wonOursMatched} also match a form lead (a low number means the form sheet is not where those came from, or the log carries no email/phone for them).`);
 }
-main().catch((e) => { console.error(`crossmatch failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}`); process.exit(1); });
+main().catch((e) => { console.error(`crossmatch failed: ${(describeError(e)).slice(0, 200)}`); process.exit(1); });

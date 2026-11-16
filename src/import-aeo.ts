@@ -1,8 +1,10 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { splitClients, skippedLine } from "./client-scope.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { credsFromEnv, aeoCheck, AEO_PROVIDERS, type AeoResult } from "./dataforseo.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Weekly AEO (Answer Engine Optimization) visibility tracking via DataForSEO's
@@ -23,7 +25,7 @@ import { credsFromEnv, aeoCheck, AEO_PROVIDERS, type AeoResult } from "./datafor
 
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
-interface ClientRow { id: string; name: string; brand_name: string | null; seo_domain: string | null; }
+interface ClientRow { id: string; name: string; brand_name: string | null; seo_domain: string | null; status: string | null; }
 
 function req(name: string): string {
   const v = process.env[name];
@@ -50,9 +52,11 @@ async function main() {
   await c.connect();
   const syncs: SyncEntry[] = [];
   try {
-    const clients = (await c.query<ClientRow>(
-      `SELECT id, name, brand_name, seo_domain FROM clients`,
-    )).rows;
+    const scoped = splitClients((await c.query<ClientRow>(
+      `SELECT id, name, brand_name, seo_domain, status FROM clients`,
+    )).rows, (r) => ({ status: r.status }));
+    console.log(`AI-answer clients: ${skippedLine(scoped)}`);
+    const clients = scoped.live;
 
     for (const client of clients) {
       const slug = slugify(client.name);
@@ -131,4 +135,4 @@ async function main() {
   process.exit(code);
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

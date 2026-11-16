@@ -1,8 +1,10 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { splitClients, skippedLine } from "./client-scope.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { credsFromEnv, domainAuthority, type DomainAuthority } from "./dataforseo.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Weekly domain-authority snapshot via DataForSEO. For each active client with a
@@ -25,7 +27,7 @@ import { credsFromEnv, domainAuthority, type DomainAuthority } from "./dataforse
 
 const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
-interface ClientRow { id: string; name: string; seo_domain: string | null; seo_location: string | null; }
+interface ClientRow { id: string; name: string; seo_domain: string | null; seo_location: string | null; status: string | null; }
 
 function req(name: string): string {
   const v = process.env[name];
@@ -64,10 +66,12 @@ async function main() {
     // Trackable domain resolved the same way import-seo.ts does. Filter to active
     // clients when the schema carries an `active` flag; otherwise take all with a domain.
     const activeFilter = (await columnExists(c, "clients", "active")) ? "AND active = true" : "";
-    const clients = (await c.query<ClientRow>(
-      `SELECT id, name, seo_domain, seo_location FROM clients
+    const scoped = splitClients((await c.query<ClientRow>(
+      `SELECT id, name, seo_domain, seo_location, status FROM clients
         WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> '' ${activeFilter}`,
-    )).rows;
+    )).rows, (r) => ({ status: r.status }));
+    console.log(`Domain authority: ${skippedLine(scoped)}`);
+    const clients = scoped.live;
 
     for (const client of clients) {
       const slug = slugify(client.name);
@@ -91,7 +95,7 @@ async function main() {
       try {
         auth = await domainAuthority(creds, domain, location);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         syncs.push({ ...base, data_state: "error", error_message: msg.slice(0, 300), metrics: {} });
         console.log(`✗ ${slug}: DataForSEO authority pull failed — ${msg.slice(0, 120)}`);
         continue;
@@ -120,4 +124,4 @@ async function main() {
   process.exit(code);
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

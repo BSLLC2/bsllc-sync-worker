@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { deriveJobCadences, type JobCadence } from "./job-cadence.js";
 import { detectFeedStoppage, detectFormStoppages, stoppageLine, stoppageSignature, type FeedCadence, type FeedStoppage, type LeadEvent } from "./lead-cadence.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Watches data freshness and Slack-alerts when a pipeline stops flowing. Reads
@@ -399,4 +400,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

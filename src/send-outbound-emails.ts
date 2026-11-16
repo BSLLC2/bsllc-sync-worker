@@ -3,6 +3,7 @@ import { safeReplyTo } from "./reply-to";
 import "dotenv/config";
 import pg from "pg";
 import { JWT } from "google-auth-library";
+import { describeError } from "./describe-error.js";
 
 /**
  * Drains the dashboard's `outbound_emails` queue (the deployed app makes zero
@@ -115,7 +116,7 @@ async function main() {
         await c.query(`UPDATE outbound_emails SET status='sent', sent_at=now(), error=NULL WHERE id=$1`, [r.id]);
         console.log(`  sent → ${r.to_email} (${r.kind})`); sent++;
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         await c.query(`UPDATE outbound_emails SET error=$2 WHERE id=$1`, [r.id, msg.slice(0, 500)]);
         console.log(`  FAILED ${r.id} (${r.to_email}): ${msg} — stays pending, retries next run`); failed++;
       }
@@ -125,4 +126,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

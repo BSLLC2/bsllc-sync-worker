@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { deriveJobCadences } from "./job-cadence.js";
 import { ADS_JOB_NAMES, adsJobFindings } from "./ads-operability.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Every weekday morning, before the brief: check every heartbeat and every
@@ -288,4 +289,4 @@ async function main() {
     if (!dryRun) await c.query(`INSERT INTO job_heartbeats (job, ran_at, ok, note) VALUES ('morning_audit', now(), true, $1) ON CONFLICT (job) DO UPDATE SET ran_at = now(), ok = true, note = EXCLUDED.note`, [`${findings.length} findings, ${fixes.length} fixes`]);
   } finally { await c.end(); }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

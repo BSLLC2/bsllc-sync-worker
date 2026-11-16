@@ -3,6 +3,7 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * One-off/idempotent bulk task applier: reads a tasks CSV and UPSERTS each row
@@ -126,4 +127,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

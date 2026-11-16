@@ -3,6 +3,7 @@ import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import { JWT } from "google-auth-library";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { readClientBehaviour, type ClientCtx, type ClientResult } from "./page-behaviour/run.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { writeBehaviour, writeEvents, writeRun, writeVitals } from "./page-behaviour/store.js";
@@ -87,6 +88,7 @@ async function main() {
     for (const t of ["seo_page_behaviour", "seo_page_events", "seo_page_vitals", "seo_ux_runs"]) {
       if (!(await tableExists(c, t))) throw new Error(`The table ${t} does not exist yet. Deploy the dashboard app (schema v252) first, then run this again.`);
     }
+    await logChurnedSkipped(c, "Page behaviour");
     const clients = (await c.query<ClientRow>(
       `SELECT id, name, seo_domain FROM clients WHERE status <> 'churned' AND is_internal = false ORDER BY name`)).rows;
     const maps = (await c.query<{ client_id: string; source: string; external_id: string }>(

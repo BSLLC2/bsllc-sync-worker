@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { normPath } from "./page-behaviour/paths.js";
 
@@ -60,6 +61,7 @@ async function main() {
     for (const t of ["seo_url_inspection", "signal_runs"]) {
       if (!(await tableExists(c, t))) throw new Error(`The table ${t} does not exist yet. Deploy the dashboard app (schema v257) first, then run this again.`);
     }
+    await logChurnedSkipped(c, "URL inspection");
     const clients = (await c.query<{ id: string; name: string; seo_domain: string | null }>(
       `SELECT id, name, seo_domain FROM clients WHERE status <> 'churned' AND is_internal = false ORDER BY name`)).rows;
     const maps = (await c.query<{ client_id: string; external_id: string }>(

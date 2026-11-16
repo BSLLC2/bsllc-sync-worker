@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import type { Deps } from "./ga4-report/run.js";
 import { processClients, type PipelineResult } from "./ga4-report/pipeline.js";
 import { DEFAULT_MONTHS, MAX_MONTHS } from "./ga4-report/types.js";
@@ -77,6 +78,7 @@ async function main() {
         if (!(await tableExists(c, t))) throw new Error(`The table ${t} does not exist yet. Deploy the dashboard app first, then run this again.`);
       }
     }
+    await logChurnedSkipped(c, "Website report");
     const clients = (await c.query<ClientRow>(`SELECT id, name, seo_domain FROM clients WHERE status <> 'churned' AND is_internal = false ORDER BY name`)).rows;
     const maps = (await c.query<{ client_id: string; external_id: string }>(
       `SELECT client_id, external_id FROM connector_mappings

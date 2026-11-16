@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { randomUUID } from "node:crypto";
+import { describeError } from "./describe-error.js";
 
 /**
  * Records each client's current monthly recurring revenue into `mrr_history`
@@ -68,6 +69,6 @@ async function main() {
   }
 }
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
+  console.error(describeError(e));
   process.exit(1);
 });

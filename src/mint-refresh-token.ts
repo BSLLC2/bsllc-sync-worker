@@ -1,6 +1,7 @@
 import "dotenv/config";
 import http from "node:http";
 import { OAuth2Client } from "google-auth-library";
+import { describeError } from "./describe-error.js";
 
 /**
  * One-time helper: mints a Google Ads refresh token via the OAuth loopback
@@ -85,6 +86,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("mint-token failed:", err instanceof Error ? err.message : err);
+  console.error("mint-token failed:", describeError(err));
   process.exit(1);
 });

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Drains the dashboard's `sms_messages` outbound queue via Dialpad. The
@@ -116,7 +117,7 @@ async function main() {
         );
         console.log(`  ✓ ${r.from_number ?? userId} → ${to} (${r.user_email ?? "?"})`); sent++;
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         const ageMs = Date.now() - new Date(r.created_at).getTime();
         if (ageMs > GIVE_UP_AFTER_MS) {
           await c.query(`UPDATE sms_messages SET status='failed', error_text=$2 WHERE id=$1`, [r.id, `Gave up after retrying for 24h: ${msg}`.slice(0, 500)]);
@@ -133,4 +134,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

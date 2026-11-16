@@ -47,6 +47,7 @@ import type { AuditInput, AdSetRow, CampaignRow } from "./rules.js";
 import {
   META_GRAPH, countMetaConversions, metaLinkClicks, metaSpendToMicros,
 } from "../meta/insights.js";
+import { describeError } from "../describe-error.js";
 
 export { countMetaConversions };
 
@@ -171,7 +172,7 @@ export class MetaAdapter implements PlatformAdapter {
       });
       insights = Array.isArray(resp?.data) ? resp.data : [];
     } catch (e) {
-      this.onLog(`    ⚠ Meta insights failed for ${act}: ${e instanceof Error ? e.message : e}`);
+      this.onLog(`    ⚠ Meta insights failed for ${act}: ${describeError(e)}`);
       return empty;
     }
 
@@ -206,7 +207,7 @@ export class MetaAdapter implements PlatformAdapter {
         categories.set(String(c.id), cats);
       }
     } catch (e) {
-      this.onLog(`    ⚠ Meta campaign budgets failed for ${act}: ${e instanceof Error ? e.message : e}`);
+      this.onLog(`    ⚠ Meta campaign budgets failed for ${act}: ${describeError(e)}`);
     }
 
     // Ad sets, and the platform's own verdict on whether its delivery model can
@@ -238,7 +239,7 @@ export class MetaAdapter implements PlatformAdapter {
           });
         }
       } catch (e) {
-        this.onLog(`    ⚠ Meta ad-set insights failed for ${act}: ${e instanceof Error ? e.message : e}`);
+        this.onLog(`    ⚠ Meta ad-set insights failed for ${act}: ${describeError(e)}`);
       }
       for (const a of resp?.data ?? []) {
         const id = String(a.id ?? "");
@@ -264,7 +265,7 @@ export class MetaAdapter implements PlatformAdapter {
         });
       }
     } catch (e) {
-      this.onLog(`    ⚠ Meta ad sets failed for ${act}: ${e instanceof Error ? e.message : e}`);
+      this.onLog(`    ⚠ Meta ad sets failed for ${act}: ${describeError(e)}`);
     }
 
     let inflatedClickRows = 0;
@@ -460,7 +461,7 @@ export class MetaAdapter implements PlatformAdapter {
         windowStart, windowEnd,
       };
     } catch (e) {
-      this.onLog(`    ⚠ Meta verify failed for ${entityId}: ${e instanceof Error ? e.message : e}`);
+      this.onLog(`    ⚠ Meta verify failed for ${entityId}: ${describeError(e)}`);
       return zero;
     }
   }

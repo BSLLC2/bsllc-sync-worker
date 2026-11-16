@@ -30,6 +30,7 @@
  */
 import type { AuditAccounting } from "./rules.js";
 import type { NotRechecked } from "./sweep-plan.js";
+import { describeError } from "../describe-error.js";
 
 export const RUN_SUMMARY_VERSION = 1;
 
@@ -146,7 +147,8 @@ export function buildRunSummary(f: RunFacts): AdsRunSummary {
 
 /** A failure's one-line reason: the first line, trimmed. Never a stack, never a token. */
 export function failureReason(e: unknown): string {
-  const raw = e instanceof Error ? e.message : String(e);
+  // An Error keeps its own first line (a stack is never kept); a thrown plain object is described, never "[object Object]".
+  const raw = e instanceof Error ? e.message : describeError(e);
   const first = raw.split(/\r?\n/)[0] ?? "";
   // Anything that looks like a credential is cut rather than kept.
   const cleaned = first.replace(/(bearer\s+)[\w.\-]+/gi, "$1[cut]").replace(/\b(ya29|1\/\/|AIza)[\w.\-]{8,}/g, "[cut]");

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Bulk-set the category (setup | ongoing) of a client's open tasks. 'setup'
@@ -78,4 +79,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ set-task-category failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ set-task-category failed:", describeError(e)); process.exit(1); });

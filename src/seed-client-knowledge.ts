@@ -5,6 +5,7 @@ import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Seed "Client knowledge" from the research briefs.
@@ -210,5 +211,5 @@ async function main() {
 
 // Only run when invoked directly, so parseBrief can be imported by a test.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((e) => { console.error("✗ seed-client-knowledge failed:", e instanceof Error ? e.message : e); process.exit(1); });
+  main().catch((e) => { console.error("✗ seed-client-knowledge failed:", describeError(e)); process.exit(1); });
 }

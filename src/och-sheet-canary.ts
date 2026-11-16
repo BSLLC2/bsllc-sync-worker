@@ -6,6 +6,7 @@ import { accessToken, sheetsFetch } from "./och-google.js";
 import { ochSheetId } from "./och-sheet-target.js";
 import { checkOchSheet, summaryLine, hasStop, type CheckFacts } from "./och-sheet-check.js";
 import { gatherFacts, type Doors } from "./och-sheet-gather.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Daily check on OCH's Admission Board connection. Read-only: it opens the
@@ -120,6 +121,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(`OCH-SHEET stop check_crashed: the check itself failed (${(e instanceof Error ? e.message : String(e)).slice(0, 150)}).`);
+  console.error(`OCH-SHEET stop check_crashed: the check itself failed (${(describeError(e)).slice(0, 150)}).`);
   process.exit(1);
 });

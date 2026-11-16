@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * One-off repair: client-detail.tsx's CSV importer had a report_status bug
@@ -82,4 +83,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ fix-och-baseline-status failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ fix-och-baseline-status failed:", describeError(e)); process.exit(1); });

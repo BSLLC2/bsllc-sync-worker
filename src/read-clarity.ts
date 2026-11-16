@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { readClarity, parseTokens, recentlyRead, CLARITY_ROW_LIMIT } from "./page-behaviour/clarity.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { CLARITY_KEEP_DAYS, DELETE_OLD_CLARITY, writeClarity, writeRun } from "./page-behaviour/store.js";
@@ -50,6 +51,7 @@ async function main() {
       const r = await c.query(`SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`, [t]);
       if (r.rowCount !== 1) throw new Error(`The table ${t} does not exist yet. Deploy the dashboard app (schema v252) first, then run this again.`);
     }
+    await logChurnedSkipped(c, "Clarity");
     const mapped = (await c.query<{ client_id: string; name: string }>(
       `SELECT cm.client_id, c.name FROM connector_mappings cm JOIN clients c ON c.id = cm.client_id
         WHERE cm.source = 'clarity' AND cm.enabled = true AND cm.external_id IS NOT NULL AND btrim(cm.external_id) <> ''

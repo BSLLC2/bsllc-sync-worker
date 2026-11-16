@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { QboClient } from "./qbo.js";
 import { ymd } from "./dates.js";
 import { buildQuotePdf } from "./quote-pdf.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * On quote signature → QuickBooks, once an AM presses "Launch invoicing" on
@@ -307,7 +308,7 @@ async function main() {
           try {
             await qbo.attachPdfToInvoice(invoiceId, `${r.quote_number ?? "quote"}-signed.pdf`, await quotePdf());
           } catch (e) {
-            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't attach signed quote to invoice ${invoiceId}: ${e instanceof Error ? e.message : e}`);
+            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't attach signed quote to invoice ${invoiceId}: ${describeError(e)}`);
           }
           // Creating the invoice does NOT email it -- QBO only marks it
           // "needs to be sent" until a separate send call fires. Without
@@ -317,7 +318,7 @@ async function main() {
               await qbo.sendInvoice(invoiceId, billTo);
               await c.query(`UPDATE pricing_quotes SET qbo_invoice_sent_at=now() WHERE id=$1`, [r.id]);
             } catch (e) {
-              console.log(`  … ${r.client_name} (${r.quote_number}): couldn't send invoice ${invoiceId} to ${billTo}: ${e instanceof Error ? e.message : e}`);
+              console.log(`  … ${r.client_name} (${r.quote_number}): couldn't send invoice ${invoiceId} to ${billTo}: ${describeError(e)}`);
             }
           } else {
             console.log(`  … ${r.client_name} (${r.quote_number}): invoice ${invoiceId} created but not sent -- no billing email on file. Will retry sending once one shows up.`);
@@ -338,7 +339,7 @@ async function main() {
             await c.query(`UPDATE pricing_quotes SET qbo_invoice_sent_at=now() WHERE id=$1`, [r.id]);
             console.log(`  ✓ ${r.client_name} (${r.quote_number}): billing contact confirmed — sent invoice ${r.qbo_invoice_id} to ${accounting.email}`);
           } catch (e) {
-            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't send existing invoice ${r.qbo_invoice_id} to ${accounting.email}: ${e instanceof Error ? e.message : e}`);
+            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't send existing invoice ${r.qbo_invoice_id} to ${accounting.email}: ${describeError(e)}`);
           }
         } else if (wantsSendExisting && !needSendExisting) {
           console.log(`  … ${r.client_name} (${r.quote_number}): invoice ${r.qbo_invoice_id} still has no billing email on file — nothing to send yet.`);
@@ -399,12 +400,12 @@ async function main() {
           try {
             await qbo.attachPdfToInvoice(recurringId, `${r.quote_number ?? "quote"}-signed.pdf`, await quotePdf());
           } catch (e) {
-            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't attach signed quote to recurring template ${recurringId}: ${e instanceof Error ? e.message : e}`);
+            console.log(`  … ${r.client_name} (${r.quote_number}): couldn't attach signed quote to recurring template ${recurringId}: ${describeError(e)}`);
           }
         }
         done++;
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         await c.query(`UPDATE pricing_quotes SET qbo_sync_error=$2 WHERE id=$1`, [r.id, msg.slice(0, 500)]);
         console.log(`  ✗ ${r.client_name} (${r.quote_number}): ${msg}`);
         failed++;
@@ -415,4 +416,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

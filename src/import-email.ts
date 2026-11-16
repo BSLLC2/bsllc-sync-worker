@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { JWT } from "google-auth-library";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Gmail → dashboard email-activity import. The worker holds the Google
@@ -357,7 +358,7 @@ async function main() {
       if (status === 401 || status === 403) {
         console.error(`  ${mailbox}: ${status} — check domain-wide delegation (gmail.readonly) is authorized for this service account.`);
       } else {
-        console.error(`  ${mailbox}: ${e instanceof Error ? e.message : e}`);
+        console.error(`  ${mailbox}: ${describeError(e)}`);
       }
     }
   }
@@ -405,7 +406,7 @@ async function main() {
 const isDirectRun = process.argv[1]?.endsWith("import-email.ts") || process.argv[1]?.endsWith("import-email.js");
 if (isDirectRun) {
   main().catch((e) => {
-    console.error(e instanceof Error ? e.message : e);
+    console.error(describeError(e));
     process.exit(1);
   });
 }

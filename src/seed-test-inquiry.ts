@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Insert ONE clearly-labeled test web inquiry so you can watch the dashboard's
@@ -44,4 +45,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

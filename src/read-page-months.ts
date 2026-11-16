@@ -4,6 +4,7 @@ import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { JWT } from "google-auth-library";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { ymd } from "./page-behaviour/paths.js";
 import {
@@ -98,6 +99,7 @@ async function main() {
     if (!(await tableExists(c, "seo_page_months"))) {
       throw new Error("The table seo_page_months does not exist yet. Deploy the dashboard app (schema v256) first, then run this again.");
     }
+    await logChurnedSkipped(c, "Page months");
     const clients = (await c.query<{ id: string; name: string }>(
       `SELECT id, name FROM clients WHERE status <> 'churned' AND is_internal = false ORDER BY name`)).rows;
     const maps = (await c.query<{ client_id: string; source: string; external_id: string }>(

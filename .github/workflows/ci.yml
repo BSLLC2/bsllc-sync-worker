@@ -44,6 +44,8 @@ jobs:
         run: npm run verify-ads-gaps
       - name: Structure read keeps the campaigns when an optional query is refused
         run: npm run verify-ads-structure-read
+      - name: Errors read as one safe line, and churned clients are never read
+        run: npm run verify-error-and-scope
       - name: Every GAQL field exists on the API version the library speaks
         run: npm run verify-gaql-fields
       - name: Search terms by day, WordPress changes (pure sections, fake server)

@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { realFetch } from "./page-behaviour/http.js";
 import { ymd } from "./page-behaviour/paths.js";
 import { derivedBrandPatterns } from "./ads/store.js";
@@ -64,6 +65,7 @@ async function main() {
   let clientsRun = 0, monthsOk = 0, monthsFailed = 0, monthsEmpty = 0, cappedMonths = 0, written = 0, clientsFailed = 0;
   try {
     if (!dryRun) await ensureQueryMonthsTable(c);
+    await logChurnedSkipped(c, "Branded searches");
     const clients = (await c.query<{ id: string; name: string; aliases: string | null; seo_domain: string | null }>(
       `SELECT id, name, aliases, seo_domain FROM clients WHERE status <> 'churned' AND is_internal = false ORDER BY name`)).rows;
     const maps = (await c.query<{ client_id: string; external_id: string }>(

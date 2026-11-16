@@ -14,6 +14,7 @@ import {
   episodesFrom, episodeKey, episodeDue, outcomeWindows, outcomeReading, noiseBand, noiseBandLine,
   OUTCOME_HORIZONS, outcomeYmd, type OutcomeEventFact,
 } from "./ads/outcome-record.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * The after-check. This is the part that turns a pile of recommendations into
@@ -318,7 +319,7 @@ async function measureChangeFeed(
           // A read that failed is not a window with no figures in it. The
           // reading says it could not be measured; nothing is stored as a
           // nought, and tomorrow's run tries again because nothing was written.
-          console.log(`   could not read the window: ${e instanceof Error ? e.message : String(e)}`);
+          console.log(`   could not read the window: ${describeError(e)}`);
           continue;
         }
         measured += 1;
@@ -466,4 +467,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

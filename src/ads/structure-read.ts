@@ -17,6 +17,7 @@ import {
   normalizeCampaignKeyword,
   type EntityKind, type SnapshotEntity, type UnrecognisedEnum,
 } from "./structure-snapshot.js";
+import { describeError } from "../describe-error.js";
 
 export interface KindRead {
   entities: SnapshotEntity[];
@@ -45,7 +46,7 @@ export async function readKind(
   try {
     rows = await customer.query(gaql);
   } catch (e: any) {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
+    const msg = describeError(e);
     return { entities: [], complete: false, problem: `${label} could not be read (${msg.slice(0, 160)}) — nothing of that kind was closed` };
   }
   const list = Array.isArray(rows) ? rows : [];
@@ -74,7 +75,7 @@ export async function readRaw(customer: any, label: string, gaql: string): Promi
     }
     return { rows: list, problem: null };
   } catch (e: any) {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
+    const msg = describeError(e);
     return { rows: null, problem: `${label} could not be read (${msg.slice(0, 160)}) — the kind it feeds was not read or closed this run` };
   }
 }

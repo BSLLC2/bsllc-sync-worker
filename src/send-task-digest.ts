@@ -2,6 +2,7 @@
 import "dotenv/config";
 import crypto from "node:crypto";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Morning task digest. Once a day, enqueue ONE team_notification per teammate
@@ -129,4 +130,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

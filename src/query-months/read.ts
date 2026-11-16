@@ -16,6 +16,7 @@ import {
   buildMonthRow, newTally, parseTotal, QUERY_PAGE_SIZE, QUERY_ROW_CEILING, queryRequest, tallyQueryPage, totalRequest,
   type MonthRowOut, type MonthSpan, type TermsSource,
 } from "./months.js";
+import { describeError } from "../describe-error.js";
 
 export const RETRY_TRIES = 3;
 const backoffMs = () => { const v = Number(process.env.QUERY_MONTHS_BACKOFF_MS); return Number.isFinite(v) && v >= 0 ? v : 1500; };
@@ -52,7 +53,7 @@ export function describeFailure(e: unknown): string {
     if (e.status === 429) return "Search Console is limiting requests (429)";
     return `Search Console answered ${e.status}`;
   }
-  const m = e instanceof Error ? e.message : String(e);
+  const m = describeError(e);
   return m.replace(/\s+/g, " ").slice(0, 200);
 }
 

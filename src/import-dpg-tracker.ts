@@ -2,10 +2,12 @@
 import "dotenv/config";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { readTrackerSheet } from "./dpg-tracker-read.js";
+import { churnedSlugs } from "./client-scope-db.js";
 import {
   DEAL_CAP, DPG_CLIENT_SLUG, FINDINGS, billingWindowStart, buildEntries, buildSummary, dpgSheetId, dpgTabGid,
   hasStop, readingFindings, summaryLine, type Finding,
 } from "./dpg-tracker.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Diesel Power Group's attributed closed deals, from the "DPG — Lead to
@@ -46,6 +48,11 @@ async function main() {
   const dryRun = process.argv.includes("--dry-run");
   const client = arg("client") ?? DPG_CLIENT_SLUG;
   const today = businessDay();
+  if ((await churnedSlugs(process.env.DATABASE_URL?.trim())).has(client)) {
+    console.log("DPG tracker: the client is churned, its sheet is not read. Stored history stays. 1 churned skipped");
+    console.log("\nDPG-SHEET ok: no sheet read, 1 churned skipped.");
+    process.exit(0);
+  }
   const windowStart = billingWindowStart();
   console.log(`DPG tracker import${dryRun ? " (dry-run)" : ""}, window opens ${windowStart}, today ${today}`);
 
@@ -83,7 +90,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  const why = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ");
+  const why = (describeError(e)).replace(/\s+/g, " ");
   console.error(`DPG-SHEET stop check_crashed: the import itself failed (${why.slice(0, 150)}).`);
   process.exit(1);
 });

@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Create one commitment (task) directly, for cases that need a task on the
@@ -80,4 +81,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ add-commitment failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ add-commitment failed:", describeError(e)); process.exit(1); });

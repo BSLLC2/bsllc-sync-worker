@@ -12,6 +12,7 @@ import {
   recordKeywordMetricFailure, storeConversionActionMetrics, storeKeywordMetrics, type Part,
 } from "./ads/keyword-metrics.js";
 import type { UnrecognisedEnum } from "./ads/structure-snapshot.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Each keyword's last 30 days, and each campaign's conversions by conversion
@@ -66,7 +67,7 @@ async function main() {
       try {
         customer = await openCustomer(api, cfg, accountId);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         failedParts += 2;
         problems.push(`${t.clientName} failed: ${msg.slice(0, 200)}`);
         console.log(`  ⚠ ${t.clientName}: ${msg.slice(0, 200)}`);
@@ -94,7 +95,7 @@ async function main() {
         } catch (e) {
           // One part must not take the other down, and a failure is a row that says so, never a clean read.
           failedParts += 1;
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = describeError(e);
           problems.push(`${t.clientName} ${part} failed: ${msg.slice(0, 200)}`);
           console.log(`  ⚠ ${t.clientName} (${part}): ${msg.slice(0, 200)}`);
           if (!dryRun) await recordKeywordMetricFailure(c, t.clientId, accountId, part, window, msg).catch(() => {});
@@ -118,4 +119,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

@@ -10,6 +10,7 @@ import {
   GOOGLE_RECS_GAQL, GOOGLE_RECS_DETAIL_GAQL, RECS_READ_CAP, closeRecs, ensureRecTables, normalizeRecommendation,
   parseRecDetails, planRecSync, readIsWhole, recordRecScan, storedRecs, upsertRecs, withDetails,
 } from "./ads/google-recs.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Read Google's own recommendations for each mapped ad account and store them.
@@ -88,7 +89,7 @@ async function main() {
         } catch (e) {
           detailOk = false;
           detailFailed += 1;
-          problems.push(`${t.clientName}: the detail pass failed (${(e instanceof Error ? e.message : String(e)).slice(0, 120)}), so budget and keyword suggestions carry no detail`);
+          problems.push(`${t.clientName}: the detail pass failed (${(describeError(e)).slice(0, 120)}), so budget and keyword suggestions carry no detail`);
         }
 
         // Campaign names, so the dashboard can say which campaign without a lookup.
@@ -127,7 +128,7 @@ async function main() {
         // One account's credentials or API hiccup must not take the run down. The
         // scan row is marked failed and nothing is closed, so the last good list
         // stands and the dashboard says when it was last read.
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         problems.push(`${t.clientName} [${accountId}] failed: ${msg.slice(0, 200)}`);
         console.log(`  ⚠ ${t.clientName}: ${msg.slice(0, 200)}`);
         if (!dryRun) {
@@ -156,4 +157,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

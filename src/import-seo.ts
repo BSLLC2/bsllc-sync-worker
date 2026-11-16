@@ -2,9 +2,11 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { splitClients, skippedLine } from "./client-scope.js";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { credsFromEnv, serpRanks, type SerpTask, type SerpResult } from "./dataforseo.js";
 import { serpTableExists, writeSerpCapture } from "./serp-results.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Weekly SEO rank tracking via DataForSEO's SERP API. Reads each client's
@@ -27,7 +29,7 @@ const chunk = <T>(arr: T[], n: number): T[][] => {
   return out;
 };
 
-interface ClientRow { id: string; name: string; seo_domain: string | null; seo_location: string | null; }
+interface ClientRow { id: string; name: string; seo_domain: string | null; seo_location: string | null; status: string | null; }
 interface TargetRow { id: string; keyword: string; scope: string; location_name: string | null; device: string | null; report_status: string; }
 
 function req(name: string): string {
@@ -64,9 +66,11 @@ async function main() {
     if (!hasCheckDetail) console.log("· seo_rank_history has no location_name / items_returned columns yet; checks are kept without how they were made");
     const hasSerpTable = await serpTableExists(c);
     if (!hasSerpTable) console.log("· seo_serp_results does not exist yet; the top results are not kept");
-    const clients = (await c.query<ClientRow>(
-      `SELECT id, name, seo_domain, seo_location FROM clients WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> ''`,
-    )).rows;
+    const scoped = splitClients((await c.query<ClientRow>(
+      `SELECT id, name, seo_domain, seo_location, status FROM clients WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> ''`,
+    )).rows, (r) => ({ status: r.status }));
+    console.log(`Position checks: ${skippedLine(scoped)}`);
+    const clients = scoped.live;
 
     // A client with tracked keywords and no website is never pulled, and used to
     // be skipped without a word. Name each one so the run log says what is
@@ -74,7 +78,7 @@ async function main() {
     const noSite = (await c.query<{ id: string; name: string; n: number }>(
       `SELECT c.id, c.name, count(t.id)::int AS n
          FROM clients c JOIN seo_targets t ON t.client_id = c.id AND t.active = true
-        WHERE c.seo_domain IS NULL OR btrim(c.seo_domain) = ''
+        WHERE (c.seo_domain IS NULL OR btrim(c.seo_domain) = '') AND COALESCE(c.status, '') <> 'churned'
         GROUP BY c.id, c.name ORDER BY c.name`,
     )).rows;
     for (const x of noSite) {
@@ -109,7 +113,7 @@ async function main() {
         try {
           results.push(...(await serpRanks(creds, domain, batch)));
         } catch (e) {
-          hardError = e instanceof Error ? e.message : String(e);
+          hardError = describeError(e);
           break;
         }
       }
@@ -224,4 +228,4 @@ async function main() {
   process.exit(code);
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

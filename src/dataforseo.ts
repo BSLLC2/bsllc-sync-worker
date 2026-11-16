@@ -2,6 +2,7 @@ import "dotenv/config";
 import { judgeIdeas, type IdeaJudgement } from "./ads/idea-relevance.js";
 import { isNational, placeLabel, UNITED_STATES } from "./research-location.js";
 import { containAndCap, containsAllWords, judgingInputs, perSeedLimit, providerSeeds } from "./ads/idea-seeds.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Thin DataForSEO API client. Two surfaces we use:
@@ -194,7 +195,7 @@ export async function serpRanks(
       const organicCount = items.filter((it) => it?.type === "organic").length;
       return { keyword: t.keyword, rank, aiOverview, url: rankingUrl, organic: topOrganic(items), itemsReturned: organicCount, error: null };
     } catch (e) {
-      return { keyword: t.keyword, rank: null, aiOverview: false, error: e instanceof Error ? e.message : String(e) };
+      return { keyword: t.keyword, rank: null, aiOverview: false, error: describeError(e) };
     }
   });
 }
@@ -288,7 +289,7 @@ export async function aeoCheck(
     const cited = Boolean(domain && urls.some((u) => hostMatches(domain, u)));
     return { prompt, provider, mentioned, cited, error: null };
   } catch (e) {
-    return { prompt, provider, mentioned: false, cited: false, error: e instanceof Error ? e.message : String(e) };
+    return { prompt, provider, mentioned: false, cited: false, error: describeError(e) };
   }
 }
 
@@ -895,7 +896,7 @@ export async function keywordDiscovery(
         const r = await keywordSuggestions(creds, search, locationName, languageName, perSeed);
         return { search, ok: true as const, ...r };
       } catch (e) {
-        return { search, ok: false as const, error: e instanceof Error ? e.message : String(e) };
+        return { search, ok: false as const, error: describeError(e) };
       }
     });
     const good = settled.filter((r): r is Extract<typeof r, { ok: true }> => r.ok);
@@ -944,7 +945,7 @@ export async function keywordDiscovery(
       }
       for (const [key, row] of rows) if (clientRank.has(key)) row.clientRank = clientRank.get(key) ?? null;
     } catch (e) {
-      warnings.push(`client rankings (${client}): ${e instanceof Error ? e.message : String(e)}`);
+      warnings.push(`client rankings (${client}): ${describeError(e)}`);
     }
   }
 
@@ -975,7 +976,7 @@ export async function keywordDiscovery(
           }
         }
       } catch (e) {
-        warnings.push(`competitor rankings (${comp}): ${e instanceof Error ? e.message : String(e)}`);
+        warnings.push(`competitor rankings (${comp}): ${describeError(e)}`);
       }
     }
   }
@@ -1004,7 +1005,7 @@ export async function keywordDiscovery(
           r.measuredIn = place;
         }
       } catch (e) {
-        warnings.push(`volumes for ${wanted.length} competitor-gap ideas in ${placeLabel(place)}: ${e instanceof Error ? e.message : String(e)}`);
+        warnings.push(`volumes for ${wanted.length} competitor-gap ideas in ${placeLabel(place)}: ${describeError(e)}`);
       }
     }
     // Whatever is still measured elsewhere carries no volume: a number from
@@ -1020,7 +1021,7 @@ export async function keywordDiscovery(
         costUsd += d.costUsd;
         for (const r of needKd) r.difficulty = d.byKeyword.get(normKw(r.keyword)) ?? null;
       } catch (e) {
-        warnings.push(`keyword difficulty for ${needKd.length} kept ideas: ${e instanceof Error ? e.message : String(e)}`);
+        warnings.push(`keyword difficulty for ${needKd.length} kept ideas: ${describeError(e)}`);
       }
     }
   }

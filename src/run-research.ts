@@ -5,6 +5,7 @@ import { credsFromEnv, keywordResearch, rankedKeywords, keywordGap, keywordDisco
 import { resolveProviderPlace } from "./research-provider-location.js";
 import { isNational, placeLabel, providerLocationName } from "./research-location.js";
 import { clientServicesFor, seoTargetsFor } from "./ads/store.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Runs queued research requests against DataForSEO. The deployed app enqueues a
@@ -192,7 +193,7 @@ async function main() {
         console.log(`  ✓ ${kind} "${kind === "rankings" ? r.target : r.query}" → done (${count} rows${costUsd != null ? `, $${costUsd.toFixed(4)}` : ""})`);
         done++;
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         await c.query(`UPDATE research_requests SET status='error', error=$2, completed_at=now() WHERE id=$1`, [r.id, msg.slice(0, 500)]);
         console.log(`  ✗ ${kind} "${kind === "rankings" ? r.target : r.query}": ${msg}`);
         failed++;
@@ -203,4 +204,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

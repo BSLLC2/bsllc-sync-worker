@@ -3,6 +3,7 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Reconcile LBL's tasks against the refined Aug-2026 Master Priority list
@@ -166,4 +167,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error("✗ reconcile-lbl-tasks failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ reconcile-lbl-tasks failed:", describeError(e)); process.exit(1); });

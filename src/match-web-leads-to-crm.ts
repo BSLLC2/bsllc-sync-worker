@@ -8,6 +8,7 @@ import {
   ensureLeadAttributionsTable, writeAttributions, ymd,
 } from "./attribution.js";
 import { detectSampleRecords, suspicionLine, verdictFor, type CrmRecordShape } from "./sample-detect.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Daily: tie the leads WE captured (web_inquiries) to the client's CRM, and
@@ -291,11 +292,11 @@ async function main() {
           console.log(`  ${crm}: ${w.upserted} upserted, ${w.removed} removed (no longer in CRM)`);
         } catch (e) {
           failures++;
-          console.error(`  ${crm}: FAILED — ${e instanceof Error ? e.message : e}`);
+          console.error(`  ${crm}: FAILED — ${describeError(e)}`);
         }
       }
     }
   } finally { await c.end(); }
   process.exit(failures ? 1 : 0);
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

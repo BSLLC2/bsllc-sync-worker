@@ -13,6 +13,7 @@ import { backfillExclusionLine } from "./lead-provenance.js";
 import { isAttributable, referentVerdict } from "./och-attribution.js";
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 import { accessToken, sheetsBase, sheetsFetch } from "./och-google.js";
+import { describeError } from "./describe-error.js";
 
 /** The per-client customer value (value per conversion) set in the dashboard
  *  header — the source of truth. Matched to the client by slugified name. */
@@ -267,7 +268,7 @@ async function main() {
   try {
     cols = resolveAdmissionColumns(rows, { tab, headerRowIndex: hIdx }, { require: ["name", "date", "contact", "referent"] });
   } catch (e) {
-    return reportHeaderFailure(args, e instanceof Error ? e.message : String(e));
+    return reportHeaderFailure(args, describeError(e));
   }
   const { dateCols, inquiryCols, refCol, statusCol, hasStatusCol, phoneCol, dobCol, nameCol } = cols;
 
@@ -542,7 +543,7 @@ async function main() {
   // backdated to a future synced_at, keep winning the "latest" pick. Idempotent.
   if (!args.dryRun) {
     const purged = await purgeFutureManualRows(databaseUrl, args.client).catch((e) => {
-      console.warn(`Could not purge future-dated rows: ${e instanceof Error ? e.message : e}`);
+      console.warn(`Could not purge future-dated rows: ${describeError(e)}`);
       return 0;
     });
     if (purged > 0) console.log(`Purged ${purged} stale future-dated manual snapshot row(s).`);
@@ -591,6 +592,6 @@ async function purgeFutureManualRows(databaseUrl: string, slug: string): Promise
 }
 
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
+  console.error(describeError(e));
   process.exit(1);
 });

@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Attach a meeting-notes doc to a client's public dashboard. Upserts a
@@ -66,4 +67,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ share-meeting failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ share-meeting failed:", describeError(e)); process.exit(1); });

@@ -2,8 +2,10 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { readWpSite, summaryLine, type WpSiteResult } from "./wp-changes/wp.js";
 import { ensureSiteChangeTables, storeWpResult } from "./wp-changes/store.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Read what each client's WordPress site says it published or edited, from the
@@ -37,6 +39,7 @@ async function main() {
   const results: WpSiteResult[] = [];
   try {
     if (!dryRun) await ensureSiteChangeTables(c);
+    await logChurnedSkipped(c, "WordPress changes");
     const clients = (await c.query<{ id: string; name: string; seo_domain: string }>(
       `SELECT id, name, seo_domain FROM clients
         WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> '' AND status <> 'churned' AND is_internal = false ORDER BY name`)).rows;
@@ -62,4 +65,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

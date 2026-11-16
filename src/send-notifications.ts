@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import { JWT } from "google-auth-library";
+import { describeError } from "./describe-error.js";
 
 /**
  * Sends the client-facing emails the dashboard enqueues in `notifications_outbox`
@@ -133,7 +134,7 @@ async function main() {
         console.log(`  sent → ${r.email} (${r.client_name})`);
         sent++;
       } catch (e) {
-        console.log(`  FAILED ${r.id} (${r.client_name}): ${e instanceof Error ? e.message : e} — will retry next run`);
+        console.log(`  FAILED ${r.id} (${r.client_name}): ${describeError(e)} — will retry next run`);
         skipped++;
       }
     }
@@ -142,4 +143,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

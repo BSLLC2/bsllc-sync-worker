@@ -10,6 +10,7 @@ import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd, isAdmittedStatus,
 import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote } from "./och-sheet-columns.js";
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 import { accessToken, sheetsBase } from "./och-google.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -394,4 +395,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

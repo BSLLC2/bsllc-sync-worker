@@ -13,6 +13,7 @@ import {
   type UnrecognisedEnum,
 } from "./ads/structure-snapshot.js";
 import { CORE_KINDS, readAccount } from "./ads/structure-read.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Take a structural snapshot of every mapped ad account.
@@ -134,7 +135,7 @@ async function main() {
         // for every other client, and must never be recorded as a clean
         // snapshot — the scan row says the read failed, so a reading over this
         // date knows it is looking at a gap rather than at an empty account.
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         problems.push(`${t.clientName} failed: ${msg.slice(0, 200)}`);
         console.log(`  ⚠ ${t.clientName}: ${msg.slice(0, 200)}`);
         if (!dryRun) await recordSnapshotFailure(c, t.clientId, PLATFORM, accountId, on, msg).catch(() => {});
@@ -165,4 +166,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

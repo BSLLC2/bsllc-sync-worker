@@ -7,6 +7,7 @@ import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
 import { logEvent, protectedPatternsFor, adsWriteAuthorityFor } from "./ads/store.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Drains human-approved findings, and human-requested rollbacks.
@@ -222,7 +223,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  const msg = e?.errors?.map((x: any) => x.message).join("; ") || (e instanceof Error ? e.message : String(e));
+  const msg = describeError(e);
   console.error(msg);
   process.exit(1);
 });

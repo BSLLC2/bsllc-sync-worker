@@ -3,6 +3,7 @@ import "dotenv/config";
 import pg from "pg";
 import { GoogleAdsApi } from "google-ads-api";
 import { loadConfig, digitsOnly, type Config } from "./config.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Read-only Google Ads optimisation audit. Pulls the resources where waste
@@ -51,7 +52,7 @@ async function safeQuery(customer: any, label: string, gaql: string): Promise<an
   try {
     return await customer.query(gaql);
   } catch (e: any) {
-    const msg = e?.errors?.map((x: any) => x.message).join("; ") || e?.message || String(e);
+    const msg = describeError(e);
     console.log(`    ⚠ ${label} query failed: ${msg.slice(0, 160)}`);
     return [];
   }
@@ -315,4 +316,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

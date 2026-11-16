@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * One-off repair: OCH's 21 local-scope keyword targets were imported with
@@ -54,4 +55,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ fix-och-local-location failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ fix-och-local-location failed:", describeError(e)); process.exit(1); });

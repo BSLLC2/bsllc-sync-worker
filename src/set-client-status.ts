@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
 import pg from "pg";
+import { describeError } from "./describe-error.js";
 
 /**
  * Set a client's account status (launch | active | paused | churned). Paused and
@@ -66,4 +67,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("✗ set-client-status failed:", e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error("✗ set-client-status failed:", describeError(e)); process.exit(1); });

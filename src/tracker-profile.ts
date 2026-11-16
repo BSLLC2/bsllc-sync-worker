@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { TRACKER_CONFIGS, type TrackerConfig } from "./tracker/config.js";
 import { openSource } from "./tracker/source.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Aggregates-only profile of a client's sales sheet: which columns are filled on
@@ -80,4 +81,4 @@ async function main() {
     }
   }
 }
-main().catch((e) => { console.error(`profile failed: ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}`); process.exit(1); });
+main().catch((e) => { console.error(`profile failed: ${(describeError(e)).slice(0, 200)}`); process.exit(1); });

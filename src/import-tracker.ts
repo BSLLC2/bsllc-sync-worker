@@ -3,6 +3,7 @@ import "dotenv/config";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { TRACKER_CONFIGS, resolveConfig, countedFromNote, sheetRefsOf, type TrackerConfig } from "./tracker/config.js";
 import { FINDINGS, hasStop, lineFor, worstLine, type Finding } from "./tracker/causes.js";
+import { churnedSlugs } from "./client-scope-db.js";
 import { buildFeedEntries, buildFeedSummary, readRows, type RowItem } from "./tracker/reading.js";
 import { buildMergedSummary, mergeSheets, sheetLabels, type SheetRead } from "./tracker/merge.js";
 import { resolveLayouts } from "./tracker/table.js";
@@ -13,6 +14,7 @@ import type { FeedSummary } from "./tracker/reading.js";
 import type { Table } from "./tracker/table.js";
 import type { RoleFound } from "./tracker/table.js";
 import type { RoleName } from "./tracker/config.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Closed-deal trackers for clients other than DPG (whose importer is
@@ -69,7 +71,7 @@ async function leadMatchFor(
     const idx = indexLeads(table, cols.cols, { countedFrom: base.countedFrom, today });
     return findCandidates(quote, idx, spec, { today, readAt });
   } catch (e) {
-    return noMatch("stopped", readAt, `The lead sheet could not be compared (${(e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 100)}).`, "check_crashed");
+    return noMatch("stopped", readAt, `The lead sheet could not be compared (${(describeError(e)).replace(/\s+/g, " ").slice(0, 100)}).`, "check_crashed");
   }
 }
 /** Diagnose for the lead sheet: its name, its headings and which of them each job found. Headings only, never a cell. */
@@ -259,12 +261,22 @@ async function main() {
   const dryRun = flag("dry-run");
   const diagnose = flag("diagnose");
   const want = arg("client")?.trim();
-  const configs = TRACKER_CONFIGS.filter((c) => !want || c.key === want || c.clientSlug === want);
-  if (configs.length === 0) {
+  const asked = TRACKER_CONFIGS.filter((c) => !want || c.key === want || c.clientSlug === want);
+  const churned = await churnedSlugs(process.env.DATABASE_URL?.trim());
+  const configs = asked.filter((c) => !churned.has(c.clientSlug));
+  const left = asked.filter((c) => churned.has(c.clientSlug));
+  if (asked.length === 0) {
     console.error(`TRACKER-FEED ${want ?? "none"} stop check_crashed: the import itself failed (no tracker is configured for "${want}").`);
     process.exit(1);
   }
   const today = businessDay();
+  for (const c of left) console.log(`${c.clientSlug}: client is churned, its sheet is not read. Stored history stays.`);
+  console.log(`Tracker clients: ${left.length} churned skipped`);
+  if (configs.length === 0) {
+    // Nothing to read is a clean run, not a fault. The last line stays in the heartbeat's shape.
+    console.log(`\nTRACKER-FEED ${want ?? "all"} ok: no sheet read, ${left.length} churned skipped.`);
+    process.exit(0);
+  }
   console.log(`Tracker import${diagnose ? " (diagnose)" : dryRun ? " (dry-run)" : ""}, ${configs.length} client${configs.length === 1 ? "" : "s"}, today ${today}`);
   const lines: string[] = [];
   const all: Finding[] = [];
@@ -281,7 +293,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  const why = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ");
+  const why = (describeError(e)).replace(/\s+/g, " ");
   console.error(`TRACKER-FEED ${arg("client") ?? "all"} stop check_crashed: the import itself failed (${why.slice(0, 150)}).`);
   process.exit(1);
 });

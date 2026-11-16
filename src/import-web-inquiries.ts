@@ -5,6 +5,7 @@ import pg from "pg";
 import { normalizeDob, phone10 } from "./lead-keys.js";
 import { ochSheetId } from "./och-sheet-target.js";
 import { accessToken, sheetsBase, sheetsFetch } from "./och-google.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Web inquiries (paid/organic form fills) → dashboard `web_inquiries` table.
@@ -256,6 +257,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
+  console.error(describeError(err));
   process.exit(1);
 });

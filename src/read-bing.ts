@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { signalRun, slugify, writeSignalRun, ymd } from "./signals/common.js";
 import { SECRET_NAMES, bingApiKey, secretValues } from "./signals/secrets.js";
@@ -54,6 +55,7 @@ async function main() {
     for (const t of ["bing_query_days", "bing_page_days", "bing_site_days", "bing_crawl_issues", "bing_sites", "signal_runs"]) {
       if (!(await tableExists(c, t))) throw new Error(`The table ${t} does not exist yet. Deploy the dashboard app (schema v257) first, then run this again.`);
     }
+    await logChurnedSkipped(c, "Bing");
     const mapped = (await c.query<{ id: string; name: string; external_id: string | null }>(
       `SELECT c.id, c.name, cm.external_id FROM clients c
          LEFT JOIN connector_mappings cm ON cm.client_id = c.id AND cm.source = 'bing' AND cm.enabled = true

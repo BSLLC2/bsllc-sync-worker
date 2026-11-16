@@ -12,6 +12,7 @@ import {
   recordScan, recordScanFailure, storeChangeEvents,
   type CapturedChange,
 } from "./ads/change-history.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Capture what changed in each mapped ad account, including the changes we did
@@ -185,7 +186,7 @@ async function main() {
         // for every other client. The scan row is marked failed rather than
         // moved forward, so every reading keeps telling the truth about how
         // far back it can see.
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         problems.push(`${t.clientName} [${accountId}] failed: ${msg.slice(0, 200)}`);
         console.log(`  ⚠ ${t.clientName}: ${msg.slice(0, 200)}`);
         if (!dryRun) await recordScanFailure(c, PLATFORM, accountId, msg).catch(() => {});
@@ -213,4 +214,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

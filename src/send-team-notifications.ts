@@ -2,6 +2,7 @@
 import "dotenv/config";
 import pg from "pg";
 import webpush from "web-push";
+import { describeError } from "./describe-error.js";
 
 /**
  * Delivers internal team notifications (task @mentions, AM review pings) the app
@@ -101,7 +102,7 @@ async function main() {
           );
           channels.push("email");
         } catch (e) {
-          console.log(`  email queue failed for ${n.user_email}: ${e instanceof Error ? e.message : e}`);
+          console.log(`  email queue failed for ${n.user_email}: ${describeError(e)}`);
         }
       }
       // Push
@@ -119,7 +120,7 @@ async function main() {
       // Slack DM
       if (u.notify_slack && u.slack_user_id && slackToken) {
         try { await slackDm(slackToken, u.slack_user_id, `*${n.title}*\n${n.body || ""}\n${link}`); channels.push("slack"); }
-        catch (e) { console.log(`  slack failed for ${n.user_email}: ${e instanceof Error ? e.message : e}`); }
+        catch (e) { console.log(`  slack failed for ${n.user_email}: ${describeError(e)}`); }
       }
       // SMS (dark until Twilio configured)
       if (u.notify_text && u.phone && twilioReady) {
@@ -131,7 +132,7 @@ async function main() {
             body: new URLSearchParams({ To: u.phone, From: env("TWILIO_FROM"), Body: `${n.title}\n${link}` }),
           });
           if (res.ok) channels.push("sms"); else console.log(`  sms failed for ${n.user_email}: ${res.status}`);
-        } catch (e) { console.log(`  sms error for ${n.user_email}: ${e instanceof Error ? e.message : e}`); }
+        } catch (e) { console.log(`  sms error for ${n.user_email}: ${describeError(e)}`); }
       }
 
       // Only mark 'sent' if something was actually delivered — previously this
@@ -148,4 +149,4 @@ async function main() {
     await c.end();
   }
 }
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

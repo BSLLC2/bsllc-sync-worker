@@ -11,6 +11,7 @@ import {
   accountLine, buildSearchTermRows, ensureSearchTermTables, recordSearchTermFailure, storeSearchTermDays, termWindow,
 } from "./ads/search-term-days.js";
 import type { UnrecognisedEnum } from "./ads/structure-snapshot.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * Each search term, by day, for the last 90 days. READ-ONLY: every query is a
@@ -80,7 +81,7 @@ async function main() {
       } catch (e) {
         // One account must not take the others down, and a failure is a row that says so, never a clean read.
         failed += 1;
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeError(e);
         problems.push(`${t.clientName} failed: ${msg.slice(0, 200)}`);
         console.log(`  ⚠ ${t.clientName}: ${msg.slice(0, 200)}`);
         if (!dryRun) await recordSearchTermFailure(c, t.clientId, accountId, msg).catch(() => {});
@@ -102,4 +103,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });
+main().catch((e) => { console.error(describeError(e)); process.exit(1); });

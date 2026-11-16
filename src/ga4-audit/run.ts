@@ -18,6 +18,7 @@ import { FLOOD_WINDOW, headlineFilter, reconcile, type BotConfig, type Reconcili
 import { addDays } from "../page-behaviour/paths.js";
 import { daysIn, hasCustomCompare, label, periodsFor, touches, type Window } from "./periods.js";
 import { readMovers, readSources, type MoverReading, type SourceReading } from "./traffic.js";
+import { describeError } from "../describe-error.js";
 
 export interface AuditOptions {
   client: string;
@@ -145,14 +146,14 @@ async function runAuditInner(read: Reader, o: AuditOptions): Promise<Audit> {
           note: `Median ratio ${med == null ? "n/a" : med.toFixed(2)}. Search Console is not affected by automated visits. A month whose Analytics organic sessions run far above the usual ratio suggests organic still holds automated traffic; far below suggests lost tracking. Neither proves it. The ratio is not 1 because the two tools count different things.`,
         });
       }
-    } catch (e) { quality.push(`Search Console could not be read: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`); }
+    } catch (e) { quality.push(`Search Console could not be read: ${(describeError(e)).slice(0, 160)}`); }
   } else quality.push("Search Console was not read: no property was available to this service account.");
 
   let findings: Findings;
   try {
     findings = await buildFindings({ read, window: o.window, cfg: o.cfg, gsc, advisors, organicFilter: countriesOnly ?? null });
   } catch (e) {
-    quality.push(`The cross-source findings could not be built: ${(e instanceof Error ? e.message : String(e)).slice(0, 160)}`);
+    quality.push(`The cross-source findings could not be built: ${(describeError(e)).slice(0, 160)}`);
     findings = { items: [], summary: "The cross-source findings could not be built.", notJoined: [], tables: [], floors: "" };
   }
 

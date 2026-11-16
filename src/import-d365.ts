@@ -4,6 +4,7 @@ import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { monthSnapshot } from "./dates.js";
 import { loadD365Config, fetchClosedWon, classify, type Bucket } from "./d365.js";
 import { detectSampleRecords, suspicionLine, verdictFor, type CrmRecordShape } from "./sample-detect.js";
+import { describeError } from "./describe-error.js";
 
 /**
  * D365 → dashboard: Closed Won revenue for DPG, attributed off the Contact's
@@ -81,7 +82,7 @@ async function main() {
   try {
     opps = await fetchClosedWon(cfg);
   } catch (e) {
-    const msg = (e instanceof Error ? e.message : String(e)).slice(0, 300);
+    const msg = (describeError(e)).slice(0, 300);
     console.error(`  FAILED to read D365: ${msg}`);
     const code = runDashboardSync({ databaseUrl, dashboardDir }, [emptyRun(slug, "error", msg)], { dryRun });
     process.exit(code || 1);
@@ -206,6 +207,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
+  console.error(describeError(e));
   process.exit(1);
 });

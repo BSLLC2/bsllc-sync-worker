@@ -3,6 +3,7 @@ import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
+import { logChurnedSkipped } from "./client-scope-db.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { slugify, writeSignalRun, ymd } from "./signals/common.js";
 import { SECRET_NAMES, ctmAccountKeys, ctmHashKey, secretValues, type CtmKeys } from "./signals/secrets.js";
@@ -89,6 +90,7 @@ async function main() {
     for (const t of ["ctm_calls", "signal_runs"]) {
       if (!(await tableExists(c, t))) throw new Error(`The table ${t} does not exist yet. Deploy the dashboard app (schema v257) first, then run this again.`);
     }
+    await logChurnedSkipped(c, "Call tracking");
     const mapped = (await c.query<{ id: string; name: string; external_id: string | null; has_mapping: boolean }>(
       `SELECT c.id, c.name, cm.external_id, (cm.client_id IS NOT NULL) AS has_mapping FROM clients c
          LEFT JOIN connector_mappings cm ON cm.client_id = c.id AND cm.source = 'ctm' AND cm.enabled = true
