@@ -106,6 +106,10 @@ export interface AdmissionColumns {
   phoneCol: number;
   dobCol: number;
   nameCol: number;
+  /** Heading-only columns: -1 when the board has none. Never a clinical column. */
+  referentPhoneCol: number;
+  typeCol: number;
+  levelCol: number;
   /** How each column was identified — printed in the run log, so a resolution
    *  that came from the data rather than the heading is visible to a person. */
   how: Record<ColumnKey, string>;
@@ -252,7 +256,10 @@ export function resolveAdmissionColumns(
   // "Referent Phone #"), the one actually holding phone numbers most often
   // wins — the heading says which columns are candidates, the data picks.
   let phoneCol = -1;
-  const phoneHeadings = findCols(header, PHONE_NEEDLES);
+  const referentPhoneCol = header.findIndex((h) => { const t = (h ?? "").toString().toLowerCase(); return t.includes("referent") && t.includes("phone"); });
+  const typeCol = header.findIndex((h) => (h ?? "").toString().trim().toLowerCase() === "type");
+  const levelCol = header.findIndex((h) => (h ?? "").toString().toLowerCase().includes("level of care"));
+  const phoneHeadings = findCols(header, PHONE_NEEDLES).filter((i) => i !== referentPhoneCol);
   if (phoneHeadings.length) {
     const ranked = [...phoneHeadings].sort((a, b) =>
       ((at(b)?.phoneRatio ?? 0) - (at(a)?.phoneRatio ?? 0)) || ((at(b)?.fillRate ?? 0) - (at(a)?.fillRate ?? 0)));
@@ -399,7 +406,7 @@ export function resolveAdmissionColumns(
   // repeats a short label, and several of its distinct values name an origin —
   // ours ("Google", "web form") or anyone else's ("referral", "alumni",
   // "court"). Two signals again: the repetition and the vocabulary.
-  let refCol = findCol(header, REFERENT_NEEDLES);
+  let refCol = header.findIndex((h, i) => i !== referentPhoneCol && REFERENT_NEEDLES.some((n) => (h ?? "").toString().toLowerCase().includes(n)));
   if (refCol >= 0) how.referent = "heading";
   if (refCol < 0) {
     const cands = profiles.filter((p) =>
@@ -438,6 +445,9 @@ export function resolveAdmissionColumns(
     phoneCol,
     dobCol,
     nameCol,
+    referentPhoneCol,
+    typeCol,
+    levelCol,
     how,
   };
 }

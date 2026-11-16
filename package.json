@@ -16,6 +16,7 @@
     "import-och": "tsx src/import-och.ts",
     "och-sheet-check": "tsx src/och-sheet-canary.ts",
     "verify-och-sheet": "tsx src/verify-och-sheet.ts",
+    "verify-och-collection": "tsx src/verify-och-collection.ts",
     "import-dpg-tracker": "tsx src/import-dpg-tracker.ts",
     "import-tracker": "tsx src/import-tracker.ts",
     "verify-tracker": "tsx src/verify-tracker.ts && tsx src/verify-tracker-merge.ts && tsx src/verify-tracker-leads.ts",

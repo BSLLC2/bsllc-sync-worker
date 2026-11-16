@@ -46,11 +46,12 @@ async function loadLeadIndex(databaseUrl: string, clientSlug: string): Promise<L
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
-    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null; raw_json: string | null; submitted_at: Date; call_tracking_label: string | null; form_name: string | null }>(
-      `SELECT phone, dob, last_name, gclid, utm_source, utm_medium, raw_json, submitted_at, call_tracking_label, form_name FROM web_inquiries WHERE client_slug = $1`,
+    const { rows } = await client.query<{ phone: string | null; dob: string | null; last_name: string | null; gclid: string | null; utm_source: string | null; utm_medium: string | null; raw_json: string | null; submitted_at: Date; call_tracking_label: string | null; form_name: string | null; id: string | null; utm_campaign: string | null }>(
+      `SELECT id, utm_campaign, phone, dob, last_name, gclid, utm_source, utm_medium, raw_json, submitted_at, call_tracking_label, form_name FROM web_inquiries WHERE client_slug = $1`,
       [clientSlug],
     );
     const index = buildLeadIndex(rows.map((r) => ({
+      id: r.id, utmCampaign: r.utm_campaign,
       phone: r.phone, dob: r.dob, lastName: r.last_name, gclid: r.gclid,
       utmSource: r.utm_source, utmMedium: r.utm_medium, rawJson: r.raw_json,
       submittedAt: new Date(r.submitted_at),
@@ -269,7 +270,10 @@ async function main() {
   } catch (e) {
     return reportHeaderFailure(args, e instanceof Error ? e.message : String(e));
   }
-  const { dateCols, inquiryCols, refCol, statusCol, hasStatusCol, phoneCol, dobCol, nameCol } = cols;
+  const { dateCols, inquiryCols, refCol, statusCol, hasStatusCol, phoneCol, dobCol, nameCol, referentPhoneCol, typeCol, levelCol } = cols;
+  const seenOn = new Date().toISOString().slice(0, 10);
+  // Counts only: how many admissions tie to an enquiry, and by which key.
+  const tie = { total: 0, tied: 0, phone: 0, referent_phone: 0, last_dob: 0, tiedWithoutReferentPhone: 0 };
 
   // Cross-check against web_inquiries so a row can count as ours even when
   // intake typed the CLINICAL referral partner into Referent instead of how
@@ -365,7 +369,15 @@ async function main() {
     const verdict = matchAdmission(leadIndex, {
       phone: phoneCol >= 0 ? phone10(row[phoneCol]) : null,
       lastDob: nameCol >= 0 && dobCol >= 0 ? lastDobKey(lastNameOf(row[nameCol]), row[dobCol]) : null,
+      referentPhone: referentPhoneCol >= 0 ? phone10(row[referentPhoneCol]) : null,
     }, admittedOn);
+    const without = referentPhoneCol >= 0 ? matchAdmission(leadIndex, {
+      phone: phoneCol >= 0 ? phone10(row[phoneCol]) : null,
+      lastDob: nameCol >= 0 && dobCol >= 0 ? lastDobKey(lastNameOf(row[nameCol]), row[dobCol]) : null,
+    }, admittedOn) : verdict;
+    tie.total++;
+    if (verdict.known) { tie.tied++; if (verdict.key) tie[verdict.key]++; }
+    if (without.known) tie.tiedWithoutReferentPhone++;
     const webInquiryMatch = !referentSaysYes && !!verdict.attributing;
     const webInquiryMatchVia = webInquiryMatch ? verdict.via : null;
     // A gclid match means this specific admission came from an actual Google
@@ -405,9 +417,21 @@ async function main() {
       referent: ref === "(blank)" ? null : ref,
       attributable,
       attribution_source: referentSaysYes ? "referent" : webInquiryMatchedGclid ? "web_inquiry_gclid" : webInquiryMatchVia,
+      referent_phone: referentPhoneCol >= 0 ? (row[referentPhoneCol] ?? "").toString().trim() || null : null,
+      board_type: typeCol >= 0 ? cellOf(row, typeCol) || null : null,
+      level_of_care: levelCol >= 0 ? cellOf(row, levelCol) || null : null,
+      inquiry_received: inquiryCols.map((c) => cellOf(row, c)).find((v) => v) || null,
+      board_status: hasStatusCol ? cellOf(row, statusCol) || null : null,
+      matched_inquiry_id: verdict.known?.id ?? null,
+      matched_inquiry_on: verdict.known ? verdict.known.submittedAt.toISOString().slice(0, 10) : null,
+      match_key: verdict.known ? verdict.key : null,
+      campaign: verdict.known?.campaign ?? null,
+      campaign_source: verdict.known?.campaignSource ?? null,
+      last_seen_on: seenOn,
     });
   }
 
+  console.log(`Ties to an enquiry: ${tie.tied} of ${tie.total} admissions (patient phone ${tie.phone}, referent phone ${tie.referent_phone}, surname+DOB ${tie.last_dob}). Without the referent phone it was ${tie.tiedWithoutReferentPhone} of ${tie.total}.`);
   const months = [...byMonth.keys()].sort();
   if (!months.length) throw new Error("Parsed 0 admissions — check the date/status columns.");
   if (skippedFuture) console.log(`Skipped ${skippedFuture} future-dated row(s) (likely a year typo).`);

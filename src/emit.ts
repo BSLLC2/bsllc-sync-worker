@@ -42,6 +42,20 @@ export interface AdmissionRecord {
   referent: string | null;
   attributable: boolean;
   attribution_source: string | null;
+  /** Board fields kept for the funnel. Never a clinical column (42 CFR Part 2). */
+  referent_phone?: string | null;
+  board_type?: string | null;
+  level_of_care?: string | null;
+  inquiry_received?: string | null;
+  board_status?: string | null;
+  /** The enquiry this admission ties to, which key found it, and its campaign. */
+  matched_inquiry_id?: string | null;
+  matched_inquiry_on?: string | null;
+  match_key?: "phone" | "referent_phone" | "last_dob" | null;
+  campaign?: string | null;
+  campaign_source?: "call_tracker" | "utm_campaign" | "gclid" | null;
+  /** The day this run saw the row on the board; older than the newest read = no longer shown. */
+  last_seen_on?: string | null;
 }
 
 /**

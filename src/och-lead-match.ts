@@ -41,6 +41,10 @@ export const ATTRIBUTABLE_UTM_WORDS = new Set([
 
 /** A `web_inquiries` row, reduced to what a match needs. No name, no email. */
 export interface LeadRow {
+  /** The enquiry's own id, kept so an admission can say which enquiry it ties to. */
+  id?: string | null;
+  /** utm_campaign on a form. */
+  utmCampaign?: string | null;
   phone: string | null;
   dob: string | null;
   lastName: string | null;
@@ -62,7 +66,11 @@ export interface LeadRow {
 export type LeadEvidence = "gclid" | "utm" | "call" | "none";
 
 export interface Lead {
+  id: string | null;
   submittedAt: Date;
+  /** Campaign text and WHICH source it came from; null when the record names none. */
+  campaign: string | null;
+  campaignSource: "call_tracker" | "utm_campaign" | null;
   /** What the row observed about the channel. "none" can never attribute. */
   evidence: LeadEvidence;
   utm: string;
@@ -100,7 +108,11 @@ export function buildLeadIndex(rows: LeadRow[]): LeadIndex {
     // blank label prove nothing and never attribute.
     const callWords = (row.callLabel ?? "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
     const callAttributable = !!row.isCall && callWords.some((w) => ATTRIBUTABLE_UTM_WORDS.has(w));
+    const campaignText = row.isCall ? (row.callLabel ?? "").trim() : (row.utmCampaign ?? "").trim();
     const lead: Lead = {
+      id: row.id ?? null,
+      campaign: campaignText ? campaignText.slice(0, 120) : null,
+      campaignSource: campaignText ? (row.isCall ? "call_tracker" : "utm_campaign") : null,
       submittedAt: row.submittedAt,
       // A typed-in row asserts no channel even when its columns carry one: the
       // export it came from never held a click. Excluded BY PROVENANCE, not by
@@ -133,27 +145,35 @@ export function leadWithin(list: Lead[] | undefined, admittedOn: Date): Lead | n
   return list.find((l) => l.submittedAt.getTime() <= t + 86_400_000 && l.submittedAt.getTime() >= t - MATCH_WINDOW_DAYS * 86_400_000) ?? null;
 }
 
-export type MatchVia = "web_inquiry_phone" | "web_inquiry_dob" | null;
+export type MatchVia = "web_inquiry_phone" | "web_inquiry_referent_phone" | "web_inquiry_dob" | null;
+export type MatchKey = "phone" | "referent_phone" | "last_dob";
 
 export interface LeadVerdict {
   /** The lead that makes this admission ours, if any. */
   attributing: Lead | null;
   via: MatchVia;
+  /** Which key found it (any lead, attributing or not). */
+  key: MatchKey | null;
   /** Any lead we hold for this person, attributing or not. */
   known: Lead | null;
 }
 
-/** Match one admission against the index: phone first, then lastname+DOB. */
-export function matchAdmission(index: LeadIndex, keys: { phone: string | null; lastDob: string | null }, admittedOn: Date): LeadVerdict {
-  const pick = (k: Keyed): { lead: Lead | null; via: MatchVia } => {
+/**
+ * Match one admission against the index: the patient's phone, then the
+ * referent's phone (an ad caller is often a family member), then surname+DOB.
+ */
+export function matchAdmission(index: LeadIndex, keys: { phone: string | null; lastDob: string | null; referentPhone?: string | null }, admittedOn: Date): LeadVerdict {
+  const pick = (k: Keyed): { lead: Lead | null; via: MatchVia; key: MatchKey | null } => {
     const byPhone = keys.phone ? leadWithin(k.byPhone.get(keys.phone), admittedOn) : null;
-    if (byPhone) return { lead: byPhone, via: "web_inquiry_phone" };
+    if (byPhone) return { lead: byPhone, via: "web_inquiry_phone", key: "phone" };
+    const byRef = keys.referentPhone ? leadWithin(k.byPhone.get(keys.referentPhone), admittedOn) : null;
+    if (byRef) return { lead: byRef, via: "web_inquiry_referent_phone", key: "referent_phone" };
     const byDob = keys.lastDob ? leadWithin(k.byLastDob.get(keys.lastDob), admittedOn) : null;
-    return byDob ? { lead: byDob, via: "web_inquiry_dob" } : { lead: null, via: null };
+    return byDob ? { lead: byDob, via: "web_inquiry_dob", key: "last_dob" } : { lead: null, via: null, key: null };
   };
   const attributing = pick(index.attributing);
-  const known = attributing.lead ?? pick(index.all).lead;
-  return { attributing: attributing.lead, via: attributing.via, known };
+  const anyLead = attributing.lead ? attributing : pick(index.all);
+  return { attributing: attributing.lead, via: attributing.via, key: anyLead.key, known: anyLead.lead };
 }
 
 /** How the readout says what a lead proves, in a person's words. */
