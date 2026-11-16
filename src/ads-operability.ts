@@ -103,6 +103,14 @@ export const ADS_JOBS: AdsJobSpec[] = [
     fix: "Open bsllc-sync-worker \u2192 Actions \u2192 \"Ads daily metrics (read-only)\" and re-run it. Every query is a SELECT and nothing is written to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account. Days already read stay stored; the last fourteen are re-read every run, so a short outage mends itself, and a longer one leaves a gap the dashboard names. Dispatch it with dry_run=true first to see what it would store.",
   },
   {
+    job: "ads_click_map",
+    workflow: "ads-click-map.yml",
+    label: "Ads click map",
+    cadence: "daily 05:25 UTC",
+    quiet: "An account whose enquiries carry no click id genuinely stores no rows, and the note's accounts/read/rows counts say so. What this job must never do is stop silently: the dashboard's click-to-admission reading says how far each account's click record was read and what it could not place. A failed or truncated read writes a failure row and leaves the earlier rows as they were.",
+    fix: "Open bsllc-sync-worker \u2192 Actions \u2192 \"Ads click map (read-only)\" and re-run it. Every query is a SELECT and nothing is written to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account. Dispatch it with dry_run=true first to see what it would keep.",
+  },
+  {
     job: "ads_keyword_metrics",
     workflow: "ads-keyword-metrics.yml",
     label: "Ads keyword metrics",

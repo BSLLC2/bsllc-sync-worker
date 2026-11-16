@@ -1,0 +1,77 @@
+name: Ads click map (read-only)
+
+# Which campaign each ad click came from, for the clicks that became a lead we hold. The dashboard joins it to the client's
+# admissions list to say which campaigns produced the people who were admitted.
+#
+# READ-ONLY. Every query is a SELECT. Nothing is written to any ad account. Only a click id already on one of the client's
+# enquiries is kept; no name, phone, email, search text or page is read.
+#
+# A DISPATCHED RUN IS A DRY ONE UNLESS YOU SAY OTHERWISE. A scheduled run is live.
+# The first live run for an account reads the last ninety days (about as far back as the platform keeps a click); every later
+# run re-reads the last fourteen, which catches a lead that arrived a few days after its click.
+on:
+  schedule:
+    # 05:25 UTC daily: after the account day has closed in every US zone, clear of the daily
+    # metrics (05:10) and the keyword metrics (05:40).
+    - cron: "25 5 * * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug. Blank = every mapped account."
+        required: false
+        default: ""
+      days:
+        description: "Days to read, 1 to 90. Blank = 90 on an account's first run, then 14."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print, write nothing (true/false). Defaults to true."
+        required: false
+        default: "true"
+
+concurrency:
+  group: ads-click-map
+  cancel-in-progress: false
+
+jobs:
+  clicks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Place the click ids
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          # Inputs go through the environment, never into the command line.
+          IN_CLIENT: ${{ inputs.client }}
+          IN_DAYS: ${{ inputs.days }}
+          IN_DRY: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$IN_CLIENT" ] && ARGS="--client=$IN_CLIENT"
+          [ -n "$IN_DAYS" ] && ARGS="$ARGS --days=$IN_DAYS"
+          [ "$IN_DRY" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run ads-click-map -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure rather than as
+      # silence. A dry run and a single-account run are excluded: the heartbeat
+      # is one row for the whole book, and stamping it from a run that read one
+      # account would claim every other account was read today.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # The note is the job's own counts (accounts, read, rows), never text from
+        # an ad account, so it is safe in the command line as the other ads jobs do.
+        run: npm run heartbeat -- --job=ads_click_map --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log
