@@ -76,6 +76,10 @@ jobs:
         run: npm run verify-query-months
       - name: Meta importer guard
         run: npm run verify-meta-import
+      - name: Meta campaigns, ad sets and ads by day (pure half; the real store runs in ads-store)
+        run: npm run verify-meta-campaigns
+      - name: GA4 acquisition, 28 days against the 28 before, against a pretend Google
+        run: npm run verify-ga4-acquisition
       - name: HubSpot deal-outcome guard
         run: npm run verify-hubspot-deal-status
       - name: Attribution-date guard
@@ -148,6 +152,10 @@ jobs:
         run: npm run verify-term-days-wp
       - name: Website performance report store guard (real SQL)
         run: npm run verify-ga4-report
+      - name: Meta campaign days store guard (real SQL)
+        run: npm run verify-meta-campaigns
+      - name: GA4 acquisition store guard (real SQL)
+        run: npm run verify-ga4-acquisition
       - name: Call log to stored calls guard (real SQL)
         run: npm run verify-call-backfill
       - name: Branded-search months job, against a pretend Search Console (real SQL)

@@ -4,6 +4,7 @@ import { appendFileSync } from "node:fs";
 import pg from "pg";
 import type { Deps } from "./ga4-report/run.js";
 import { processClients, type PipelineResult } from "./ga4-report/pipeline.js";
+import { processAcquisition, type AcquisitionPipelineResult } from "./ga4-report/acquisition-store.js";
 import { DEFAULT_MONTHS, MAX_MONTHS } from "./ga4-report/types.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { ymd } from "./page-behaviour/paths.js";
@@ -71,6 +72,8 @@ async function main() {
   const c = new pg.Client({ connectionString: withVerifyFull(url) });
   await c.connect();
   let pipe!: PipelineResult;
+  let acq: AcquisitionPipelineResult | null = null;
+  let acqSkipped: string | null = null;
   try {
     if (!dryRun) {
       for (const t of ["ga4_site_days", "ga4_report_rows", "ga4_report_runs"]) {
@@ -97,13 +100,26 @@ async function main() {
     });
     pipe = await processClients({ clients: inputs, settings: settingBy, deps, db: c, dryRun });
     for (const l of pipe.lines) console.log(l);
+
+    // The 28-day acquisition windows ride on the same property reads, in their own two tables. A deploy order where the app has
+    // not made them yet must NOT cost the monthly report, so a missing table skips this half and says so.
+    const haveAcq = dryRun || ((await tableExists(c, "ga4_acquisition_windows")) && (await tableExists(c, "ga4_acquisition_runs")));
+    if (!haveAcq) acqSkipped = "The tables ga4_acquisition_windows and ga4_acquisition_runs do not exist yet, so the 28-day acquisition read was skipped. Deploy the dashboard app first.";
+    else {
+      acq = await processAcquisition({ clients: inputs, settings: settingBy, fetch: realFetch, token: deps.token, today, db: c, dryRun });
+      for (const l of acq.lines) console.log(l);
+    }
   } finally {
     await c.end();
   }
 
   console.log(pipe.summary);
-  if (pipe.casualties.length) { console.log("Casualties:"); for (const x of pipe.casualties) console.log(`  ${x}`); }
-  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `summary=${pipe.summary}\n`);
+  if (acq) console.log(acq.summary);
+  if (acqSkipped) console.log(acqSkipped);
+  const casualties = [...pipe.casualties, ...(acq?.casualties ?? [])];
+  if (casualties.length) { console.log("Casualties:"); for (const x of casualties) console.log(`  ${x}`); }
+  const summary = acq ? `${pipe.summary}; ${acq.summary}` : pipe.summary;
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `summary=${summary}\n`);
   if (pipe.allFailed) {
     console.error("No client could be read.");
     process.exit(1);

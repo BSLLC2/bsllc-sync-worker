@@ -630,7 +630,7 @@ hr("10. the workflow, the scripts and CI");
   ok("the command creates no table", ![cli, ...fs.readdirSync(path.join(here, "ga4-report")).map((f) => fs.readFileSync(path.join(here, "ga4-report", f), "utf8"))].some((t) => /CREATE\s+TABLE|ALTER\s+TABLE|CREATE\s+(UNIQUE\s+)?INDEX/i.test(t)));
   const wiringSources = fs.readdirSync(path.join(here, "ga4-report")).map((f) => fs.readFileSync(path.join(here, "ga4-report", f), "utf8")).join("\n");
   const written = Array.from(wiringSources.matchAll(/(?:INSERT INTO|DELETE FROM|UPDATE)\s+([a-z0-9_]+)/g)).map((m) => m[1]!);
-  ok("the only tables written are the three (the heartbeat is stamped by the workflow)", written.length > 0 && written.every((t) => ["ga4_site_days", "ga4_report_rows", "ga4_report_runs"].includes(t)), Array.from(new Set(written)).join());
+  ok("the only tables written are the three monthly ones and the two 28-day acquisition ones (the heartbeat is stamped by the workflow)", written.length > 0 && written.every((t) => ["ga4_site_days", "ga4_report_rows", "ga4_report_runs", "ga4_acquisition_windows", "ga4_acquisition_runs"].includes(t)), Array.from(new Set(written)).join());
   {
     const p = property(dataset());
     await readClientReport(CTX, cfg({ groups: [GROUP], excludeCountries: ["India"] }), deps(p.fetch));

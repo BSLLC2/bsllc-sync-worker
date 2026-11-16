@@ -1,0 +1,75 @@
+name: Meta campaigns, ad sets and ads by day (read-only)
+
+# One row per campaign, ad set and ad per day (impressions, link clicks, spend, leads,
+# reach, frequency), kept so the dashboard's Ads tab can show what each one cost and
+# brought. The monthly account-level importer (import-meta.yml) is untouched.
+#
+# READ-ONLY. Every call is a GET against the Marketing API. Nothing is written to Meta.
+#
+# A DISPATCHED RUN IS A DRY ONE UNLESS YOU SAY OTHERWISE. A scheduled run is live.
+# The first live run for an account backfills about sixty days; every later run
+# re-reads the last fourteen (leads are attributed late).
+#
+# REQUIRES the same META_ACCESS_TOKEN repository secret the monthly importer uses
+# (a system-user token with ads_read). With accounts mapped and no token this run
+# FAILS on purpose, so a green heartbeat never covers an importer that cannot import.
+on:
+  schedule:
+    # 08:10 UTC daily: after the monthly importer (07:55) and after the Pacific day has
+    # closed, so the window's last day is complete in every US zone.
+    - cron: "10 8 * * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug. Blank = every mapped account."
+        required: false
+        default: ""
+      days:
+        description: "Days to read. Blank = about 60 on an account's first run, then 14."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print, write nothing (true/false). Defaults to true."
+        required: false
+        default: "true"
+
+concurrency:
+  group: import-meta-campaigns
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the Meta campaign days
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          # Inputs go through the environment, never into the command line.
+          IN_CLIENT: ${{ inputs.client }}
+          IN_DAYS: ${{ inputs.days }}
+          IN_DRY: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$IN_CLIENT" ] && ARGS="--client=$IN_CLIENT"
+          [ -n "$IN_DAYS" ] && ARGS="$ARGS --days=$IN_DAYS"
+          [ "$IN_DRY" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run import-meta-campaigns -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure rather than as silence.
+      # A dry run and a single-account run are excluded: the heartbeat is one row for the
+      # whole book, and stamping it from a run that read one account would claim every
+      # other account was read today.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # The note is the job's own counts (accounts, read, rows), never text from an ad account.
+        run: npm run heartbeat -- --job=import_meta_campaigns --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log
