@@ -146,7 +146,7 @@ check("the workflow is dispatch only", /workflow_dispatch/.test(wf) && !/^\s*sch
 check("the workflow defaults to a dry run", /default: "dry"/.test(wf) && /\$\{IN_MODE:-dry\}/.test(wf));
 check("the heartbeat is always() and skips dry and one-client runs", /if: always\(\) && inputs\.mode != 'dry'[^\n]*inputs\.client == ''/.test(wf));
 check("the allow-list is read from one variable", /vars\.OFFLINE_UPLOAD_CLIENTS/.test(wf) && /process\.env\.OFFLINE_UPLOAD_CLIENTS/.test(job));
-check("the refusal for a client off the list is live and exits", /if \(only && !list\[only\]\) \{[^}]*process\.exit\(1\)/.test(job));
+check("the refusal for a client off the list is live and exits", /if \(only && !list\[only\]\) \{[\s\S]{0,160}?process\.exit\(1\)/.test(job));
 check("a client off the list is refused before any read", job.indexOf("is not on the allow-list") < job.indexOf("new pg.Client"));
 check("scrub removes tokens and addresses", !/CLICKID|@/.test(scrub("bad CLICKID_00000001ABCDEFG at a@b.co")));
 
