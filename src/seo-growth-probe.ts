@@ -12,6 +12,7 @@ import { JWT } from "google-auth-library";
  *   gap          keywords PARAMS.competitors rank for that the target does not (top 20 or absent)
  *   backlinks    backlink summary, referring domains and anchors for the target and PARAMS.compare
  *   linkgap      referring domains for the target and each PARAMS.competitors (PARAMS.refLimit each)
+ *   ranks        authority (0-100), referring domains and estimated organic visits for PARAMS.domains
  *   keywords     keyword overview for PARAMS.seeds plus suggestions for PARAMS.expand
  *   serp         live Google top 10 for PARAMS.serps from PARAMS.serpLocation
  *   gsctrend     weekly Search Console history for the homepage, tagged links, brand and city queries
@@ -125,6 +126,22 @@ async function main() {
             for (const it of rd?.items ?? []) console.log(`### LG ${J({ t, d: it.domain, r: n(it.rank), b: n(it.backlinks), sp: n(it.backlinks_spam_score), nf: n(it.referring_links_attributes?.nofollow), first: String(it.first_seen ?? "").slice(0, 10) })}`);
           } catch (e) { console.log(`### LGERR ${J({ target: t, err: trim(String(e), 220) })}`); }
         }
+      }
+      if (ph === "ranks") {
+        // Authority for a list of domains: rank on a 0-100 scale, referring domains, and estimated organic visits. PARAMS.domains.
+        const ds: string[] = PARAMS.domains || [];
+        try {
+          const rk = await post(creds, "/backlinks/bulk_ranks/live", [{ targets: ds, rank_scale: "one_hundred" }]);
+          for (const it of rk?.items ?? []) console.log(`### RK ${J({ d: it.target, r: n(it.rank) })}`);
+        } catch (e) { console.log(`### RKERR ${J({ err: trim(String(e), 220) })}`); }
+        try {
+          const rd = await post(creds, "/backlinks/bulk_referring_domains/live", [{ targets: ds }]);
+          for (const it of rd?.items ?? []) console.log(`### RD ${J({ d: it.target, rd: n(it.referring_main_domains ?? it.referring_domains) })}`);
+        } catch (e) { console.log(`### RDERR ${J({ err: trim(String(e), 220) })}`); }
+        try {
+          const tr = await post(creds, "/dataforseo_labs/google/bulk_traffic_estimation/live", [{ targets: ds, location_code: LOC, language_code: "en", item_types: ["organic"] }]);
+          for (const it of tr?.items ?? []) console.log(`### TR ${J({ d: it.target, etv: n(it.metrics?.organic?.etv), kw: n(it.metrics?.organic?.count) })}`);
+        } catch (e) { console.log(`### TRERR ${J({ err: trim(String(e), 220) })}`); }
       }
       if (ph === "keywords") {
         const seeds: string[] = PARAMS.seeds || [];
