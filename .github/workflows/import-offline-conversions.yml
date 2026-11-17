@@ -2,9 +2,10 @@ name: Import offline conversions (close-the-loop)
 
 # Matches real admissions to the ad clicks (gclids) that produced them and
 # uploads them to Google Ads as offline conversions, so bidding optimizes toward
-# patients, not form fills. Idempotent (dedupe table) and self-healing: it
-# discovers the OCH Ads account and creates the conversion action if missing,
-# and exits cleanly when no gclids have been captured yet.
+# patients, not form fills. Sends through the Data Manager API (Google closed the
+# old upload method). Validate-only until a person sets api_mode=send or the repo
+# variable OCH_DM_MODE=send. Never creates a conversion action. Idempotent (dedupe
+# table); discovers the OCH Ads account and exits cleanly when no gclids have been captured yet.
 on:
   schedule:
     - cron: "20 8 * * *" # 08:20 UTC daily, after admissions + web-inquiry imports
@@ -18,6 +19,10 @@ on:
         description: "Write the Google Ads upload file instead of calling the API (true/false). Nothing is sent. Download it from the run's artifacts."
         required: false
         default: "false"
+      api_mode:
+        description: "validate (default: Google checks the request, nothing is sent) or send. Send needs a validate pass in the last 14 days."
+        required: false
+        default: "validate"
       mark_uploaded:
         description: "With csv: record the rows as uploaded by hand so the daily run skips them (true/false). Only after the file was uploaded in Google Ads."
         required: false
@@ -45,6 +50,8 @@ jobs:
           GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
           GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
           OCH_ADS_CUSTOMER_ID: ${{ secrets.OCH_ADS_CUSTOMER_ID }}
+          DATA_MANAGER_REFRESH_TOKEN: ${{ secrets.DATA_MANAGER_REFRESH_TOKEN }}
+          DM_MODE: ${{ inputs.api_mode || vars.OCH_DM_MODE || 'validate' }}
           OCH_SHEET_ID: ${{ vars.OCH_SHEET_ID }}
           OCH_ADMISSIONS_TAB: ${{ vars.OCH_ADMISSIONS_TAB }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -57,7 +64,8 @@ jobs:
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
             npm run import-offline-conversions -- --dry-run 2>&1 | tee run.log
           else
-            npm run import-offline-conversions 2>&1 | tee run.log
+            case "$DM_MODE" in send|validate) ;; *) DM_MODE=validate ;; esac
+            npm run import-offline-conversions -- --api=$DM_MODE 2>&1 | tee run.log
           fi
 
       - name: Keep the upload file (private artifact, click ids only)

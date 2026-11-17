@@ -15,6 +15,7 @@
     "match-web-leads-to-crm": "tsx src/match-web-leads-to-crm.ts",
     "import-och": "tsx src/import-och.ts",
     "och-sheet-check": "tsx src/och-sheet-canary.ts",
+    "verify-data-manager": "tsx src/verify-data-manager.ts",
     "verify-och-sheet": "tsx src/verify-och-sheet.ts",
     "import-dpg-tracker": "tsx src/import-dpg-tracker.ts",
     "import-tracker": "tsx src/import-tracker.ts",
