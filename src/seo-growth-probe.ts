@@ -401,8 +401,20 @@ async function main() {
             const body: any = { keyword: q, language_code: "en", device: PARAMS.device === "mobile" ? "mobile" : "desktop", os: PARAMS.device === "mobile" ? "android" : "windows", depth: Number(PARAMS.depth || 20) };
             if (PARAMS.serpLocation) body.location_name = PARAMS.serpLocation; else body.location_code = LOC;
             let r: any = null;
+            // PARAMS.aio: also load the AI answer when Google builds it after the page, and print what it names and cites.
+            if (PARAMS.aio) { try { r = await post(creds, "/serp/google/organic/live/advanced", [{ ...body, load_async_ai_overview: true }]); } catch { r = null; } }
             for (let a = 0; a < 3 && !r; a++) { try { r = await post(creds, "/serp/google/organic/live/advanced", [body]); } catch (e) { if (a === 2) throw e; await sleep(4000); } }
             const items = (r?.items ?? []);
+            if (PARAMS.aio) {
+              const ao = items.filter((x: any) => x.type === "ai_overview");
+              const refs: any[] = []; const texts: string[] = [];
+              const walk = (x: any) => { if (!x || typeof x !== "object") return; if (Array.isArray(x)) { x.forEach(walk); return; } if (x.type === "ai_overview_reference" || (x.url && x.domain && (x.source !== undefined || x.title !== undefined) && x.type !== "ai_overview")) refs.push([String(x.domain || ""), trim(String(x.url || ""), 120), trim(String(x.title || x.source || ""), 70)]); if (typeof x.markdown === "string") texts.push(x.markdown); else if (typeof x.text === "string" && x.type !== "ai_overview_reference") texts.push(x.text); for (const k of Object.keys(x)) if (typeof x[k] === "object") walk(x[k]); };
+              ao.forEach(walk);
+              const seenRef = new Set<string>(); const uniq = refs.filter((x) => { const k = x[1]; if (seenRef.has(k)) return false; seenRef.add(k); return true; });
+              const text = [...new Set(texts)].join(" | ");
+              console.log(`### AIO ${J([q, PARAMS.serpLocation || LOC, ao.length > 0, /bs ?llc|bsllc/i.test(text + JSON.stringify(uniq)), uniq.slice(0, 40), trim(text, 2200), items.filter((x: any) => x.type === "organic").slice(0, 10).map((x: any) => String(x.domain || ""))])}`);
+              continue;
+            }
             if (PARAMS.brief) {
               const hay = (x: any) => JSON.stringify(x).toLowerCase();
               const dom = (x: any) => String(x.breadcrumb || x.domain || "").replace(/^https?:\/\//, "").split(" ")[0];
