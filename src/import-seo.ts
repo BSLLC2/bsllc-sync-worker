@@ -65,7 +65,7 @@ async function main() {
     const hasSerpTable = await serpTableExists(c);
     if (!hasSerpTable) console.log("· seo_serp_results does not exist yet; the top results are not kept");
     const clients = (await c.query<ClientRow>(
-      `SELECT id, name, seo_domain, seo_location FROM clients WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> ''`,
+      `SELECT id, name, seo_domain, seo_location FROM clients WHERE status <> 'churned' AND seo_domain IS NOT NULL AND btrim(seo_domain) <> ''`,
     )).rows;
 
     // A client with tracked keywords and no website is never pulled, and used to

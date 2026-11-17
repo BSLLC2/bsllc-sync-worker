@@ -51,7 +51,7 @@ async function main() {
   const syncs: SyncEntry[] = [];
   try {
     const clients = (await c.query<ClientRow>(
-      `SELECT id, name, brand_name, seo_domain FROM clients`,
+      `SELECT id, name, brand_name, seo_domain FROM clients WHERE status <> 'churned'`,
     )).rows;
 
     for (const client of clients) {

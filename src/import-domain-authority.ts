@@ -66,7 +66,7 @@ async function main() {
     const activeFilter = (await columnExists(c, "clients", "active")) ? "AND active = true" : "";
     const clients = (await c.query<ClientRow>(
       `SELECT id, name, seo_domain, seo_location FROM clients
-        WHERE seo_domain IS NOT NULL AND btrim(seo_domain) <> '' ${activeFilter}`,
+        WHERE status <> 'churned' AND seo_domain IS NOT NULL AND btrim(seo_domain) <> '' ${activeFilter}`,
     )).rows;
 
     for (const client of clients) {
