@@ -269,8 +269,15 @@ async function main() {
     // click ids and times only: no name, phone or date of birth. ──
     if (args.csvPath) {
       const { writeFileSync } = await import("node:fs");
-      const lines = [`Parameters:TimeZone=${ACCOUNT_TZ}`, "Google Click ID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency"];
-      for (const m of fresh) lines.push(`${m.gclid},${CONVERSION_ACTION_NAME},${ymd(m.date)} 23:59:59,${valueDollars},USD`);
+      // Data Manager maps columns by name, so the file is plain named columns with
+      // the time zone carried on each time. Column names and the event source value
+      // are our best reading of its field list and are unverified: check them
+      // against the mapping step's dropdowns before uploading.
+      const lines = ["gclid,conversion_time,transaction_id,event_source,conversion_value,currency_code"];
+      for (const m of fresh) {
+        const day = ymd(m.date);
+        lines.push(`${m.gclid},${day} 23:59:59${tzOffsetOn(new Date(`${day}T12:00:00Z`))},och-${m.gclid.slice(0, 20)}-${day},OTHER,${valueDollars},USD`);
+      }
       writeFileSync(args.csvPath, lines.join("\n") + "\n");
       console.log(`Wrote ${fresh.length} conversion row(s) to the upload file. Nothing was sent to Google.`);
       if (args.markUploaded) {
@@ -421,7 +428,7 @@ async function main() {
     if (conversions.length > 0 && recorded === 0) {
       const closedApi = /Data Manager API/i.test(failureMsg ?? "");
       console.error(closedApi
-        ? "Google refused every conversion: UploadClickConversions is closed to new integrations and the Data Manager API has to be used instead. Until that is built, upload by hand: run this job with --csv=<file>, upload the file in Google Ads (Goals, Conversions, Uploads), then run with --csv=<file> --mark-uploaded."
+        ? "Google refused every conversion: UploadClickConversions is closed to new integrations and the Data Manager API has to be used instead. Until that is built, upload by hand: run this job with --csv=<file>, upload the file in Data Manager (file upload connection), then run with --csv=<file> --mark-uploaded."
         : `Google accepted none of the ${conversions.length} conversions. First reason: ${(failureMsg ?? "not stated").slice(0, 200)}`);
       process.exit(1);
     }
