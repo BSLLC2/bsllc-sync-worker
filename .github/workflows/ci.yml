@@ -90,6 +90,8 @@ jobs:
         run: npm run verify-och-attribution
       - name: OCH sheet connection guard
         run: npm run verify-och-sheet
+      - name: Data Manager request builder
+        run: npm run verify-data-manager
       - name: OCH sheet connection, end to end against a pretend Google
         run: npm run verify-och-e2e
       - name: DPG tracker import, against a pretend Google

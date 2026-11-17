@@ -10,6 +10,7 @@ import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd, isAdmittedStatus,
 import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote } from "./och-sheet-columns.js";
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 import { accessToken, sheetsBase } from "./och-google.js";
+import { getAccessToken as dmToken, buildIngestBody, chunk, ingest, requestStatus, validationAllows, actionFault, type DmRow } from "./ads/data-manager.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -67,9 +68,9 @@ function tzOffsetOn(day: Date): string {
   return m ? `${m[1]}${m[2]!.padStart(2, "0")}:${m[3] ?? "00"}` : "-05:00";
 }
 
-interface Args { dryRun: boolean; customerId: string | null; lookbackDays: number; sheetId: string; clientSlug: string; csvPath: string | null; markUploaded: boolean; }
+interface Args { dryRun: boolean; customerId: string | null; lookbackDays: number; sheetId: string; clientSlug: string; csvPath: string | null; markUploaded: boolean; api: "validate" | "send"; }
 function parseArgs(argv: string[]): Args {
-  const a: Args = { dryRun: false, customerId: null, lookbackDays: DEFAULT_LOOKBACK_DAYS, sheetId: DEFAULT_SHEET_ID, clientSlug: DEFAULT_CLIENT_SLUG, csvPath: null, markUploaded: false };
+  const a: Args = { dryRun: false, customerId: null, lookbackDays: DEFAULT_LOOKBACK_DAYS, sheetId: DEFAULT_SHEET_ID, clientSlug: DEFAULT_CLIENT_SLUG, csvPath: null, markUploaded: false, api: "validate" };
   for (const x of argv) {
     if (x === "--dry-run") a.dryRun = true;
     else if (x.startsWith("--customer=")) a.customerId = x.slice(11).replace(/[^0-9]/g, "");
@@ -78,6 +79,8 @@ function parseArgs(argv: string[]): Args {
     else if (x.startsWith("--client=")) a.clientSlug = x.slice(9);
     else if (x.startsWith("--csv=")) a.csvPath = x.slice(6);
     else if (x === "--mark-uploaded") a.markUploaded = true;
+    else if (x === "--api=send") a.api = "send";
+    else if (x === "--api=validate") a.api = "validate";
   }
   return a;
 }
@@ -332,106 +335,57 @@ async function main() {
 
     const customer = api.Customer({ customer_id: customerId, login_customer_id: cfg.loginCustomerId, refresh_token: cfg.refreshToken });
 
-    // Find or create the "Admission (offline)" conversion action.
-    let actionResource: string | null = null;
+    // Look up the "Admission (offline)" action. READ ONLY: this job never creates or edits
+    // a conversion action (a new one can default to primary and change bidding).
     const existing = await customer.query(
-      `SELECT conversion_action.resource_name, conversion_action.name, conversion_action.click_through_lookback_window_days FROM conversion_action WHERE conversion_action.name = '${CONVERSION_ACTION_NAME}'`,
+      `SELECT conversion_action.resource_name, conversion_action.id, conversion_action.type, conversion_action.status, conversion_action.primary_for_goal FROM conversion_action WHERE conversion_action.name = '${CONVERSION_ACTION_NAME}'`,
     );
-    if (existing.length > 0) {
-      actionResource = (existing[0] as any)?.conversion_action?.resource_name ?? null;
-      const windowDays = Number((existing[0] as any)?.conversion_action?.click_through_lookback_window_days ?? 0);
-      console.log(`Using existing conversion action: ${actionResource} (click-through window ${windowDays || "default/unknown"}d)`);
-      // A window shorter than our lookback silently rejects every conversion
-      // whose click is older than it — raise it, or say loudly that we couldn't.
-      if (actionResource && windowDays > 0 && windowDays < CLICK_LOOKBACK_DAYS) {
-        try {
-          await customer.conversionActions.update([{ resource_name: actionResource, click_through_lookback_window_days: CLICK_LOOKBACK_DAYS } as any]);
-          console.log(`Raised click-through window ${windowDays}d → ${CLICK_LOOKBACK_DAYS}d.`);
-        } catch (e: any) {
-          console.warn(`Could not raise the click-through window (${windowDays}d < ${CLICK_LOOKBACK_DAYS}d): ${e?.errors?.map((x: any) => x.message).join("; ") || e?.message || e}. Raise it by hand in Google Ads → Conversions → "${CONVERSION_ACTION_NAME}" or clicks older than ${windowDays}d will keep being rejected.`);
-        }
-      }
-    } else {
-      console.log(`Creating conversion action "${CONVERSION_ACTION_NAME}"…`);
-      const created = await customer.conversionActions.create([
-        {
-          name: CONVERSION_ACTION_NAME,
-          type: "UPLOAD_CLICKS" as any,
-          category: "DEFAULT" as any,
-          status: "ENABLED" as any,
-          value_settings: { default_value: valueDollars, always_use_default_value: false },
-          counting_type: "ONE_PER_CLICK" as any,
-          click_through_lookback_window_days: CLICK_LOOKBACK_DAYS,
-        } as any,
-      ]);
-      actionResource = (created as any).results?.[0]?.resource_name ?? null;
-      if (!actionResource) throw new Error("Conversion action creation returned no resource name.");
-      console.log(`Created conversion action: ${actionResource}`);
-    }
+    const ca: any = (existing[0] as any)?.conversion_action ?? null;
+    const fault = actionFault(ca, CONVERSION_ACTION_NAME);
+    if (fault) { console.error(fault); process.exit(1); }
+    const actionId = String(ca.id);
+    console.log(`Conversion action ${CONVERSION_ACTION_NAME}: enabled, upload from clicks, secondary.`);
 
-    // Build + upload click conversions. Timed end-of-day in the account's
-    // timezone on the admission date, so the conversion is always after the
-    // click that produced it.
-    const conversions = fresh.map((m) => ({
-      gclid: m.gclid,
-      conversion_action: actionResource!,
-      conversion_date_time: `${ymd(m.date)} 23:59:59${tzOffsetOn(new Date(`${ymd(m.date)}T12:00:00Z`))}`,
-      conversion_value: valueDollars,
-      currency_code: "USD",
-      order_id: `och-${m.gclid.slice(0, 20)}-${ymd(m.date)}`,
-    }));
-
-    const resp: any = await customer.conversionUploads.uploadClickConversions({
-      customer_id: customerId,
-      conversions: conversions as any,
-      partial_failure: true,
-      validate_only: false,
-    } as any);
-
-    // Record ONLY what Google accepted. With partial_failure, results[] is
-    // index-aligned with the request and a rejected row comes back empty; the
-    // error details name the rejected indexes too. Anything rejected stays
-    // unrecorded so the next run retries it (and the log says why).
-    const failureMsg: string | undefined = resp?.partial_failure_error?.message;
-    const results: any[] = Array.isArray(resp?.results) ? resp.results : [];
-    const rejected = new Map<number, string>();
-    for (const d of resp?.partial_failure_error?.details ?? []) {
-      for (const err of d?.errors ?? []) {
-        for (const p of err?.location?.field_path_elements ?? []) {
-          if (p?.field_name === "conversions" && typeof p?.index === "number") rejected.set(p.index, err?.message ?? "rejected");
-        }
+    // Send through the Data Manager API. The first pass is validate-only and sends nothing
+    // to the account; a real send needs a validate pass on record within 14 days.
+    const dmRows: DmRow[] = fresh.map((m) => ({ gclid: m.gclid, closed: ymd(m.date), valueDollars, transactionId: `och-${m.gclid.slice(0, 20)}-${ymd(m.date)}` }));
+    const dest = { accountId: customerId, loginAccountId: cfg.loginCustomerId || null, actionId };
+    const vKey = `dm_validated:${args.clientSlug}`;
+    const sending = args.api === "send";
+    if (sending) {
+      const { rows: vr } = await pgc.query<{ value: string }>("SELECT value FROM app_settings WHERE key=$1", [vKey]);
+      if (!validationAllows(vr[0]?.value, new Date())) {
+        console.error("Not sending: no validate-only pass on record in the last 14 days. Run this job with --api=validate first and read the result.");
+        process.exit(1);
       }
     }
-    const accepted = (i: number): boolean => {
-      if (rejected.has(i)) return false;
-      if (results.length) return Boolean(results[i]?.gclid || results[i]?.conversion_action);
-      return !failureMsg;
-    };
-    if (failureMsg) console.warn(`Google Ads reported partial failures: ${failureMsg}`);
-    let recorded = 0;
-    fresh.forEach((m, i) => {
-      if (!accepted(i)) { console.warn(`  ✗ ${ymd(m.date)} · ${m.name} · gclid=${m.gclid.slice(0, 12)}… — ${rejected.get(i) ?? "not accepted"} (will retry next run)`); return; }
-      recorded++;
-    });
-    for (let i = 0; i < fresh.length; i++) {
-      if (!accepted(i)) continue;
-      const m = fresh[i]!;
+    let dmTok: string;
+    try { dmTok = await dmToken(process.env); } catch (e: any) { console.error(e?.message ?? String(e)); process.exit(1); }
+    let accepted = 0, failedBatches = 0, firstReason: string | null = null;
+    for (const part of chunk(dmRows)) {
+      const ans = await ingest(dmTok, buildIngestBody(dest, part, !sending));
+      if (!ans.ok) { failedBatches++; firstReason ??= ans.reason; console.error(`Data Manager refused ${part.length} row(s) (HTTP ${ans.status}): ${ans.reason}${ans.scopeProblem ? " The credential needs the Data Manager scope and the account must be linked as a destination." : ""}`); continue; }
+      accepted += part.length;
+      if (ans.requestId) {
+        const st = await requestStatus(dmTok, ans.requestId);
+        console.log(`Request ${ans.requestId}: ${st ? `received ${st.received ?? "?"}, failed ${st.failed ?? "?"}` : "status not readable yet"}.`);
+      }
+    }
+    if (failedBatches > 0) { console.error(`Data Manager did not take ${failedBatches} batch(es). First reason: ${firstReason ?? "not stated"}.`); process.exit(1); }
+    if (!sending) {
+      await pgc.query("INSERT INTO app_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [vKey, new Date().toISOString()]);
+      console.log(`Validate-only pass OK for ${accepted} conversion(s). Nothing was sent to the account. Run again with --api=send to send.`);
+      return;
+    }
+    // Accepted by the API (the request status above says how many Google then processed).
+    for (const m of fresh) {
       await pgc.query(
         `INSERT INTO offline_conversion_uploads (id, client_slug, gclid, conversion_action, admission_date, value_cents, matched_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
-        [randomUUID(), args.clientSlug, m.gclid, actionResource, ymd(m.date), valueCents, m.matchedBy],
+        [randomUUID(), args.clientSlug, m.gclid, ca.resource_name, ymd(m.date), valueCents, `${m.matchedBy}+data_manager`],
       );
     }
-    console.log(`Sent ${conversions.length} conversion(s) to Google Ads (${customerId}); accepted + recorded ${recorded}, rejected ${conversions.length - recorded}.${recorded ? " The loop is closed — Google now optimizes toward admissions." : ""}`);
-    // A run where Google took nothing is a failure, not a success: the heartbeat
-    // reads this exit code, and a quiet "ok" here hid a two-month gap.
-    if (conversions.length > 0 && recorded === 0) {
-      const closedApi = /Data Manager API/i.test(failureMsg ?? "");
-      console.error(closedApi
-        ? "Google refused every conversion: UploadClickConversions is closed to new integrations and the Data Manager API has to be used instead. Until that is built, upload by hand: run this job with --csv=<file>, upload the file in Data Manager (file upload connection), then run with --csv=<file> --mark-uploaded."
-        : `Google accepted none of the ${conversions.length} conversions. First reason: ${(failureMsg ?? "not stated").slice(0, 200)}`);
-      process.exit(1);
-    }
+    console.log(`Sent ${accepted} conversion(s) through the Data Manager API and recorded them. Google may take hours to show them in the conversion action.`);
   } finally {
     await pgc.end();
   }
