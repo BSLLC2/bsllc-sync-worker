@@ -11,6 +11,7 @@ import { JWT } from "google-auth-library";
  *   competitors  organic competitors (Labs competitors_domain)
  *   gap          keywords PARAMS.competitors rank for that the target does not (top 20 or absent)
  *   backlinks    backlink summary, referring domains and anchors for the target and PARAMS.compare
+ *   linkgap      referring domains for the target and each PARAMS.competitors (PARAMS.refLimit each)
  *   keywords     keyword overview for PARAMS.seeds plus suggestions for PARAMS.expand
  *   serp         live Google top 10 for PARAMS.serps from PARAMS.serpLocation
  *   gsctrend     weekly Search Console history for the homepage, tagged links, brand and city queries
@@ -112,6 +113,17 @@ async function main() {
               for (const it of an?.items ?? []) console.log(`### BLANCHOR ${J({ a: trim(it.anchor, 60), backlinks: n(it.backlinks), domains: n(it.referring_domains) })}`);
             }
           } catch (e) { console.log(`### BLERR ${J({ target: t, err: trim(String(e), 220) })}`); }
+        }
+      }
+      if (ph === "linkgap") {
+        // Referring domains for the target (full list) and for each PARAMS.competitors, so the caller can see who links to them and not to the target.
+        const lim = Number(PARAMS.refLimit || 400);
+        for (const t of [TARGET, ...(PARAMS.competitors || [])]) {
+          try {
+            const rd = await post(creds, "/backlinks/referring_domains/live", [{ target: t, limit: t === TARGET ? 1000 : lim, order_by: ["rank,desc"], include_subdomains: true, backlinks_status_type: "live" }]);
+            console.log(`### LGMETA ${J({ target: t, total: n(rd?.total_count), got: (rd?.items ?? []).length })}`);
+            for (const it of rd?.items ?? []) console.log(`### LG ${J({ t, d: it.domain, r: n(it.rank), b: n(it.backlinks), sp: n(it.backlinks_spam_score), nf: n(it.referring_links_attributes?.nofollow), first: String(it.first_seen ?? "").slice(0, 10) })}`);
+          } catch (e) { console.log(`### LGERR ${J({ target: t, err: trim(String(e), 220) })}`); }
         }
       }
       if (ph === "keywords") {
