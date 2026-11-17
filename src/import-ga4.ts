@@ -75,6 +75,7 @@ async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
       `SELECT cm.client_id, cm.external_id, c.name
          FROM connector_mappings cm LEFT JOIN clients c ON c.id = cm.client_id
         WHERE cm.source = 'ga4' AND cm.enabled = true
+          AND COALESCE(c.status, '') <> 'churned'
           AND cm.external_id IS NOT NULL AND cm.external_id <> ''`,
     );
     const m: Record<string, string> = {};
@@ -169,6 +170,19 @@ async function main() {
     try { Object.assign(map, JSON.parse(process.env.GA4_PROPERTY_MAP)); } catch { throw new Error("GA4_PROPERTY_MAP is not valid JSON."); }
   }
   Object.assign(map, args.map); // --map wins
+  // A churned client is never read, whichever way its id reached the map
+  // (connector row, secret or --map). Reading them only raises alarms.
+  {
+    const c = new pg.Client({ connectionString: databaseUrl });
+    await c.connect();
+    try {
+      const { rows } = await c.query<{ id: string }>(`SELECT id FROM clients WHERE status = 'churned'`);
+      const gone = new Set(rows.map((r) => r.id));
+      const skipped = Object.keys(map).filter((k) => gone.has(k));
+      for (const k of skipped) delete map[k];
+      if (skipped.length) console.log(`  (skipped ${skipped.length} churned client(s))`);
+    } finally { await c.end(); }
+  }
   for (const k of Object.keys(map)) map[k] = propertyId(map[k]!);
   if (args.onlyClient) {
     for (const clientId of Object.keys(map)) if (clientId !== args.onlyClient) delete map[clientId];
