@@ -15,6 +15,8 @@ import { JWT } from "google-auth-library";
  *   ranks        authority (0-100), referring domains and estimated organic visits for PARAMS.domains
  *   keywords     keyword overview for PARAMS.seeds plus suggestions for PARAMS.expand
  *   serp         live Google top 10 for PARAMS.serps from PARAMS.serpLocation
+ *   ga4x         analytics detail: landing pages by channel, device split, form funnel by week and page (PARAMS.property)
+ *   speed        Lighthouse performance on a phone profile for PARAMS.urls
  *   gsctrend     weekly Search Console history for the homepage, tagged links, brand and city queries
  *   local        live Business Profile record for PARAMS.biz and Google Maps results for PARAMS.maps near PARAMS.coord
  * PARAMS (JSON): target, compare[], competitors[], seeds[], expand[], serps[], serpLocation, location (code), limit.
@@ -237,6 +239,54 @@ async function main() {
             console.log(`### GA4GMBCAMP ${J(camp.map((r: any) => [r.dimensionValues[0].value, r.dimensionValues[1].value, +r.metricValues[0].value, +r.metricValues[1].value]))}`);
           }
         } catch (e) { console.log(`### PHASEERR ${J({ phase: "ga4", err: trim(String(e), 260) })}`); }
+      }
+      if (ph === "ga4x") {
+        // Read-only analytics detail: where sessions land and convert, by device, and the form funnel over time.
+        try {
+          const sa = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "{}");
+          const jwt = new JWT({ email: sa.client_email, key: sa.private_key, scopes: ["https://www.googleapis.com/auth/analytics.readonly"] });
+          const { token } = await jwt.getAccessToken();
+          const H = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+          const prop = String((PARAMS as any).property || "").replace(/\D/g, "");
+          if (!prop) throw new Error('pass params {"property":"<GA4 property id>"}');
+          const days = Number((PARAMS as any).days || 90);
+          const day = (d: number) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
+          const run = async (label: string, body: any) => {
+            try {
+              const r = await fetch(`https://analyticsdata.googleapis.com/v1beta/properties/${prop}:runReport`, { method: "POST", headers: H, body: JSON.stringify(body) });
+              if (!r.ok) throw new Error(`data ${r.status} ${trim(await r.text(), 200)}`);
+              const rows = ((await r.json()) as any).rows ?? [];
+              for (const x of rows) console.log(`### ${label} ${J([...(x.dimensionValues ?? []).map((d: any) => trim(d.value, 100)), ...(x.metricValues ?? []).map((m: any) => +m.value)])}`);
+              console.log(`# ${label} rows ${rows.length}`);
+            } catch (e) { console.log(`### GXERR ${J({ label, err: trim(String(e), 240) })}`); }
+          };
+          const dr = [{ startDate: day(days), endDate: day(1) }];
+          const notDirect = { notExpression: { filter: { fieldName: "sessionDefaultChannelGroup", stringFilter: { value: "Direct" } } } };
+          const formF = { filter: { fieldName: "eventName", inListFilter: { values: ["form_start", "form_submit", "form_success", "generate_lead"] } } };
+          const sM = [{ name: "sessions" }, { name: "engagedSessions" }, { name: "keyEvents" }];
+          await run("GXLAND", { dateRanges: dr, dimensions: [{ name: "landingPage" }, { name: "sessionDefaultChannelGroup" }], metrics: sM, dimensionFilter: notDirect, orderBys: [{ metric: { metricName: "sessions" }, desc: true }], limit: 80 });
+          await run("GXDEV", { dateRanges: dr, dimensions: [{ name: "deviceCategory" }, { name: "sessionDefaultChannelGroup" }], metrics: sM, limit: 60 });
+          await run("GXFORMDEV", { dateRanges: dr, dimensions: [{ name: "eventName" }, { name: "deviceCategory" }], metrics: [{ name: "eventCount" }, { name: "totalUsers" }], dimensionFilter: formF, limit: 40 });
+          await run("GXFORMWK", { dateRanges: [{ startDate: day(182), endDate: day(1) }], dimensions: [{ name: "isoYearIsoWeek" }, { name: "eventName" }], metrics: [{ name: "eventCount" }], dimensionFilter: formF, orderBys: [{ dimension: { dimensionName: "isoYearIsoWeek" } }], limit: 200 });
+          await run("GXFORMPAGE", { dateRanges: dr, dimensions: [{ name: "eventName" }, { name: "pagePath" }, { name: "deviceCategory" }], metrics: [{ name: "eventCount" }], dimensionFilter: formF, orderBys: [{ metric: { metricName: "eventCount" }, desc: true }], limit: 80 });
+          await run("GXPAGE", { dateRanges: dr, dimensions: [{ name: "pagePath" }], metrics: [{ name: "screenPageViews" }, { name: "totalUsers" }, { name: "userEngagementDuration" }, { name: "keyEvents" }], dimensionFilter: notDirect, orderBys: [{ metric: { metricName: "screenPageViews" }, desc: true }], limit: 60 });
+          await run("GXCLICK", { dateRanges: dr, dimensions: [{ name: "eventName" }, { name: "linkUrl" }], metrics: [{ name: "eventCount" }, { name: "totalUsers" }], dimensionFilter: { filter: { fieldName: "linkUrl", stringFilter: { matchType: "PARTIAL_REGEXP", value: "meetings|tel:|mailto:|calendly" } } }, orderBys: [{ metric: { metricName: "eventCount" }, desc: true }], limit: 40 });
+          await run("GXCONTACT", { dateRanges: dr, dimensions: [{ name: "sessionDefaultChannelGroup" }, { name: "deviceCategory" }], metrics: [{ name: "screenPageViews" }, { name: "totalUsers" }], dimensionFilter: { filter: { fieldName: "pagePath", stringFilter: { matchType: "BEGINS_WITH", value: "/contact" } } }, limit: 40 });
+          await run("GXMONTH", { dateRanges: [{ startDate: day(400), endDate: day(1) }], dimensions: [{ name: "yearMonth" }, { name: "sessionDefaultChannelGroup" }], metrics: sM, dimensionFilter: notDirect, orderBys: [{ dimension: { dimensionName: "yearMonth" } }], limit: 200 });
+        } catch (e) { console.log(`### PHASEERR ${J({ phase: "ga4x", err: trim(String(e), 260) })}`); }
+      }
+      if (ph === "speed") {
+        // Lighthouse (lab) performance for PARAMS.urls, phone profile unless PARAMS.desktop is set.
+        for (const u of (PARAMS.urls || ["https://bsllc.biz/"]) as string[]) {
+          try {
+            const r = await post(creds, "/on_page/lighthouse/live/json", [{ url: u, for_mobile: !PARAMS.desktop, categories: ["performance"] }]);
+            const a = r?.audits ?? {};
+            const v = (k: string) => n(a[k]?.numericValue);
+            const top = (k: string, m = 5) => ((a[k]?.details?.items ?? []) as any[]).slice(0, m).map((it) => ({ u: trim(it.url ?? it.entity ?? it.node?.snippet ?? "", 90), ms: n(it.wastedMs ?? it.blockingTime ?? it.total), kb: n(it.wastedBytes ?? it.totalBytes ?? it.transferSize) != null ? Math.round((it.wastedBytes ?? it.totalBytes ?? it.transferSize) / 1024) : null }));
+            console.log(`### SPEED ${J({ u, score: n(r?.categories?.performance?.score), fcp: v("first-contentful-paint"), lcp: v("largest-contentful-paint"), tbt: v("total-blocking-time"), cls: v("cumulative-layout-shift"), si: v("speed-index"), tti: v("interactive"), bytesKb: v("total-byte-weight") != null ? Math.round(v("total-byte-weight")! / 1024) : null, ttfb: v("server-response-time"), lcpEl: trim(a["largest-contentful-paint-element"]?.details?.items?.[0]?.items?.[0]?.node?.snippet ?? "", 160) })}`);
+            console.log(`### SPEEDWHY ${J({ u, blocking: top("render-blocking-resources"), unusedJs: top("unused-javascript"), third: top("third-party-summary"), heavy: top("total-byte-weight"), img: top("uses-optimized-images", 3), imgSize: top("uses-responsive-images", 3), offscreen: top("offscreen-images", 3) })}`);
+          } catch (e) { console.log(`### SPEEDERR ${J({ u, err: trim(String(e), 220) })}`); }
+        }
       }
       if (ph === "gsctrend") {
         // Read-only Search Console history: weekly clicks and impressions for the homepage, the
