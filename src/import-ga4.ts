@@ -352,7 +352,15 @@ async function main() {
     console.error(`\nThe monthly totals are unaffected by any of these — they come from a separate call.`);
   }
   reportDenied();
-  process.exit(code || (denied.length ? 1 : 0));
+  // A property the service account cannot read is that client's problem, not
+  // the book's: everything else landed. Exiting 1 turned every client's GA4
+  // figure red for one missing share. It exits 0 now and says WHICH client in
+  // one line the workflow passes to the heartbeat note. A run where nothing
+  // imported still exits 1 above.
+  if (denied.length && !code) {
+    console.log(`GA4-PARTIAL: ${denied.length} property not readable (${denied.map((d) => d.split(" → ")[0]).join(", ")}). Others imported.`);
+  }
+  process.exit(code);
 }
 
 main().catch((e) => {
