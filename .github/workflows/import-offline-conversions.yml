@@ -14,6 +14,14 @@ on:
         description: "Match + print only, upload nothing (true/false)."
         required: false
         default: "false"
+      csv:
+        description: "Write the Google Ads upload file instead of calling the API (true/false). Nothing is sent. Download it from the run's artifacts."
+        required: false
+        default: "false"
+      mark_uploaded:
+        description: "With csv: record the rows as uploaded by hand so the daily run skips them (true/false). Only after the file was uploaded in Google Ads."
+        required: false
+        default: "false"
 
 concurrency:
   group: offline-conversions
@@ -42,11 +50,24 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           set -o pipefail
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
+          if [ "${{ inputs.csv }}" = "true" ]; then
+            EXTRA=""
+            if [ "${{ inputs.mark_uploaded }}" = "true" ]; then EXTRA="--mark-uploaded"; fi
+            npm run import-offline-conversions -- --csv=och-upload.csv $EXTRA 2>&1 | tee run.log
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
             npm run import-offline-conversions -- --dry-run 2>&1 | tee run.log
           else
             npm run import-offline-conversions 2>&1 | tee run.log
           fi
+
+      - name: Keep the upload file (private artifact, click ids only)
+        if: ${{ inputs.csv == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: och-upload-file
+          path: och-upload.csv
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Heartbeat
         if: always()

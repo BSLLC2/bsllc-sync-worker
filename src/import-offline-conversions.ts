@@ -67,15 +67,17 @@ function tzOffsetOn(day: Date): string {
   return m ? `${m[1]}${m[2]!.padStart(2, "0")}:${m[3] ?? "00"}` : "-05:00";
 }
 
-interface Args { dryRun: boolean; customerId: string | null; lookbackDays: number; sheetId: string; clientSlug: string; }
+interface Args { dryRun: boolean; customerId: string | null; lookbackDays: number; sheetId: string; clientSlug: string; csvPath: string | null; markUploaded: boolean; }
 function parseArgs(argv: string[]): Args {
-  const a: Args = { dryRun: false, customerId: null, lookbackDays: DEFAULT_LOOKBACK_DAYS, sheetId: DEFAULT_SHEET_ID, clientSlug: DEFAULT_CLIENT_SLUG };
+  const a: Args = { dryRun: false, customerId: null, lookbackDays: DEFAULT_LOOKBACK_DAYS, sheetId: DEFAULT_SHEET_ID, clientSlug: DEFAULT_CLIENT_SLUG, csvPath: null, markUploaded: false };
   for (const x of argv) {
     if (x === "--dry-run") a.dryRun = true;
     else if (x.startsWith("--customer=")) a.customerId = x.slice(11).replace(/[^0-9]/g, "");
     else if (x.startsWith("--lookback=")) a.lookbackDays = Number(x.slice(11)) || DEFAULT_LOOKBACK_DAYS;
     else if (x.startsWith("--sheet=")) a.sheetId = x.slice(8);
     else if (x.startsWith("--client=")) a.clientSlug = x.slice(9);
+    else if (x.startsWith("--csv=")) a.csvPath = x.slice(6);
+    else if (x === "--mark-uploaded") a.markUploaded = true;
   }
   return a;
 }
@@ -261,6 +263,31 @@ async function main() {
       return;
     }
 
+    // ── CSV stopgap: Google closed UploadClickConversions to new integrations
+    // (the Data Manager API replaces it). A person uploads this file in Google
+    // Ads, Goals, Conversions, Uploads. Nothing is sent from here. The file holds
+    // click ids and times only: no name, phone or date of birth. ──
+    if (args.csvPath) {
+      const { writeFileSync } = await import("node:fs");
+      const lines = [`Parameters:TimeZone=${ACCOUNT_TZ}`, "Google Click ID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency"];
+      for (const m of fresh) lines.push(`${m.gclid},${CONVERSION_ACTION_NAME},${ymd(m.date)} 23:59:59,${valueDollars},USD`);
+      writeFileSync(args.csvPath, lines.join("\n") + "\n");
+      console.log(`Wrote ${fresh.length} conversion row(s) to the upload file. Nothing was sent to Google.`);
+      if (args.markUploaded) {
+        for (const m of fresh) {
+          await pgc.query(
+            `INSERT INTO offline_conversion_uploads (id, client_slug, gclid, conversion_action, admission_date, value_cents, matched_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+            [randomUUID(), args.clientSlug, m.gclid, CONVERSION_ACTION_NAME, ymd(m.date), valueCents, `${m.matchedBy}+manual_csv`],
+          );
+        }
+        console.log(`Recorded ${fresh.length} as uploaded by hand, so the daily run will not try them again.`);
+      } else {
+        console.log("Not recorded as uploaded. After a person uploads the file, run again with --mark-uploaded.");
+      }
+      return;
+    }
+
     // ── Google Ads: resolve account + conversion action, then upload ──
     const cfg = {
       clientId: env("GOOGLE_ADS_CLIENT_ID"),
@@ -389,6 +416,15 @@ async function main() {
       );
     }
     console.log(`Sent ${conversions.length} conversion(s) to Google Ads (${customerId}); accepted + recorded ${recorded}, rejected ${conversions.length - recorded}.${recorded ? " The loop is closed — Google now optimizes toward admissions." : ""}`);
+    // A run where Google took nothing is a failure, not a success: the heartbeat
+    // reads this exit code, and a quiet "ok" here hid a two-month gap.
+    if (conversions.length > 0 && recorded === 0) {
+      const closedApi = /Data Manager API/i.test(failureMsg ?? "");
+      console.error(closedApi
+        ? "Google refused every conversion: UploadClickConversions is closed to new integrations and the Data Manager API has to be used instead. Until that is built, upload by hand: run this job with --csv=<file>, upload the file in Google Ads (Goals, Conversions, Uploads), then run with --csv=<file> --mark-uploaded."
+        : `Google accepted none of the ${conversions.length} conversions. First reason: ${(failureMsg ?? "not stated").slice(0, 200)}`);
+      process.exit(1);
+    }
   } finally {
     await pgc.end();
   }
