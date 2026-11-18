@@ -18,6 +18,13 @@ import type { BingAiStatus, BingIssueRow, BingPageRow, BingQueryRow, BingSiteDay
 const id = (...parts: Array<string | number>): string => createHash("sha256").update(parts.join("\u0001")).digest("hex").slice(0, 40);
 export const BATCH = 500;
 
+/** One statement cannot touch the same key twice, so repeated keys in a batch keep the last row seen. */
+function lastPerKey<T>(rows: T[], key: (r: T) => string): T[] {
+  const m = new Map<string, T>();
+  for (const r of rows) m.set(key(r), r);
+  return [...m.values()];
+}
+
 export const UPSERT_QUERY_DAYS = `INSERT INTO bing_query_days (id, client_id, site_url, day, query, clicks, impressions, avg_position, read_at)
  SELECT t.id, $1, $2, t.day, t.query, t.clicks, t.impressions, t.avg_position, $3
    FROM unnest($4::text[], $5::text[], $6::text[], $7::int[], $8::int[], $9::float8[]) AS t(id, day, query, clicks, impressions, avg_position)
@@ -49,13 +56,15 @@ export const PRUNE_QUERY_DAYS = `DELETE FROM bing_query_days WHERE client_id = $
 export const PRUNE_PAGE_DAYS = `DELETE FROM bing_page_days WHERE client_id = $1 AND day < $2`;
 export const PRUNE_SITE_DAYS = `DELETE FROM bing_site_days WHERE client_id = $1 AND day < $2`;
 
-export async function writeQueryDays(c: Queryable, clientId: string, siteUrl: string, rows: BingQueryRow[], at: Date): Promise<void> {
+export async function writeQueryDays(c: Queryable, clientId: string, siteUrl: string, all: BingQueryRow[], at: Date): Promise<void> {
+  const rows = lastPerKey(all, (r) => `${r.day}\u0001${r.query}`);
   for (let i = 0; i < rows.length; i += BATCH) {
     const b = rows.slice(i, i + BATCH);
     await c.query(UPSERT_QUERY_DAYS, [clientId, siteUrl, at, b.map((r) => id("q", clientId, siteUrl, r.day, r.query)), b.map((r) => r.day), b.map((r) => r.query), b.map((r) => r.clicks), b.map((r) => r.impressions), b.map((r) => r.avgPosition)]);
   }
 }
-export async function writePageDays(c: Queryable, clientId: string, siteUrl: string, rows: BingPageRow[], at: Date): Promise<void> {
+export async function writePageDays(c: Queryable, clientId: string, siteUrl: string, all: BingPageRow[], at: Date): Promise<void> {
+  const rows = lastPerKey(all, (r) => `${r.day}\u0001${r.pageUrl}`);
   for (let i = 0; i < rows.length; i += BATCH) {
     const b = rows.slice(i, i + BATCH);
     await c.query(UPSERT_PAGE_DAYS, [clientId, siteUrl, at, b.map((r) => id("p", clientId, siteUrl, r.day, r.pageUrl)), b.map((r) => r.day), b.map((r) => r.pageUrl), b.map((r) => r.clicks), b.map((r) => r.impressions), b.map((r) => r.avgPosition)]);

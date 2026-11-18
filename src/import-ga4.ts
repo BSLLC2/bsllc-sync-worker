@@ -352,7 +352,11 @@ async function main() {
     console.error(`\nThe monthly totals are unaffected by any of these — they come from a separate call.`);
   }
   reportDenied();
-  process.exit(code || (denied.length ? 1 : 0));
+  // A property the service account cannot read is one client's problem, not the whole job's: every
+  // other client imported and is current, so the run is green and the gap is a GitHub warning that
+  // names the property. Only a failed write fails the job.
+  if (denied.length) console.log(`::warning::${denied.length} GA4 property(ies) not readable: ${denied.join("; ")}`);
+  process.exit(code);
 }
 
 main().catch((e) => {
