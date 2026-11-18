@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { enums } from "google-ads-api";
 import {
-  CLOSED_GONE_REASON, GOOGLE_RECS_DETAIL_GAQL, GOOGLE_RECS_GAQL, RECS_READ_CAP, REC_TYPE_NAMES, closeRecs,
+  CLOSED_GONE_REASON, GOOGLE_RECS_DETAIL_GAQL, GOOGLE_RECS_GAQL, GOOGLE_RECS_IMPACT_GAQL, RECS_READ_CAP, REC_TYPE_NAMES, closeRecs,
   decodeRecType, ensureRecTables, normalizeRecommendation, parseRecDetails, planRecSync, readIsWhole, recId,
   recordRecScan, storedRecs, upsertRecs, withDetails, type NormalRec,
 } from "./ads/google-recs.js";
@@ -69,7 +69,7 @@ export function writeWords(src: string): string[] {
   ok("…and a planted dismissal", writeWords("service.dismissRecommendation(req)").length >= 1);
   ok("…and a planted write to findings", writeWords("await c.query(`UPDATE ads_findings SET status = 'dismissed'`)").length >= 1);
   ok("…and does not flag a comment that names them", writeWords("// we never call applyRecommendation here").length === 0);
-  ok("both queries are SELECTs", /^\s*SELECT/i.test(GOOGLE_RECS_GAQL) && /^\s*SELECT/i.test(GOOGLE_RECS_DETAIL_GAQL));
+  ok("both queries are SELECTs", /^\s*SELECT/i.test(GOOGLE_RECS_GAQL) && /^\s*SELECT/i.test(GOOGLE_RECS_DETAIL_GAQL) && /^\s*SELECT/i.test(GOOGLE_RECS_IMPACT_GAQL));
 }
 
 // ── 2. The list of types is the library's ────────────────────────────────────
@@ -185,7 +185,7 @@ section("7. Every field the queries select exists in the library's own definitio
     console.log("  ⏭  skipped: the library's protos.d.ts is not installed here.");
   } else {
     const leaf = (gaql: string): string[] => Array.from(gaql.matchAll(/recommendation\.([a-z_.]+)/g)).map((m) => m[1]!.split(".").pop()!);
-    const names = Array.from(new Set([...leaf(GOOGLE_RECS_GAQL), ...leaf(GOOGLE_RECS_DETAIL_GAQL)]));
+    const names = Array.from(new Set([...leaf(GOOGLE_RECS_GAQL), ...leaf(GOOGLE_RECS_DETAIL_GAQL), ...leaf(GOOGLE_RECS_IMPACT_GAQL)]));
     const missing = names.filter((n) => !new RegExp(`\\b${n}\\??:`).test(defs));
     ok(`all ${names.length} selected field names are declared by the library`, missing.length === 0, missing.join(", "));
     ok("the checker would catch a made-up field", !/\bdefinitely_not_a_field\??:/.test(defs));
