@@ -7,7 +7,7 @@ import { openCustomer } from "./apply-ads-changes.js";
 import { mappedAccounts } from "./ads/store.js";
 import { emitJobSummary, formatJobSummary } from "./ads-operability.js";
 import {
-  GOOGLE_RECS_GAQL, GOOGLE_RECS_DETAIL_GAQL, RECS_READ_CAP, closeRecs, ensureRecTables, normalizeRecommendation,
+  GOOGLE_RECS_GAQL, GOOGLE_RECS_DETAIL_GAQL, GOOGLE_RECS_IMPACT_GAQL, withImpact, RECS_READ_CAP, closeRecs, ensureRecTables, normalizeRecommendation,
   parseRecDetails, planRecSync, readIsWhole, recordRecScan, storedRecs, upsertRecs, withDetails,
 } from "./ads/google-recs.js";
 
@@ -96,6 +96,12 @@ async function main() {
         const rows: any[] = (await customer.query(GOOGLE_RECS_GAQL)) ?? [];
         const whole = readIsWhole(rows.length, RECS_READ_CAP);
         let recs = rows.map((r) => normalizeRecommendation(r, accountId, byNumber)).filter((r): r is NonNullable<typeof r> => r != null);
+
+        try {
+          recs = withImpact(recs, (await customer.query(GOOGLE_RECS_IMPACT_GAQL)) ?? []);
+        } catch (e) {
+          problems.push(`${t.clientName}: Google's impact estimates could not be read (${describeGoogleError(e).slice(0, 160)}), so suggestions carry no estimate`);
+        }
 
         // The detail pass is its own query so one bad field cannot cost the base.
         let detailOk = true;

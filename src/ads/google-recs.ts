@@ -97,7 +97,15 @@ export const REC_TYPE_NAMES = [
 const METRICS = ["impressions", "clicks", "cost_micros", "conversions", "conversions_value"] as const;
 export const GOOGLE_RECS_GAQL = `SELECT recommendation.resource_name, recommendation.type,
        recommendation.campaign, recommendation.ad_group, recommendation.campaign_budget,
-       recommendation.dismissed,
+       recommendation.dismissed
+  FROM recommendation`;
+
+/**
+ * Google's own estimate of what a suggestion would change. Its own query, because
+ * Google rejected these field paths on every account from late October and the
+ * whole read failed with them: the suggestions matter, the estimate is a bonus.
+ */
+export const GOOGLE_RECS_IMPACT_GAQL = `SELECT recommendation.resource_name,
        ${METRICS.map((m) => `recommendation.impact.base_metrics.${m}`).join(", ")},
        ${METRICS.map((m) => `recommendation.impact.potential_metrics.${m}`).join(", ")}
   FROM recommendation`;
@@ -246,6 +254,15 @@ export function parseRecDetails(rows: readonly any[]): Map<string, RecDetail> {
  * Put the detail on its recommendation and (re)compute the id, since a keyword
  * recommendation's identity includes its text. Pure; returns new objects.
  */
+export function withImpact(recs: readonly NormalRec[], impactRows: readonly any[]): NormalRec[] {
+  const byName = new Map<string, NormalRec["impact"]>();
+  for (const row of impactRows) {
+    const one = normalizeRecommendation(row, "0", {});
+    if (one) byName.set(one.resourceName, one.impact);
+  }
+  return recs.map((r) => ({ ...r, impact: byName.get(r.resourceName) ?? r.impact }));
+}
+
 export function withDetails(recs: readonly NormalRec[], details: ReadonlyMap<string, RecDetail>, accountId: string): NormalRec[] {
   return recs.map((r) => {
     const d = details.get(r.resourceName) ?? null;
