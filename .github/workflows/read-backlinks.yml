@@ -1,0 +1,73 @@
+name: Read backlinks (link audit)
+
+# Reads each SEO client's own site in depth from DataForSEO's backlink index into the dashboard's link_audit_* tables (schema v308 or
+# later) and the older weekly link counts: the referring sites with the provider's rank and spam score, the lost sites, the sites using a
+# spam wording, the client's OWN anchor text (cleaned and cut to 120 characters), the pages links land on that are dead, and the sites
+# that link to two named competitors and not to the client.
+#
+# NEVER STORED: a person, an email address or a phone number, a competitor's anchor text, a page address with a host.
+#
+# COST. DataForSEO charges per request and per row. The run prints an estimate before spending, and a hard cap per client per run
+# (max_usd, default 3) stops a part before it would pass it. DRY RUN IS THE DEFAULT for a hand-started run: it prints the estimate for
+# every client and makes no request. The weekly schedule always reads for real.
+#
+# SECRETS: DATABASE_URL, DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD. Without the last two a client with the search module and a site goes red
+# here on purpose and the run names the secret.
+on:
+  schedule:
+    - cron: "40 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every SEO client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Print the cost estimate only; make no request and write nothing (true/false)."
+        required: false
+        default: "true"
+      max_usd:
+        description: "Hard cap per client per run, in US dollars (blank = 3)."
+        required: false
+        default: ""
+
+concurrency:
+  group: read-backlinks-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read backlinks
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
+          DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MAX_USD: ${{ inputs.max_usd }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ -n "$MAX_USD" ] && ARGS="$ARGS --max-usd=$MAX_USD"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-backlinks -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own last line as the reason. A dry run and a one-client
+      # run are excluded: the heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_backlinks --status="$STATUS" --note="$NOTE" --log=run.log
