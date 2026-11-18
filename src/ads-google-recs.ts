@@ -44,6 +44,23 @@ function typeByNumber(): Record<string, string> {
   return out;
 }
 
+
+/** Google's client throws plain objects ({ errors: [{ message, error_code }] }), which String() turns into "[object Object]". */
+function describeGoogleError(e: unknown): string {
+  if (e instanceof Error && e.message) return e.message;
+  const o = e as { message?: unknown; errors?: Array<{ message?: unknown; error_code?: unknown }>; status?: unknown; code?: unknown } | null;
+  if (o && typeof o === "object") {
+    const first = Array.isArray(o.errors) ? o.errors[0] : undefined;
+    const parts = [
+      first?.message, first?.error_code ? JSON.stringify(first.error_code) : undefined,
+      o.message, o.status, o.code,
+    ].filter((x) => x !== undefined && x !== null && x !== "").map(String);
+    if (parts.length) return parts.join(" | ");
+    try { return JSON.stringify(o).slice(0, 300); } catch { /* fall through */ }
+  }
+  return String(e);
+}
+
 async function main() {
   const cfg = loadConfig();
   const onlyClient = arg("client") ?? "";
@@ -88,7 +105,7 @@ async function main() {
         } catch (e) {
           detailOk = false;
           detailFailed += 1;
-          problems.push(`${t.clientName}: the detail pass failed (${(e instanceof Error ? e.message : String(e)).slice(0, 120)}), so budget and keyword suggestions carry no detail`);
+          problems.push(`${t.clientName}: the detail pass failed (${describeGoogleError(e).slice(0, 120)}), so budget and keyword suggestions carry no detail`);
         }
 
         // Campaign names, so the dashboard can say which campaign without a lookup.
@@ -127,7 +144,7 @@ async function main() {
         // One account's credentials or API hiccup must not take the run down. The
         // scan row is marked failed and nothing is closed, so the last good list
         // stands and the dashboard says when it was last read.
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = describeGoogleError(e);
         problems.push(`${t.clientName} [${accountId}] failed: ${msg.slice(0, 200)}`);
         console.log(`  ⚠ ${t.clientName}: ${msg.slice(0, 200)}`);
         if (!dryRun) {
