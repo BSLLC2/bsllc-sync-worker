@@ -51,7 +51,7 @@ jobs:
           GOOGLE_ADS_LOGIN_CUSTOMER_ID: "2141712409"
           OCH_ADS_CUSTOMER_ID: ${{ secrets.OCH_ADS_CUSTOMER_ID }}
           DATA_MANAGER_REFRESH_TOKEN: ${{ secrets.DATA_MANAGER_REFRESH_TOKEN }}
-          DM_MODE: ${{ inputs.api_mode || vars.OCH_DM_MODE || 'validate' }}
+          DM_MODE: ${{ inputs.api_mode || vars.OCH_DM_MODE || (github.event_name == 'schedule' && 'send') || 'validate' }}
           OCH_SHEET_ID: ${{ vars.OCH_SHEET_ID }}
           OCH_ADMISSIONS_TAB: ${{ vars.OCH_ADMISSIONS_TAB }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
