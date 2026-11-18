@@ -2,9 +2,9 @@
 import "dotenv/config";
 import { appendFileSync } from "node:fs";
 import pg from "pg";
-import { readClarity, parseTokens, recentlyRead, CLARITY_ROW_LIMIT } from "./page-behaviour/clarity.js";
+import { readClarity, readClarityAccount, parseTokens, recentlyRead, CLARITY_ROW_LIMIT } from "./page-behaviour/clarity.js";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
-import { CLARITY_KEEP_DAYS, DELETE_OLD_CLARITY, writeClarity, writeRun } from "./page-behaviour/store.js";
+import { CLARITY_KEEP_DAYS, DELETE_OLD_CLARITY, writeClarity, writeClarityAccount, writeRun } from "./page-behaviour/store.js";
 import { addDays, ymd } from "./page-behaviour/paths.js";
 import type { RunOut } from "./page-behaviour/types.js";
 
@@ -46,7 +46,7 @@ async function main() {
   await c.connect();
   let read = 0, noToken = 0, failed = 0, skipped = 0;
   try {
-    for (const t of ["seo_clarity_days", "seo_ux_runs"]) {
+    for (const t of ["seo_clarity_days", "seo_clarity_account_days", "seo_ux_runs"]) {
       const r = await c.query(`SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1`, [t]);
       if (r.rowCount !== 1) throw new Error(`The table ${t} does not exist yet. Deploy the dashboard app (schema v252) first, then run this again.`);
     }
@@ -80,6 +80,10 @@ async function main() {
         console.log(`${dryRun ? "(dry run) " : ""}${m.name}: ${parsed.rows.length} pages for ${day}`);
         if (dryRun) continue;
         await writeClarity(c, m.client_id, parsed.rows, now);
+        // A second call, no page dimension, for the bot count (Clarity counts bot sessions per account, not per page).
+        // Its failure never costs the per-page rows already read.
+        try { await writeClarityAccount(c, m.client_id, await readClarityAccount(realFetch, token, day), now); }
+        catch (e) { console.log(`${m.name}: bot count not read (${safeMessage(e, [token])})`); }
         await writeRun(c, m.client_id, out, now);
         await c.query(DELETE_OLD_CLARITY, [m.client_id, addDays(day, -CLARITY_KEEP_DAYS)]);
       } catch (e) {

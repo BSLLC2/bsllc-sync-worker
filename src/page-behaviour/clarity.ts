@@ -109,6 +109,29 @@ export function parseClarity(json: unknown, day: string): ClarityParsed {
   return { rows: Array.from(by.values()), urlsSeen: traffic.length, capped: traffic.length >= CLARITY_ROW_LIMIT };
 }
 
+/** One account-level day: sessions and how many of them Clarity itself counts as bots. */
+export interface ClarityAccountDay { day: string; humanSessions: number | null; botSessions: number | null }
+
+/** The same endpoint with no dimension: one row of totals. The names are read defensively; absent is null, never a nought. */
+export function clarityAccountUrl(): string {
+  return `${CLARITY_URL}?numOfDays=1`;
+}
+
+export function parseClarityAccount(json: unknown, day: string): ClarityAccountDay {
+  const all: Metric[] = Array.isArray(json) ? (json as Metric[]) : [];
+  const t = metricNamed(all, "Traffic")[0];
+  if (!t) return { day, humanSessions: null, botSessions: null };
+  return {
+    day,
+    humanSessions: num(find(t, "totalSessionCount", "sessionsCount", "sessions")),
+    botSessions: num(find(t, "totalBotSessionCount", "botSessionCount", "botSessions")),
+  };
+}
+
+export async function readClarityAccount(f: FetchLike, token: string, day: string): Promise<ClarityAccountDay> {
+  return parseClarityAccount(await getJson(f, clarityAccountUrl(), { Authorization: `Bearer ${token}` }, "Clarity export (account)"), day);
+}
+
 export async function readClarity(f: FetchLike, token: string, day: string): Promise<ClarityParsed> {
   return parseClarity(await getJson(f, clarityUrlFor(), { Authorization: `Bearer ${token}` }, "Clarity export"), day);
 }

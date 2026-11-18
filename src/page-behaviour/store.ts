@@ -51,6 +51,16 @@ export const INSERT_CLARITY = `INSERT INTO seo_clarity_days
    engagement_seconds = EXCLUDED.engagement_seconds, dead_click_pct = EXCLUDED.dead_click_pct,
    rage_click_pct = EXCLUDED.rage_click_pct, quickback_pct = EXCLUDED.quickback_pct, synced_at = EXCLUDED.synced_at`;
 
+export const INSERT_CLARITY_ACCOUNT = `INSERT INTO seo_clarity_account_days
+  (id, client_id, day, human_sessions, bot_sessions, synced_at)
+ VALUES ($1, $2, $3, $4, $5, $6)
+ ON CONFLICT (client_id, day) DO UPDATE SET
+   human_sessions = EXCLUDED.human_sessions, bot_sessions = EXCLUDED.bot_sessions, synced_at = EXCLUDED.synced_at`;
+
+export async function writeClarityAccount(c: Queryable, clientId: string, r: { day: string; humanSessions: number | null; botSessions: number | null }, at: Date): Promise<void> {
+  await c.query(INSERT_CLARITY_ACCOUNT, [id("ca", clientId, r.day), clientId, r.day, r.humanSessions, r.botSessions, at]);
+}
+
 export const INSERT_RUN = `INSERT INTO seo_ux_runs
   (client_id, source, status, detail, rows, capped, total_found, window_end, ran_at)
  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
