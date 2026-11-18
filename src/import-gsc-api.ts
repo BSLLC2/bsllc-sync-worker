@@ -55,7 +55,9 @@ async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
   await client.connect();
   try {
     const { rows } = await client.query<{ client_id: string; external_id: string }>(
-      "SELECT client_id, external_id FROM connector_mappings WHERE source = 'gsc' AND enabled = true AND external_id IS NOT NULL AND external_id <> ''",
+      `SELECT cm.client_id, cm.external_id FROM connector_mappings cm LEFT JOIN clients c ON c.id = cm.client_id
+        WHERE cm.source = 'gsc' AND cm.enabled = true AND cm.external_id IS NOT NULL AND cm.external_id <> ''
+          AND COALESCE(c.status, '') <> 'churned'`,
     );
     const m: Record<string, string> = {};
     for (const r of rows) m[r.client_id] = r.external_id.trim();

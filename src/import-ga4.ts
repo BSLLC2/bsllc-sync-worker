@@ -75,7 +75,8 @@ async function mapFromDb(databaseUrl: string): Promise<Record<string, string>> {
       `SELECT cm.client_id, cm.external_id, c.name
          FROM connector_mappings cm LEFT JOIN clients c ON c.id = cm.client_id
         WHERE cm.source = 'ga4' AND cm.enabled = true
-          AND cm.external_id IS NOT NULL AND cm.external_id <> ''`,
+          AND cm.external_id IS NOT NULL AND cm.external_id <> ''
+          AND COALESCE(c.status, '') <> 'churned'`,
     );
     const m: Record<string, string> = {};
     // Keep a client_id → name side table purely so failures can name the client.
