@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import "dotenv/config";
+import pg from "pg";
 import { runDashboardSync, type SyncEntry } from "./emit.js";
 import { TRACKER_CONFIGS, resolveConfig, countedFromNote, sheetRefsOf, type TrackerConfig } from "./tracker/config.js";
 import { FINDINGS, hasStop, lineFor, worstLine, type Finding } from "./tracker/causes.js";
@@ -255,11 +256,31 @@ async function single(cfg: TrackerConfig, o: { dryRun: boolean; diagnose: boolea
   return { line: lineFor(cfg.clientSlug, warns, { sourceKind: cfg.source, rows: r.rows, counted: r.counted.length, pending: r.pending.length }), findings: warns };
 }
 
+async function churnedClientNames(names: string[]): Promise<Set<string>> {
+  const url = process.env.DATABASE_URL;
+  if (!url || names.length === 0) return new Set();
+  const c = new pg.Client({ connectionString: url });
+  try {
+    await c.connect();
+    const r = await c.query<{ name: string }>(`SELECT name FROM clients WHERE status = 'churned' AND lower(name) = ANY($1::text[])`, [names.map((n) => n.toLowerCase())]);
+    return new Set(r.rows.map((x) => x.name.toLowerCase()));
+  } catch { return new Set(); } finally { await c.end().catch(() => {}); }
+}
+
 async function main() {
   const dryRun = flag("dry-run");
   const diagnose = flag("diagnose");
   const want = arg("client")?.trim();
-  const configs = TRACKER_CONFIGS.filter((c) => !want || c.key === want || c.clientSlug === want);
+  const all0 = TRACKER_CONFIGS.filter((c) => !want || c.key === want || c.clientSlug === want);
+  // A churned client's sheet is nobody's to chase: it is skipped and says so, never counted as a stopped read.
+  const churned = await churnedClientNames(all0.map((c) => c.clientName));
+  for (const c of all0) if (churned.has(c.clientName.toLowerCase())) console.log(`Skipping ${c.clientName}: the account is churned.`);
+  const configs = all0.filter((c) => !churned.has(c.clientName.toLowerCase()));
+  if (configs.length === 0 && all0.length > 0) {
+    console.log("Every configured tracker belongs to a churned account. Nothing to read.");
+    console.log("TRACKER-FEED all ok nothing_to_read: every configured sheet belongs to a churned account.");
+    return;
+  }
   if (configs.length === 0) {
     console.error(`TRACKER-FEED ${want ?? "none"} stop check_crashed: the import itself failed (no tracker is configured for "${want}").`);
     process.exit(1);
