@@ -106,6 +106,8 @@ jobs:
         run: npm run verify-ga4-channels
       - name: QuickBooks invoice reconciliation guard
         run: npm run verify-qbo-reconcile
+      - name: Conversions and dollars audit guard (read-only)
+        run: npm run verify-audit-conversions
       - name: Gmail body extraction guard
         run: npm run verify-email-body
       - name: Scoped email-body backfill guard

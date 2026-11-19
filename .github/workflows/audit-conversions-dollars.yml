@@ -1,0 +1,49 @@
+name: Audit conversions and dollars (read-only)
+
+# How the OS calculates conversions and dollars for one client: what is stored
+# month by month, which stored figure each headline tile reads, and (where a
+# credential exists) what GA4 and Meta say live for the same window.
+#
+# READ-ONLY. SELECT-only SQL, GET-only HTTP (GA4's runReport is a POST by API
+# design and reads), no heartbeat, nothing written anywhere. Dispatch only: it
+# never runs by itself. The report is printed and attached to the run.
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client slug or name (for example tablespoon), or all (capped). Required."
+        required: true
+        default: ""
+      days:
+        description: "Days for the live GA4 and Meta reads, ending yesterday. Blank = 30."
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Audit
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          AUDIT_CLIENT: ${{ inputs.client }}
+          AUDIT_DAYS: ${{ inputs.days }}
+        run: |
+          npm run audit-conversions-dollars -- --client="$AUDIT_CLIENT" --days="$AUDIT_DAYS" --out=audit-out
+      - name: Attach the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conversions-dollars-audit
+          path: audit-out/
+          if-no-files-found: ignore
