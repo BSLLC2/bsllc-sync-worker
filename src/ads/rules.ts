@@ -106,7 +106,7 @@ import {
  * dashboard (shared/ads-acted-on.ts), because it changes with the date and a
  * stored label would go stale between weekly runs.
  */
-export const ADS_RULESET_VERSION = 12;
+export const ADS_RULESET_VERSION = 13;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 // Deliberately explicit and boring. Each one carries why it is where it is;

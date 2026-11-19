@@ -11,6 +11,8 @@ import { buildRunSummary, failureReason, type AdsRunSummary, type ClosedRecord, 
 import { refineNarrative } from "./ads/narrative.js";
 import { GoogleAdsAdapter } from "./ads/google-ads-adapter.js";
 import { MetaAdapter, loadMetaConfig } from "./ads/meta-adapter.js";
+import { evaluateMetaDepth, META_FINDING_TYPES } from "./meta/rules.js";
+import { loadMetaDepthInput } from "./meta/depth-store.js";
 import {
   upsertFinding, sweepResolved, supersedeFindings, mappedAccounts, writeRunRecord, sweepUnauditedAccounts, unauditedMappings, normaliseAccountId, protectedPatternsFor, brandPatternsFor, competitorNamesFor, clientEconomicsFor,
   outcomeFeedFactsFor, clientServicesFor, researchFactsFor, phoneDemandFor, seoTargetsFor,
@@ -227,7 +229,29 @@ async function auditOne(
   // nobody told is the failure. Every drop is printed here.
   for (const l of accountingLines(accounting)) console.log(`  ${l}`);
   // Then, and only then, the language seam — which today is identity.
-  const { findings, engine } = refineNarrative(rulesFindings);
+  const { findings: refined, engine } = refineNarrative(rulesFindings);
+  // META IN DEPTH (ruleset 13). Findings from the stored daily ad, placement and settings record, appended AFTER the
+  // narrative seam and not sequenced or ranked (they are internal proposals, and a second "do this after" clause on a
+  // row the campaign rules already ordered would be a second order). A depth record that cannot be read leaves every
+  // type it owns UNRECHECKABLE, so the sweep never closes an open row because a rule could not run.
+  let findings = refined;
+  let metaUnrecheckable = new Map<string, string>();
+  if (platform === "meta") {
+    try {
+      const depthIn = await loadMetaDepthInput(c, clientId, accountId, new Date().toISOString().slice(0, 10), clientName, economics.cplCeilingCents ?? null);
+      const depth = evaluateMetaDepth(depthIn);
+      findings = [...refined, ...depth.findings];
+      metaUnrecheckable = depth.accounting.unrecheckable;
+      const raised = Object.entries(depth.accounting.raised).map(([k, v]) => `${v} ${k}`).join(", ");
+      console.log(`  meta depth: ${depth.findings.length} finding(s)${raised ? ` (${raised})` : ""}`);
+      for (const m of depth.accounting.silent) console.log(`    · ${m}`);
+      for (const [t, why] of depth.accounting.unrecheckable) console.log(`    · ${t} rows left as they were: ${why}`);
+    } catch (e) {
+      const why = `the Meta depth record could not be read (${(e instanceof Error ? e.message : String(e)).slice(0, 120)})`;
+      for (const t of META_FINDING_TYPES) metaUnrecheckable.set(t, why);
+      console.log(`  meta depth: not read — ${why}`);
+    }
+  }
   console.log(`  rules v${ADS_RULESET_VERSION} produced ${findings.length} finding(s) · narrative engine: ${engine}`);
 
   const present = new Set<string>();
@@ -285,6 +309,7 @@ async function auditOne(
       keywordsTruncated: platformInput.keywordsTruncated,
       searchTermsTruncated: platformInput.searchTermsTruncated,
     });
+    for (const [t, why] of metaUnrecheckable) if (!unrecheckable.has(t)) unrecheckable.set(t, why);
     const swept = await sweepResolved(c, clientId, platform, accountId, present, ACTOR, { currentRuleset: ADS_RULESET_VERSION, unrecheckable });
     closed.push(...swept.closed);
     notRechecked = swept.notRechecked;

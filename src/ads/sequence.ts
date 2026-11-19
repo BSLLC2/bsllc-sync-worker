@@ -101,6 +101,16 @@ export const FINDING_STAGE: Record<string, FindingStage> = {
   // widening what the account reaches, behind any waste that is still leaking.
   volume_limited: "grow",
 
+  // v13. Meta in depth (src/meta/rules.ts). Proposals from the stored daily ad, placement and settings record.
+  meta_placement_waste: "stop",
+  meta_loser_pause: "stop",
+  meta_tracking_gap: "measure",
+  meta_creative_fatigue: "improve",
+  meta_audience_saturation: "improve",
+  meta_thin_signal: "improve",
+  meta_budget_pacing: "improve",
+  meta_winner_scale: "grow",
+
   // Not growth and not a repair: it is the reason the growth on this account
   // cannot be counted. `measure` is where it belongs for the same reason
   // `conversion_tracking_gap` is — it names figures everything else is decided

@@ -2058,7 +2058,7 @@ async function main() {
         "neither sunk nor floated — it keeps its group and its stage");
     }
 
-    ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 12);
+    ok("the ruleset version moved with the rules", ADS_RULESET_VERSION === 13);
   }
 
   // ── How a closure is recorded (2026-09-24) ────────────────────────────────

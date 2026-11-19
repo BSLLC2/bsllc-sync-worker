@@ -254,7 +254,7 @@ section("8. The adapter reads what the rule needs, and the registrations hold");
   ok("the daily spend is read by campaign and date", /segments\.date[\s\S]{0,200}metrics\.cost_micros[\s\S]{0,80}FROM campaign|FROM campaign[\s\S]{0,200}segments\.date BETWEEN/.test(adapter));
   ok("a failed read goes through tryQuery (null), never safeQuery (empty)", /readVolumeLimit[\s\S]*?tryQuery\(customer, "campaign status reasons"/.test(adapter) && /tryQuery\(customer, "daily spend by campaign"/.test(adapter));
   ok("the adapter hands it to the rules", /volumeLimit,/.test(adapter));
-  ok("the ruleset moved to 12", ADS_RULESET_VERSION === 12);
+  ok("the ruleset moved to 13", ADS_RULESET_VERSION === 13);
   const rules = readFileSync(new URL("./ads/rules.ts", import.meta.url), "utf8");
   ok("the rule checks for a budget_limited row before it writes", /budgetRowFor[\s\S]{0,200}budget_limited/.test(rules));
   ok("it writes no change payload", !/findingType: "volume_limited"[\s\S]{0,2400}changePayload: \{/.test(rules));

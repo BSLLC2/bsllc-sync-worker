@@ -118,6 +118,14 @@ export const ADS_JOBS: AdsJobSpec[] = [
     quiet: "An account with no search terms genuinely stores no rows, and the note's accounts/read/rows counts say so. What this job must never do is stop silently: the dashboard's term-leakage reading dates itself from the scan row, which says when the 90 day window was last read and whether it worked. A failed or truncated read writes a failure row and leaves the earlier rows as they were.",
     fix: "Open bsllc-sync-worker → Actions → \"Ads search terms by day (read-only)\" and re-run it. Every query is a SELECT and nothing is written to any ad account. A GOOGLE_ADS_* secret that expired shows as an auth error on the first account. Dispatch it with dry_run=true first to see what it would store.",
   },
+  {
+    job: "ads_meta_days",
+    workflow: "ads-meta-days.yml",
+    label: "Meta ads in depth",
+    cadence: "daily 06:25 UTC",
+    quiet: "An account with no Meta ads genuinely stores no rows, and the note's accounts/read/ads counts say so. What this job must never do is stop silently: the Meta findings (creative fatigue, saturation, placement, pacing) read these days, and each part has its own scan row saying how far the record reaches and whether the last read worked. A failed or truncated read writes a failure row and leaves the earlier days as they were.",
+    fix: "Open bsllc-sync-worker → Actions → \"Meta ads in depth (read-only)\" and re-run it. Every request is a GET and nothing is written to Meta. A missing or expired META_ACCESS_TOKEN shows as an error on the first account, and a system user without access to an ad account shows on that account only. Days already read stay stored; the last fourteen are re-read every run. Dispatch it with dry_run=true first to see what it would store.",
+  },
 ];
 
 // `ads_change_digest` is deliberately NOT in this list (2026-09-23) for the

@@ -183,6 +183,8 @@
     "ads-daily-metrics": "tsx src/ads-daily-metrics.ts",
     "verify-ads-daily-metrics": "tsx src/verify-ads-daily-metrics.ts",
     "ads-keyword-metrics": "tsx src/ads-keyword-metrics.ts",
+    "ads-meta-days": "tsx src/ads-meta-days.ts",
+    "verify-meta-depth": "tsx src/verify-meta-depth.ts",
     "verify-ads-gaps": "tsx src/verify-ads-gaps.ts",
     "verify-ads-structure-read": "tsx src/verify-ads-structure-read.ts",
     "verify-gaql-fields": "tsx src/verify-gaql-fields.ts",
