@@ -266,7 +266,9 @@
     "dpg-aeo-probe": "tsx src/dpg-aeo-probe.ts",
     "hightec-aeo-probe": "tsx src/hightec-aeo-probe.ts",
     "hightec-local-probe": "tsx src/hightec-local-probe.ts",
-    "seo-growth-probe": "tsx src/seo-growth-probe.ts"
+    "seo-growth-probe": "tsx src/seo-growth-probe.ts",
+    "pull-fathom-calls": "tsx src/pull-fathom-calls.ts",
+    "verify-fathom-pull": "tsx src/verify-fathom-pull.ts"
   },
   "dependencies": {
     "@types/web-push": "^3.6.4",

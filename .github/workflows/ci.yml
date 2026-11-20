@@ -72,6 +72,8 @@ jobs:
         run: npm run verify-backlinks
       - name: CallTrackingMetrics guard, against a pretend CTM
         run: npm run verify-ctm
+      - name: Fathom call pull guard, against a pretend Fathom and a pretend dashboard
+        run: npm run verify-fathom-pull
       - name: Page history guard (top results, pages above a client, pages by month)
         run: npm run verify-page-history
       - name: Branded-search months guard (pure half; the real job runs in ads-store)

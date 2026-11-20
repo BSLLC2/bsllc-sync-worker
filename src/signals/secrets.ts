@@ -32,6 +32,8 @@ export const SECRET_NAMES = {
   gbpTokens: "GBP_TOKENS_JSON",
   ctmKeys: "CTM_ACCOUNT_KEYS_JSON",
   ctmHash: "CTM_CALLER_HASH_KEY",
+  fathomApi: "FATHOM_API_KEY",
+  fathomWebhook: "FATHOM_WEBHOOK_KEY",
   serviceAccount: "GOOGLE_SERVICE_ACCOUNT_JSON",
 } as const;
 
@@ -42,6 +44,8 @@ export const SECRET_WHERE: Record<string, string> = {
   GBP_TOKENS_JSON: "Add a repository secret named GBP_TOKENS_JSON holding each client's refresh token by client slug. docs/INTEGRATIONS-SETUP.md has the steps.",
   CTM_ACCOUNT_KEYS_JSON: "Add a repository secret named CTM_ACCOUNT_KEYS_JSON holding each client's CallTrackingMetrics keys by client slug. docs/INTEGRATIONS-SETUP.md has the steps.",
   CTM_CALLER_HASH_KEY: "Add a repository secret named CTM_CALLER_HASH_KEY: any long random string, kept for good. docs/INTEGRATIONS-SETUP.md has the steps.",
+  FATHOM_API_KEY: "Create an API key in Fathom (Settings, API Access) on an account that can read the team's calls, then add it as a repository secret named FATHOM_API_KEY. docs/FATHOM-PULL.md in the dashboard repository has the steps.",
+  FATHOM_WEBHOOK_KEY: "Add a repository secret named FATHOM_WEBHOOK_KEY holding the same value as the dashboard's FATHOM_SECRET (the key its Fathom webhook accepts). docs/FATHOM-PULL.md has the steps.",
   GOOGLE_SERVICE_ACCOUNT_JSON: "This is the service account the other Google readers use. It is already a repository secret; check it was not removed.",
 };
 
@@ -53,6 +57,14 @@ const clean = (v: string | undefined): string | null => (v && v.trim() ? v.trim(
 
 export function bingApiKey(env: Env = process.env): string | null {
   return clean(env[SECRET_NAMES.bing]);
+}
+
+export function fathomApiKey(env: Env = process.env): string | null {
+  return clean(env[SECRET_NAMES.fathomApi]);
+}
+
+export function fathomWebhookKey(env: Env = process.env): string | null {
+  return clean(env[SECRET_NAMES.fathomWebhook]);
 }
 
 export function ctmHashKey(env: Env = process.env): string | null {

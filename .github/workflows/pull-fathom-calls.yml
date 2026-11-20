@@ -1,0 +1,84 @@
+name: Pull Fathom calls (every recorder, into the dashboard)
+
+# Reads the team's meetings from Fathom's API and posts each one to the dashboard's own
+# /api/fathom-webhook, the same door the live webhook uses. The dashboard matches the
+# client, folds a call two recorders both saved, files the action items and links the CRM.
+# It is idempotent on the recording id, so running this twice, or beside the live webhook,
+# files nothing twice.
+#
+# WHY. The dashboard never reads Fathom. A call reaches it only if Fathom's webhook sent
+# it, and that fires only for recorders attached to it, from 2026-09-08. This brings in
+# the rest, going forward and for history.
+#
+# WHEN. Daily 12:05 UTC, ahead of the dashboard's call-linking run (12:40 UTC), reading
+# the last 7 days. A DISPATCHED RUN IS A DRY ONE UNLESS YOU SAY OTHERWISE: dry_run
+# defaults to true, and `since` defaults to 2025-01-01 for the first catch-up.
+#
+# SECRETS (repository secrets, never printed):
+#   FATHOM_API_KEY      an API key from Fathom on an account that can read the team's calls
+#   FATHOM_WEBHOOK_KEY  the same value as the dashboard's FATHOM_SECRET
+#   DATABASE_URL        used only to ask which calls the dashboard already holds
+#
+# READ-ONLY toward Fathom (GET only). Counts only in the log: found, already there,
+# posted, failed. No title, summary, transcript, name or address is printed.
+on:
+  schedule:
+    - cron: "5 12 * * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to calls that name one client (its slug). Blank = every call. A one-client run stamps no heartbeat."
+        required: false
+        default: ""
+      since:
+        description: "First day to read, YYYY-MM-DD. Blank on a schedule = the last 7 days."
+        required: false
+        default: "2025-01-01"
+      dry_run:
+        description: "List and count, post nothing (true/false). Defaults to true."
+        required: false
+        default: "true"
+
+concurrency:
+  group: pull-fathom-calls
+  cancel-in-progress: false
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Pull the calls
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FATHOM_API_KEY: ${{ secrets.FATHOM_API_KEY }}
+          FATHOM_WEBHOOK_KEY: ${{ secrets.FATHOM_WEBHOOK_KEY }}
+          # Inputs go through the environment, never into the command line.
+          IN_CLIENT: ${{ inputs.client }}
+          IN_SINCE: ${{ inputs.since }}
+          IN_DRY: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$IN_CLIENT" ] && ARGS="--client=$IN_CLIENT"
+          [ -n "$IN_SINCE" ] && ARGS="$ARGS --since=$IN_SINCE"
+          [ "$IN_DRY" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run pull-fathom-calls -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own last line
+      # (the named cause) as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is one row for the whole team, so a scoped run would claim every call was read.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUMMARY: ${{ steps.run.outputs.summary }}
+        # The note is the job's own counts, never text from a call. It goes through the
+        # environment, not into the command line.
+        run: npm run heartbeat -- --job=pull_fathom_calls --status=${{ job.status }} --note="$SUMMARY" --log=run.log
