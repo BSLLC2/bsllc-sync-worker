@@ -4,7 +4,9 @@ name: Import offline conversions (close-the-loop)
 # uploads them to Google Ads as offline conversions, so bidding optimizes toward
 # patients, not form fills. Sends through the Data Manager API (Google closed the
 # old upload method). Validate-only until a person sets api_mode=send or the repo
-# variable OCH_DM_MODE=send. Never creates a conversion action. Idempotent (dedupe
+# variable OCH_DM_MODE=send. Hashed phone / email (enhanced conversions for leads) go
+# on a real send only when the repo variable OCH_ENHANCED_IDENTIFIERS=send; counts
+# only are logged. Never creates a conversion action. Idempotent (dedupe
 # table); discovers the OCH Ads account and exits cleanly when no gclids have been captured yet.
 on:
   schedule:
@@ -55,6 +57,9 @@ jobs:
           OCH_SHEET_ID: ${{ vars.OCH_SHEET_ID }}
           OCH_ADMISSIONS_TAB: ${{ vars.OCH_ADMISSIONS_TAB }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Enhanced conversions for leads (R25). Default OFF: a real send carries OCH's hashed phone / email only when
+          # this repo variable is exactly "send" (after OCH's written compliance OK). Validate passes carry them anyway.
+          OCH_ENHANCED_IDENTIFIERS: ${{ vars.OCH_ENHANCED_IDENTIFIERS }}
         run: |
           set -o pipefail
           if [ "${{ inputs.csv }}" = "true" ]; then

@@ -17,7 +17,14 @@
  * ingest call both go to that address. No workflow sets it.
  *
  * Nothing here prints a click id, a name, a phone or an address.
+ *
+ * USER IDENTIFIERS (R25, enhanced conversions for leads). A row may carry `userIdentifiers`, already SHA-256 hashed and
+ * hex encoded by src/ads/user-identifiers.ts. They go on the event as `userData.userIdentifiers[]` (one of emailAddress /
+ * phoneNumber per entry) and the request then says `encoding: "HEX"`. Field names checked against the published
+ * reference (IngestEventsRequest.encoding, Event.userData, UserData.userIdentifiers, UserIdentifier) on 2026-11-22;
+ * the HEX enum value is as documented but UNVERIFIED LIVE until a validate pass with identifiers comes back clean.
  */
+import type { UserIdentifier } from "./user-identifiers.js";
 export const DM_SCOPE = "https://www.googleapis.com/auth/datamanager";
 export const DM_MAX_EVENTS_PER_REQUEST = 2000;
 export const OFFLINE_TIME_ZONE = "America/New_York";
@@ -26,7 +33,11 @@ const fake = (): string | null => process.env.DATA_MANAGER_FAKE_BASE?.trim() || 
 export const dmBase = (): string => fake() ?? "https://datamanager.googleapis.com";
 const tokenUrl = (): string => (fake() ? `${fake()}/token` : "https://oauth2.googleapis.com/token");
 
-export interface DmRow { gclid: string; closed: string; valueDollars: number | null; transactionId: string }
+export interface DmRow {
+  gclid: string; closed: string; valueDollars: number | null; transactionId: string;
+  /** Hashed phone and email (src/ads/user-identifiers.ts), only when the client's gate allows. Never logged or stored. */
+  userIdentifiers?: readonly UserIdentifier[];
+}
 export interface DmDestination { accountId: string; loginAccountId: string | null; actionId: string }
 
 /** "-05:00" / "-04:00": the Eastern offset on a day, daylight saving included. */
@@ -48,6 +59,7 @@ export function buildIngestBody(dest: DmDestination, rows: readonly DmRow[], val
     productDestinationId: digits(dest.actionId),
   };
   if (dest.loginAccountId) destination.loginAccount = { accountType: "GOOGLE_ADS", accountId: digits(dest.loginAccountId) };
+  const anyIds = rows.some((r) => (r.userIdentifiers?.length ?? 0) > 0);
   return {
     destinations: [destination],
     events: rows.map((r) => ({
@@ -56,7 +68,9 @@ export function buildIngestBody(dest: DmDestination, rows: readonly DmRow[], val
       adIdentifiers: { gclid: r.gclid },
       eventSource: "OTHER",
       ...(r.valueDollars != null && r.valueDollars > 0 ? { conversionValue: r.valueDollars, currency: "USD" } : {}),
+      ...(r.userIdentifiers?.length ? { userData: { userIdentifiers: r.userIdentifiers.map((i) => ({ ...i })) } } : {}),
     })),
+    ...(anyIds ? { encoding: "HEX" } : {}),
     validateOnly,
   };
 }
