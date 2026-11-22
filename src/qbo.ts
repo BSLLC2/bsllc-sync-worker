@@ -105,8 +105,9 @@ export class QboClient {
 
   /** Read-only. Same Accounting API scope as everything above — no separate
    *  Reports consent. Dates are YYYY-MM-DD. */
-  async getProfitAndLoss(startDate: string, endDate: string): Promise<QboReport> {
-    return this.call<QboReport>("GET", `reports/ProfitAndLoss?start_date=${startDate}&end_date=${endDate}&summarize_column_by=Total`);
+  async getProfitAndLoss(startDate: string, endDate: string, method?: "Accrual" | "Cash"): Promise<QboReport> {
+    // Handoff 115: `accounting_method=Cash` for the cash-basis months. Omitted, the request is byte-for-byte what it was.
+    return this.call<QboReport>("GET", `reports/ProfitAndLoss?start_date=${startDate}&end_date=${endDate}&summarize_column_by=Total${method ? `&accounting_method=${method}` : ""}`);
   }
   /** Point-in-time report — QBO's BalanceSheet takes only end_date. */
   async getBalanceSheet(asOfDate: string): Promise<QboReport> {
@@ -117,10 +118,11 @@ export class QboClient {
   }
   /** Current balance of every bank/cash account — more direct and reliable
    *  than parsing a cash line out of the BalanceSheet report's nested rows. */
-  async getCashAccounts(): Promise<{ id: string; name: string; balance: number }[]> {
+  async getCashAccounts(): Promise<{ id: string; name: string; balance: number | null }[]> {
     const q = encodeURIComponent(`SELECT Id, Name, CurrentBalance FROM Account WHERE AccountType = 'Bank' AND Active = true`);
     const res = await this.call<{ QueryResponse?: { Account?: { Id: string; Name: string; CurrentBalance?: number }[] } }>("GET", `query?query=${q}`);
-    return (res.QueryResponse?.Account ?? []).map((a) => ({ id: a.Id, name: a.Name, balance: a.CurrentBalance ?? 0 }));
+    // A missing CurrentBalance is unanswered, not $0 (R24): it is kept as null and left out of the total.
+    return (res.QueryResponse?.Account ?? []).map((a) => ({ id: a.Id, name: a.Name, balance: typeof a.CurrentBalance === "number" && Number.isFinite(a.CurrentBalance) ? a.CurrentBalance : null }));
   }
 
   // ── Depth reads (2026-09-11) — everything below is read-only and feeds

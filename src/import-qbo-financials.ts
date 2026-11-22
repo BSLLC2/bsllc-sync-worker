@@ -49,6 +49,10 @@ function balanceSheetSummary(report: QboReport) {
     // the Gap Analysis, since it's real committed cash QBO already knows
     // about but our own revenue_schedules can't see.
     arCents: toCents(findReportTotal(report, ["AR", "AccountsReceivable"])),
+    // R24: the Balance Sheet's own bank total ("Total Bank Accounts"), beside the per-account balances in
+    // cash_position_snapshots, so the two can be compared. The group name is UNVERIFIED against a live
+    // report; null when QuickBooks names it otherwise (collectGroupNames prints what it found).
+    bankCents: toCents(findReportTotal(report, ["BankAccounts", "TotalBankAccounts"])),
   };
 }
 /** Every `group` value present anywhere in a QBO report — a debug aid for
@@ -129,7 +133,7 @@ async function main() {
     const qbo = new QboClient(c);
     if (!dryRun) await qbo.connect();
 
-    const periods: { periodType: string; start: string; end: string }[] = [
+    const periods: { periodType: string; start: string; end: string; method?: "Cash" }[] = [
       { periodType: "month", start: monthStart, end: todayIso },
       { periodType: "quarter", start: quarterStart, end: todayIso },
       { periodType: "ytd", start: yearStart, end: todayIso },
@@ -147,12 +151,15 @@ async function main() {
       const start = iso(new Date(today.getFullYear(), m, 1));
       const end = iso(new Date(today.getFullYear(), m + 1, 0));
       periods.push({ periodType: "month_actual", start, end });
+      // Handoff 115 (R24): the same month on the cash basis. The app reads it already
+      // (storage.getMonthlyPnlRowsForYear(year, "month_actual_cash")); the unique key keeps it apart.
+      periods.push({ periodType: "month_actual_cash", start, end, method: "Cash" });
     }
 
     for (const p of periods) {
       if (dryRun) { console.log(`  would pull P&L ${p.periodType}: ${p.start}..${p.end}`); continue; }
       try {
-        const report = await qbo.getProfitAndLoss(p.start, p.end);
+        const report = await qbo.getProfitAndLoss(p.start, p.end, p.method);
         const summary = pnlSummary(report);
         await upsertFinancialSnapshot(c, { reportType: "profit_and_loss", periodType: p.periodType, periodStart: p.start, periodEnd: p.end, data: report, summary });
         console.log(`  ✓ P&L ${p.periodType} (${p.start}..${p.end}) — net income ${summary.netIncomeCents != null ? `$${(summary.netIncomeCents / 100).toLocaleString("en-US")}` : "(unavailable)"}`);
@@ -171,8 +178,8 @@ async function main() {
         const summary = balanceSheetSummary(bs);
         await upsertFinancialSnapshot(c, { reportType: "balance_sheet", periodType: "as_of", periodStart: todayIso, periodEnd: todayIso, data: bs, summary });
         const fmt = (n: number | null) => (n != null ? `$${(n / 100).toLocaleString("en-US")}` : "(not found in report)");
-        console.log(`  ✓ Balance Sheet as of ${todayIso} — assets ${fmt(summary.totalAssetsCents)}, liabilities ${fmt(summary.totalLiabilitiesCents)}, equity ${fmt(summary.totalEquityCents)}, AR ${fmt(summary.arCents)}`);
-        if (summary.totalLiabilitiesCents == null || summary.totalEquityCents == null || summary.arCents == null) {
+        console.log(`  ✓ Balance Sheet as of ${todayIso} — assets ${fmt(summary.totalAssetsCents)}, liabilities ${fmt(summary.totalLiabilitiesCents)}, equity ${fmt(summary.totalEquityCents)}, AR ${fmt(summary.arCents)}, bank ${fmt(summary.bankCents)}`);
+        if (summary.totalLiabilitiesCents == null || summary.totalEquityCents == null || summary.arCents == null || summary.bankCents == null) {
           console.log(`    (debug) actual group names in this report: ${collectGroupNames(bs).join(", ") || "(none found)"}`);
         }
       } catch (e) {
@@ -190,7 +197,9 @@ async function main() {
 
       try {
         const accounts = await qbo.getCashAccounts();
-        const cashCents = Math.round(accounts.reduce((s, a) => s + a.balance, 0) * 100);
+        const answered = accounts.filter((a) => a.balance != null);
+        if (!answered.length) throw new Error(`no bank account carried a balance (${accounts.length} read); nothing stored rather than $0`);
+        const cashCents = Math.round(answered.reduce((s, a) => s + (a.balance as number), 0) * 100);
         await c.query(
           `INSERT INTO cash_position_snapshots (id, as_of_date, cash_cents, accounts_json, synced_at)
            VALUES ($1, $2, $3, $4, now())

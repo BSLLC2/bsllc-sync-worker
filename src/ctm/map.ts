@@ -112,6 +112,24 @@ function tagsOf(v: unknown): string[] | null {
     .filter(Boolean);
 }
 
+/** A tracking number's CTM id: letters, digits and a few separators, never a run of phone digits. */
+export function lineIdOf(v: unknown): string | null {
+  const t = typeof v === "string" || typeof v === "number" ? String(v).trim() : "";
+  if (!t || t.length > 60 || !/^[A-Za-z0-9_-]+$/.test(t)) return null;
+  if (/^\+?1?\d{10}$/.test(t)) return null; // looks like the number itself, not its id
+  return t;
+}
+
+/** Give each call the source of the line it came in on. A call whose line is not in the list keeps null (not read). */
+export function applyLineSources(rows: CtmCallRow[], sources: ReadonlyMap<string, string>): number {
+  let hit = 0;
+  for (const r of rows) {
+    const s = r.lineId ? sources.get(r.lineId) : undefined;
+    if (s) { r.lineSource = s; hit += 1; }
+  }
+  return hit;
+}
+
 const GCLID = /^[A-Za-z0-9_.-]{10,200}$/;
 
 export type BuildResult = { row: CtmCallRow } | { skip: "no_id" | "no_time" };
@@ -144,6 +162,10 @@ export function buildCall(rec: Rec, hashKey: string): BuildResult {
       tagsGoogleAdsConversion: tags ? tags.some((t) => TAG_GOOGLE_ADS_CONVERSION.test(t)) : null,
       tagsRepeat: tags ? tags.some((t) => TAG_REPEAT.test(t)) : null,
       callerHash: callerHashOf(pick(rec, CTM_FIELDS.callerNumber), hashKey),
+      keyword: cleanText(pick(rec, CTM_FIELDS.keyword), 120),
+      lineId: lineIdOf(pick(rec, CTM_FIELDS.lineId)),
+      // Filled after the read from the numbers list (`applyLineSources`); unanswered until then.
+      lineSource: null,
     },
   };
 }

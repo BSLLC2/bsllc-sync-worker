@@ -101,14 +101,31 @@ export async function ensureClickTables(c: pg.Client): Promise<void> {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_ads_click_scans_account ON ads_click_scans (platform, account_id);`);
 }
 
-/** The click ids already on this client's enquiries, recent enough that the platform may still hold the click. */
-export async function loadKnownClickIds(c: pg.Client, clientSlug: string, today: string): Promise<Set<string>> {
+/**
+ * The click ids already on this client's enquiries, recent enough that the platform may still hold the click.
+ * With `clientId` (R24) the click ids CallTrackingMetrics stored on this client's calls (`ctm_calls.gclid`) are
+ * known too, so a call ties to its campaign through the same map. A dashboard without that table reads forms only.
+ */
+export async function loadKnownClickIds(c: pg.Client, clientSlug: string, today: string, clientId?: string): Promise<Set<string>> {
+  const since = addDays(today, -(RETAIN_DAYS + 1));
   const { rows } = await c.query<{ gclid: string }>(
     `SELECT DISTINCT btrim(gclid) AS gclid FROM web_inquiries
       WHERE client_slug = $1 AND gclid IS NOT NULL AND btrim(gclid) <> '' AND submitted_at >= $2::date`,
-    [clientSlug, addDays(today, -(RETAIN_DAYS + 1))],
+    [clientSlug, since],
   );
-  return new Set(rows.map((r) => r.gclid));
+  const out = new Set(rows.map((r) => r.gclid));
+  if (clientId) {
+    const has = await c.query<{ ok: boolean }>(`SELECT to_regclass('ctm_calls') IS NOT NULL AS ok`);
+    if (has.rows[0]?.ok) {
+      const calls = await c.query<{ gclid: string }>(
+        `SELECT DISTINCT btrim(gclid) AS gclid FROM ctm_calls
+          WHERE client_id = $1 AND gclid IS NOT NULL AND btrim(gclid) <> '' AND called_at >= $2::date`,
+        [clientId, since],
+      );
+      for (const r of calls.rows) out.add(r.gclid);
+    }
+  }
+  return out;
 }
 
 export async function loadClickCoverage(c: pg.Client, accountId: string): Promise<{ coveredFrom: string; coveredTo: string } | null> {

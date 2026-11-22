@@ -23,10 +23,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { startFake, type Call } from "./signals/fake-http.js";
 import { HttpError, realFetch, safeMessage } from "./page-behaviour/http.js";
-import { basicAuth, callsUrl, isKeyRefusal, parseCallsPage } from "./ctm/api.js";
-import { buildCall, type BuildResult, callerHashOf, calledAtOf, cleanText, normalizeDirection, normalizeStatus, pick, seconds } from "./ctm/map.js";
-import { readCtmClient, type CtmCtx, type CtmDeps } from "./ctm/run.js";
-import { BATCH, PRUNE_CTM_CALLS, UPSERT_CTM_CALLS, writeCalls } from "./ctm/store.js";
+import { basicAuth, callsUrl, isKeyRefusal, numbersUrl, parseCallsPage, parseNumbersPage } from "./ctm/api.js";
+import { applyLineSources, lineIdOf, buildCall, type BuildResult, callerHashOf, calledAtOf, cleanText, normalizeDirection, normalizeStatus, pick, seconds } from "./ctm/map.js";
+import { readCtmClient, readLineSources, type CtmCtx, type CtmDeps } from "./ctm/run.js";
+import { BATCH, PRUNE_CTM_CALLS, UPSERT_CTM_CALLS, UPSERT_CTM_CALLS_V257, writeCalls } from "./ctm/store.js";
 import { CTM_FIELDS, CTM_MAX_PAGES, CTM_PER_PAGE, CTM_ROW_KEYS, CTM_WINDOW_DAYS } from "./ctm/types.js";
 import { SECRET_NAMES, ctmAccountKeys, ctmHashKey } from "./signals/secrets.js";
 
@@ -52,6 +52,7 @@ const JSON_CALL = {
   call_status: "answered", talk_time: 143, ring_time: "00:07", duration: "2:30", direction: "inbound", city: "Cincinnati", state: "OH",
   gclid: "Cj0KCQjwexample123456", utm_source: "google", utm_medium: "cpc", utm_campaign: "Roof Repair - Cincinnati", device: "Mobile",
   tag_list: ["Google Ads Conversion: Leads", "voicemail", "Repeat"], caller_number: "+1 (513) 555-0188",
+  keyword: "roof repair near me", tracking_number_id: "TPN42",
   // everything below must never reach a stored row
   name: "JANE SMITH", cnam: "SMITH JANE", audio: "https://audio.example/rec/9001.mp3", recording_url: "https://x.example/r.mp3", transcription: "hello I have a leak", transcript: "t",
   summary: "caller wants a quote", notes: "call back after 5", message: "please call", visitor_ip: "203.0.113.9", ip: "203.0.113.9", keyword_spotting: ["quote"],
@@ -82,6 +83,11 @@ async function main() {
   ok("status, direction, source and location are kept", row.status === "answered" && row.direction === "inbound" && row.trackingSource === "Google Ads" && row.city === "Cincinnati" && row.state === "OH");
   ok("the two tags are yes or no and nothing else", row.tagsGoogleAdsConversion === true && row.tagsRepeat === true);
   ok("the click id and campaign values are kept", row.gclid === "Cj0KCQjwexample123456" && row.utmCampaign === "Roof Repair - Cincinnati" && row.utmSource === "google" && row.utmMedium === "cpc" && row.device === "Mobile");
+
+  ok("the paid keyword and the line id are kept; the line source waits for the numbers list (R24)", row.keyword === "roof repair near me" && row.lineId === "TPN42" && row.lineSource === null);
+  ok("a line id that is really the phone digits is refused", lineIdOf("5135550142") === null && lineIdOf("+15135550142") === null && lineIdOf("TPN42") === "TPN42" && lineIdOf(42) === "42");
+  ok("a keyword with an email or a phone in it is cleaned", buildCall({ ...JSON_CALL, keyword: "call 513-555-0101 or a@b.co" }, HASHKEY) && rowOf(buildCall({ ...JSON_CALL, keyword: "call 513-555-0101 or a@b.co" }, HASHKEY)).keyword === "call [number] or [email]");
+  ok("utm_term stands in for a missing keyword", rowOf(buildCall({ ...JSON_CALL, keyword: undefined, utm_term: "roofer" }, HASHKEY)).keyword === "roofer");
 
   hr("2. the caller is a salted hash, stable, and never the number");
   const h = row.callerHash as string;
@@ -214,17 +220,52 @@ async function main() {
   await ctm.close();
   delete process.env.SIGNALS_FAKE_BASE;
 
+  /* ───────────────────────── 6b. the line sources (R24) ───────────────────────── */
+  hr("6b. each tracking number's source, read after the calls, never failing them");
+  const np = parseNumbersPage({ numbers: [{ id: "TPN42", number: "+15135550142", source: { name: "Google Ads" } }, { id: 77, source: "GMB North" }, { id: "5135550142", source: "x" }, { source: "no id" }], total_pages: 1 });
+  ok("a numbers page gives id and source, a source as text or {name}, and never the digits", np.sources.length === 2 && np.sources[0]!.id === "TPN42" && np.sources[0]!.source === "Google Ads" && np.sources[1]!.id === "77" && !JSON.stringify(np).includes("5135550142"));
+  let npThrew = false; try { parseNumbersPage({ error: "x" }); } catch { npThrew = true; }
+  ok("an answer that is not a list of numbers is refused, not read as none", npThrew);
+  ok("the numbers address is the account's numbers list", /\/accounts\/1234567\/numbers\.json\?/.test(numbersUrl("1234567", 1)));
+  const tiedRows = [{ ...(row as object) }, { ...(row as object), lineId: "nope" }, { ...(row as object), lineId: null }] as unknown as Array<{ lineSource: unknown }>;
+  const tiedN = applyLineSources(tiedRows as never, new Map([["TPN42", "Google Ads"]]));
+  ok("a call gets its line's source; one whose line is not listed stays null (not read)", tiedN === 1 && tiedRows[0]!.lineSource === "Google Ads" && tiedRows[1]!.lineSource === null);
+  {
+    let nmode = "ok"; const nAsked: Call[] = [];
+    const fake = await startFake((c: Call) => {
+      nAsked.push(c);
+      if (nmode === "500") return { status: 500, body: `boom ${SECRET}` };
+      return { body: { numbers: [{ id: "TPN42", source: "Google Ads" }], total_pages: 1 } };
+    });
+    process.env.SIGNALS_FAKE_BASE = fake.base;
+    const ls = await readLineSources(ctx(), deps());
+    ok("the numbers list is read once with a GET and gives the map", ls.sources.get("TPN42") === "Google Ads" && nAsked.length === 1 && nAsked[0]!.method === "GET" && /numbers\.json/.test(nAsked[0]!.path));
+    nmode = "500";
+    const lsBad = await readLineSources(ctx(), deps());
+    ok("a refused numbers list is an empty map and a note, never a failure, and the key is scrubbed", lsBad.sources.size === 0 && /could not be read/.test(lsBad.note) && !lsBad.note.includes(SECRET));
+    nAsked.length = 0;
+    const lsDry = await readLineSources(ctx(), deps({ dryRun: true }));
+    ok("a dry run does not read the numbers", lsDry.sources.size === 0 && nAsked.length === 0);
+    await fake.close();
+    delete process.env.SIGNALS_FAKE_BASE;
+  }
+
   /* ───────────────────────── 7. what is written ───────────────────────── */
   hr("7. the writes");
   const rec = recorder();
   const calls = [row, row2].map((x) => x as never);
   await writeCalls(rec, "c1", calls, NOW);
   const colsOf = (sql: string) => (sql.match(/INSERT INTO \w+\s*\(([^)]*)\)/s)?.[1] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-  ok("the INSERT names 22 columns and sends 3 parameters (client, time, the rows as JSON)", colsOf(UPSERT_CTM_CALLS).length === 22 && rec.calls[0]!.params.length === 3);
+  ok("the INSERT names 25 columns and sends 3 parameters (client, time, the rows as JSON)", colsOf(UPSERT_CTM_CALLS).length === 25 && rec.calls[0]!.params.length === 3);
   ok("it is an upsert on the call's id for the client, so a re-read overwrites and never doubles", /ON CONFLICT \(client_id, ctm_call_id\)/.test(UPSERT_CTM_CALLS));
   const payload = JSON.parse(String(rec.calls[0]!.params[2])) as Array<Record<string, unknown>>;
-  ok("the JSON sent has exactly the stored columns for each call, no more", payload.length === 2 && payload.every((p) => Object.keys(p).sort().join() === ["caller_hash", "called_at", "city", "ctm_call_id", "device", "direction", "duration_seconds", "gclid", "id", "ring_seconds", "state", "status", "tags_google_ads_conversion", "tags_repeat", "talk_seconds", "tracking_label", "tracking_source", "utm_campaign", "utm_medium", "utm_source"].sort().join()));
+  ok("the JSON sent has exactly the stored columns for each call, no more", payload.length === 2 && payload.every((p) => Object.keys(p).sort().join() === ["caller_hash", "called_at", "city", "ctm_call_id", "device", "direction", "duration_seconds", "gclid", "id", "keyword", "line_id", "line_source", "ring_seconds", "state", "status", "tags_google_ads_conversion", "tags_repeat", "talk_seconds", "tracking_label", "tracking_source", "utm_campaign", "utm_medium", "utm_source"].sort().join()));
   ok("no number, name, link, address or key is in what was sent", !/5135550188|JANE|audio\.example|203\.0\.113|transcript|summary/.test(JSON.stringify(rec.calls)) && !JSON.stringify(rec.calls).includes(HASHKEY));
+  ok("the pre-v314 upsert names the 22 old columns and none of the three new ones", colsOf(UPSERT_CTM_CALLS_V257).length === 22 && !/keyword|line_id|line_source/.test(UPSERT_CTM_CALLS_V257) && /ON CONFLICT \(client_id, ctm_call_id\)/.test(UPSERT_CTM_CALLS_V257));
+  ok("a re-read without a line source keeps the one already stored", /line_source = COALESCE\(EXCLUDED\.line_source, ctm_calls\.line_source\)/.test(UPSERT_CTM_CALLS));
+  const recL = recorder();
+  await writeCalls(recL, "c1", calls, NOW, true);
+  ok("the legacy write uses the pre-v314 statement", recL.calls[0]!.sql === UPSERT_CTM_CALLS_V257);
   const rec2 = recorder();
   await writeCalls(rec2, "c1", calls, NOW);
   ok("the same call written twice has the same id", (JSON.parse(String(rec2.calls[0]!.params[2])) as Array<{ id: string }>)[0]!.id === payload[0]!.id);

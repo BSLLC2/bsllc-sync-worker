@@ -60,7 +60,7 @@ async function main() {
     for (const t of targets) {
       const accountId = digitsOnly(t.accountId);
       try {
-        const known = await loadKnownClickIds(c, slugify(t.clientName), today);
+        const known = await loadKnownClickIds(c, slugify(t.clientName), today, t.clientId);
         const prev = await loadClickCoverage(c, accountId).catch((e) => { if (dryRun) return null; throw e; });
         const days = readDays(today, !hasSpan(prev), daysArg);
         const window = { start: days[0]!, end: days[days.length - 1]! };
