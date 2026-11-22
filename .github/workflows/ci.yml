@@ -44,6 +44,8 @@ jobs:
         run: npm run verify-ads-click-map
       - name: Ads data gaps (keyword metrics, RSA and negatives in the snapshot, conversion actions)
         run: npm run verify-ads-gaps
+      - name: Ads share reads (impression share lost, quality score, hour and device, places)
+        run: npm run verify-ads-share-reads
       - name: Structure read keeps the campaigns when an optional query is refused
         run: npm run verify-ads-structure-read
       - name: Every GAQL field exists on the API version the library speaks
@@ -154,6 +156,8 @@ jobs:
         run: npm run verify-ads-click-map
       - name: Ads data gaps store guard (real SQL)
         run: npm run verify-ads-gaps
+      - name: Ads share reads store guard (real SQL)
+        run: npm run verify-ads-share-reads
       - name: Search terms and WordPress changes store guard (real SQL)
         run: npm run verify-term-days-wp
       - name: Website performance report store guard (real SQL)
