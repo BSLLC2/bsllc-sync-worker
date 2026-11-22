@@ -10,7 +10,8 @@ import { HttpError, getJson } from "../page-behaviour/http.js";
 import { num, serviceUrl } from "../signals/common.js";
 import type { FetchLike } from "../page-behaviour/types.js";
 import type { CtmKeys } from "../signals/secrets.js";
-import { CTM_BASE, CTM_PER_PAGE } from "./types.js";
+import { CTM_BASE, CTM_NUMBER_FIELDS, CTM_PER_PAGE } from "./types.js";
+import { cleanText, lineIdOf, pick } from "./map.js";
 
 type Obj = Record<string, unknown>;
 const obj = (v: unknown): Obj | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : null);
@@ -43,3 +44,31 @@ export function parseCallsPage(json: unknown): CallsPage {
 
 /** A key CTM does not accept, from the status. */
 export const isKeyRefusal = (e: unknown): boolean => e instanceof HttpError && (e.status === 401 || e.status === 403);
+
+/** The tracking numbers list (R24). UNVERIFIED path and shape; read only, GET. */
+export function numbersUrl(accountId: string, page: number, perPage = CTM_PER_PAGE): string {
+  const q = new URLSearchParams({ per_page: String(perPage), page: String(page) });
+  return serviceUrl("ctm", `${CTM_BASE}/accounts/${encodeURIComponent(accountId)}/numbers.json?${q.toString()}`);
+}
+export async function fetchNumbers(f: FetchLike, keys: CtmKeys, accountId: string, page: number): Promise<unknown> {
+  return getJson(f, numbersUrl(accountId, page), basicAuth(keys), "CallTrackingMetrics numbers");
+}
+export interface NumbersPage { sources: Array<{ id: string; source: string }>; totalPages: number | null; seen: number }
+/** Each number's id and assigned source. The digits are never read; a source may arrive as text or as `{ name }`. */
+export function parseNumbersPage(json: unknown): NumbersPage {
+  const top = obj(json);
+  const list = top ? (top.numbers ?? top.data ?? top.results) : null;
+  if (!top || !Array.isArray(list)) throw new Error("CallTrackingMetrics answered with something that is not a list of numbers.");
+  const sources: Array<{ id: string; source: string }> = [];
+  for (const raw of list) {
+    const rec = obj(raw);
+    if (!rec) continue;
+    const id = lineIdOf(pick(rec, CTM_NUMBER_FIELDS.id));
+    let src = pick(rec, CTM_NUMBER_FIELDS.source);
+    const so = obj(src);
+    if (so) src = so.name ?? so.title ?? null;
+    const source = cleanText(src, 120);
+    if (id && source) sources.push({ id, source });
+  }
+  return { sources, totalPages: num(top.total_pages), seen: list.length };
+}

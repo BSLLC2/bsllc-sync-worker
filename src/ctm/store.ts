@@ -1,5 +1,5 @@
 /**
- * The only writes the call-log reader makes: calls in `ctm_calls` (schema v257) and a
+ * The only writes the call-log reader makes: calls in `ctm_calls` (schema v257; keyword, line id and line source from v314) and a
  * status in `signal_runs`. The column list is LITERAL so the dashboard's
  * `npm run verify:wiring` can read it against shared/schema.ts in both directions.
  *
@@ -12,27 +12,40 @@ import type { CtmCallRow } from "./types.js";
 
 export const BATCH = 400;
 
-export const UPSERT_CTM_CALLS = `INSERT INTO ctm_calls (id, client_id, ctm_call_id, called_at, tracking_source, tracking_label, status, talk_seconds, ring_seconds, duration_seconds, direction, city, state, gclid, utm_source, utm_medium, utm_campaign, device, tags_google_ads_conversion, tags_repeat, caller_hash, read_at)
- SELECT t.id, $1, t.ctm_call_id, t.called_at::timestamptz, t.tracking_source, t.tracking_label, t.status, t.talk_seconds, t.ring_seconds, t.duration_seconds, t.direction, t.city, t.state, t.gclid, t.utm_source, t.utm_medium, t.utm_campaign, t.device, t.tags_google_ads_conversion, t.tags_repeat, t.caller_hash, $2
-   FROM jsonb_to_recordset($3::jsonb) AS t(id text, ctm_call_id text, called_at text, tracking_source text, tracking_label text, status text, talk_seconds int, ring_seconds int, duration_seconds int, direction text, city text, state text, gclid text, utm_source text, utm_medium text, utm_campaign text, device text, tags_google_ads_conversion boolean, tags_repeat boolean, caller_hash text)
+export const UPSERT_CTM_CALLS = `INSERT INTO ctm_calls (id, client_id, ctm_call_id, called_at, tracking_source, tracking_label, status, talk_seconds, ring_seconds, duration_seconds, direction, city, state, gclid, utm_source, utm_medium, utm_campaign, device, tags_google_ads_conversion, tags_repeat, caller_hash, keyword, line_id, line_source, read_at)
+ SELECT t.id, $1, t.ctm_call_id, t.called_at::timestamptz, t.tracking_source, t.tracking_label, t.status, t.talk_seconds, t.ring_seconds, t.duration_seconds, t.direction, t.city, t.state, t.gclid, t.utm_source, t.utm_medium, t.utm_campaign, t.device, t.tags_google_ads_conversion, t.tags_repeat, t.caller_hash, t.keyword, t.line_id, t.line_source, $2
+   FROM jsonb_to_recordset($3::jsonb) AS t(id text, ctm_call_id text, called_at text, tracking_source text, tracking_label text, status text, talk_seconds int, ring_seconds int, duration_seconds int, direction text, city text, state text, gclid text, utm_source text, utm_medium text, utm_campaign text, device text, tags_google_ads_conversion boolean, tags_repeat boolean, caller_hash text, keyword text, line_id text, line_source text)
  ON CONFLICT (client_id, ctm_call_id) DO UPDATE SET called_at = EXCLUDED.called_at, tracking_source = EXCLUDED.tracking_source, tracking_label = EXCLUDED.tracking_label,
    status = EXCLUDED.status, talk_seconds = EXCLUDED.talk_seconds, ring_seconds = EXCLUDED.ring_seconds, duration_seconds = EXCLUDED.duration_seconds, direction = EXCLUDED.direction,
    city = EXCLUDED.city, state = EXCLUDED.state, gclid = EXCLUDED.gclid, utm_source = EXCLUDED.utm_source, utm_medium = EXCLUDED.utm_medium, utm_campaign = EXCLUDED.utm_campaign,
-   device = EXCLUDED.device, tags_google_ads_conversion = EXCLUDED.tags_google_ads_conversion, tags_repeat = EXCLUDED.tags_repeat, caller_hash = EXCLUDED.caller_hash, read_at = EXCLUDED.read_at`;
+   device = EXCLUDED.device, tags_google_ads_conversion = EXCLUDED.tags_google_ads_conversion, tags_repeat = EXCLUDED.tags_repeat, caller_hash = EXCLUDED.caller_hash,
+   keyword = EXCLUDED.keyword, line_id = EXCLUDED.line_id, line_source = COALESCE(EXCLUDED.line_source, ctm_calls.line_source), read_at = EXCLUDED.read_at`;
+
+/**
+ * The same upsert for a dashboard still on a schema before v314 (no keyword, line id or line source columns),
+ * so the daily read keeps working between the worker and the dashboard deploys. The entry picks it by
+ * reading information_schema; the three new values are simply not written there.
+ */
+export const UPSERT_CTM_CALLS_V257 = UPSERT_CTM_CALLS
+  .replace(", keyword, line_id, line_source, read_at)", ", read_at)")
+  .replace(", t.keyword, t.line_id, t.line_source, $2", ", $2")
+  .replace(", keyword text, line_id text, line_source text)", ")")
+  .replace(",\n   keyword = EXCLUDED.keyword, line_id = EXCLUDED.line_id, line_source = COALESCE(EXCLUDED.line_source, ctm_calls.line_source)", "");
 
 /** Housekeeping: a call older than $2 is dropped. */
 export const PRUNE_CTM_CALLS = `DELETE FROM ctm_calls WHERE client_id = $1 AND called_at < $2`;
 
 const id = (clientId: string, callId: string): string => createHash("sha256").update(`ctm\u0001${clientId}\u0001${callId}`).digest("hex").slice(0, 40);
 
-export async function writeCalls(c: Queryable, clientId: string, rows: CtmCallRow[], at: Date): Promise<void> {
+export async function writeCalls(c: Queryable, clientId: string, rows: CtmCallRow[], at: Date, legacy = false): Promise<void> {
   for (let i = 0; i < rows.length; i += BATCH) {
     const payload = rows.slice(i, i + BATCH).map((r) => ({
       id: id(clientId, r.ctmCallId), ctm_call_id: r.ctmCallId, called_at: r.calledAt, tracking_source: r.trackingSource, tracking_label: r.trackingLabel, status: r.status,
       talk_seconds: r.talkSeconds, ring_seconds: r.ringSeconds, duration_seconds: r.durationSeconds, direction: r.direction, city: r.city, state: r.state, gclid: r.gclid,
       utm_source: r.utmSource, utm_medium: r.utmMedium, utm_campaign: r.utmCampaign, device: r.device,
       tags_google_ads_conversion: r.tagsGoogleAdsConversion, tags_repeat: r.tagsRepeat, caller_hash: r.callerHash,
+      keyword: r.keyword, line_id: r.lineId, line_source: r.lineSource,
     }));
-    await c.query(UPSERT_CTM_CALLS, [clientId, at, JSON.stringify(payload)]);
+    await c.query(legacy ? UPSERT_CTM_CALLS_V257 : UPSERT_CTM_CALLS, [clientId, at, JSON.stringify(payload)]);
   }
 }

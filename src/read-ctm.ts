@@ -6,7 +6,8 @@ import pg from "pg";
 import { realFetch, safeMessage } from "./page-behaviour/http.js";
 import { slugify, writeSignalRun, ymd } from "./signals/common.js";
 import { SECRET_NAMES, ctmAccountKeys, ctmHashKey, secretValues, type CtmKeys } from "./signals/secrets.js";
-import { readCtmClient } from "./ctm/run.js";
+import { readCtmClient, readLineSources } from "./ctm/run.js";
+import { applyLineSources } from "./ctm/map.js";
 import { PRUNE_CTM_CALLS, writeCalls } from "./ctm/store.js";
 import { dailyFillLine, runDailyFill } from "./ctm/call-backfill.js";
 import { CTM_KEEP_DAYS, CTM_MAX_DAYS, CTM_PAUSE_MS } from "./ctm/types.js";
@@ -93,6 +94,10 @@ async function main() {
       `SELECT c.id, c.name, cm.external_id, (cm.client_id IS NOT NULL) AS has_mapping FROM clients c
          LEFT JOIN connector_mappings cm ON cm.client_id = c.id AND cm.source = 'ctm' AND cm.enabled = true
         WHERE c.status <> 'churned' AND c.is_internal = false ORDER BY c.name`)).rows;
+    // R24: the keyword, line id and line source columns arrive with dashboard schema v314. Before it, the calls are
+    // still written, without those three values, so the daily read never breaks between the two deploys.
+    const legacy = (await c.query(`SELECT 1 FROM information_schema.columns WHERE table_name = 'ctm_calls' AND column_name = 'line_source'`)).rowCount !== 1;
+    if (legacy) console.log("ctm_calls has no line_source column yet (dashboard before schema v314): keyword and line source are not written this run.");
     const chosen = mapped.filter((m) => !only || slugify(m.name) === only || m.id.toLowerCase() === only);
     if (only && !chosen.length) throw new Error(`No client matches "${only}".`);
 
@@ -117,7 +122,10 @@ async function main() {
       if (res.run.detail) console.log(`  ${res.run.status} - ${res.run.detail}`);
       if (dryRun) { await fillRecentCalls(c, m, slug, hashKey, res.run.status, now, true); continue; }
       if (res.calls.length) {
-        await writeCalls(c, m.id, res.calls, now);
+        const lines = await readLineSources({ name: m.name, slug, recorded }, { fetch: realFetch, keys, hashKey, now, pauseMs: CTM_PAUSE_MS, secrets });
+        const tied = applyLineSources(res.calls, lines.sources);
+        console.log(`  lines: ${lines.note}; ${tied} of ${res.calls.length} calls carry their line's source`);
+        await writeCalls(c, m.id, res.calls, now, legacy);
         await c.query(PRUNE_CTM_CALLS, [m.id, new Date(now.getTime() - CTM_KEEP_DAYS * 86_400_000).toISOString()]);
       }
       await writeSignalRun(c, m.id, res.run, now);

@@ -5,6 +5,12 @@ name: Read CallTrackingMetrics (call log)
 # it rang and talked, the caller's city and state, the click id and campaign, two tags as
 # yes or no, and the caller as a SALTED HASH. A status per account goes in signal_runs.
 #
+# R24 (2026-11-22): also the paid keyword, the tracking number's CTM id, and the source assigned to
+# that number (from the numbers list, read after the calls; a refusal there never fails the read). The
+# three need the dashboard on schema v314; before it the calls are written without them. Each call's
+# click id is then known to ads-click-map.yml, so a call ties to its campaign through the same map.
+# The numbers path and every field name are UNVERIFIED against a live CallTrackingMetrics answer.
+#
 # NEVER STORED: the caller's number, the caller-ID text or name, the recording or any audio
 # link, the transcript, the summary, notes, the message body, or the visitor's IP.
 #

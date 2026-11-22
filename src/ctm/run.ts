@@ -7,9 +7,9 @@ import { HttpError, safeMessage } from "../page-behaviour/http.js";
 import type { FetchLike } from "../page-behaviour/types.js";
 import { SECRET_NAMES, type CtmKeys } from "../signals/secrets.js";
 import { signalRun, sleep, ymd, type SignalRunOut } from "../signals/common.js";
-import { fetchCalls, isKeyRefusal, parseCallsPage } from "./api.js";
+import { fetchCalls, fetchNumbers, isKeyRefusal, parseCallsPage, parseNumbersPage } from "./api.js";
 import { buildCall } from "./map.js";
-import { CTM_MAX_DAYS, CTM_MAX_PAGES, CTM_PER_PAGE, CTM_WINDOW_DAYS, type CtmCallRow } from "./types.js";
+import { CTM_MAX_DAYS, CTM_MAX_PAGES, CTM_NUMBERS_MAX_PAGES, CTM_PER_PAGE, CTM_WINDOW_DAYS, type CtmCallRow } from "./types.js";
 
 export interface CtmCtx { name: string; slug: string; /** The CTM account id recorded in Admin, Connectors, or null. */ recorded: string | null }
 export interface CtmDeps {
@@ -108,4 +108,30 @@ export async function readCtmClient(ctx: CtmCtx, deps: CtmDeps): Promise<CtmResu
   }
   out.run = signalRun("ctm", capped ? "capped" : "ok", bits.length ? `${bits.join(". ")}.` : null, { rows: out.calls.length, capped, totalFound: totalEntries, windowEnd: end });
   return out;
+}
+
+export interface LineSourcesResult { sources: Map<string, string>; note: string }
+/**
+ * The source assigned to each tracking number (R24), read AFTER the calls and never able to fail the
+ * read: on any refusal the calls keep `lineSource` null (not read) and the note says why. GET only.
+ * UNVERIFIED endpoint and field names (see `CTM_NUMBER_FIELDS`).
+ */
+export async function readLineSources(ctx: CtmCtx, deps: CtmDeps): Promise<LineSourcesResult> {
+  const keys = deps.keys.get(ctx.slug);
+  const accountId = keys ? digits(keys.accountId) || digits(ctx.recorded) : "";
+  const sources = new Map<string, string>();
+  if (!keys || !accountId || deps.dryRun) return { sources, note: "line sources not read" };
+  let page = 1;
+  try {
+    while (page <= CTM_NUMBERS_MAX_PAGES) {
+      const got = parseNumbersPage(await fetchNumbers(deps.fetch, keys, accountId, page));
+      for (const s of got.sources) sources.set(s.id, s.source);
+      if (!got.seen || (got.totalPages != null && page >= got.totalPages) || got.totalPages == null) break;
+      page += 1;
+      if (deps.pauseMs) await sleep(deps.pauseMs);
+    }
+  } catch (e) {
+    return { sources, note: `line sources could not be read (${safeMessage(e, deps.secrets ?? [])})` };
+  }
+  return { sources, note: `${sources.size} tracking number${sources.size === 1 ? "" : "s"} with a source` };
 }

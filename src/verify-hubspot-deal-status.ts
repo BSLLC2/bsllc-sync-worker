@@ -22,6 +22,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { dealStatus, dealStageLabel, dealClosedAt, CLOSED_WON_STAGE, CLOSED_LOST_STAGE } from "./hubspot-deal-status";
+import { assocAll, sourceDetail } from "./hubspot-depth";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let failures = 0;
@@ -130,6 +131,19 @@ console.log("6. both importers go through it, and neither decides on its own");
     if (/closedNotHere/.test(sched)) pass("a closed deal that is not on the board here is reported, not created");
     else fail("src/import-hubspot-deals.ts no longer reports the closed deals it did not create — either it is inserting history, or it is discarding it silently");
   }
+}
+
+// R24: deal-to-contact associations and the source drill-down.
+{
+  const t = (cond: boolean, m: string) => (cond ? console.log(`  ✓ ${m}`) : fail(m));
+  t(JSON.stringify(assocAll({ associations: { contacts: { results: [{ id: "1" }, { id: "2" }, { id: "1" }] } } }, "contacts")) === '["1","2"]', "a deal's contacts are every associated id, once");
+  t(assocAll({}, "contacts").length === 0 && assocAll({ associations: { companies: { results: [{ id: "9" }] } } }, "contacts").length === 0, "no contacts association is an empty list");
+  t(sourceDetail("Spring campaign") === "Spring campaign" && sourceDetail("") === null && sourceDetail(null) === null, "a source detail is kept as text; blank is null");
+  t(sourceDetail("jane@example.com via 513-555-0101") === "[email] via [number]", "an email or a phone in a source detail is replaced");
+  const imp = readFileSync(path.join(ROOT, "src/import-hubspot.ts"), "utf8");
+  t(/hs_analytics_source_data_1", "hs_analytics_source_data_2"[^\n]*\n\s*\["companies", "contacts"\]/.test(imp), "the deals read asks for the source drill-down and the contacts association");
+  t(/contactHubspotIds: assocAll\(d, "contacts"\)/.test(imp) && /sourceData1: sourceDetail\(c\.properties/.test(imp), "the payload carries the deal's contacts and both drill-downs");
+  t(!/method:\s*"(POST|PUT|PATCH|DELETE)"/.test(imp), "the importer never writes to HubSpot");
 }
 
 console.log("");

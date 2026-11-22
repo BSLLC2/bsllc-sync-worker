@@ -320,9 +320,12 @@ async function main() {
     console.error("Assign assets, add the ad account with the ads_read permission.");
   }
 
+  // R24: the heartbeat stays green when some accounts were read (one failure must not cost the rest), so
+  // the note has to NAME a refusal. Meta's 403 with code 200 is our system user never given the account.
+  const notShared = failures.filter((f) => /\b403\b.*\bcode 200\b|\(#200\)|\bads_read\b/i.test(f)).length;
   emitJobSummary(
     `accounts=${targets.length} read=${read} months=${planted} errors=${failures.length}` +
-    (failures.length ? ` · ${failures.length} account(s) could not be read` : ` · ${planted} month(s) planted`),
+    (failures.length ? ` · ${failures.length} account(s) could not be read${notShared ? ` (${notShared} not shared with our system user)` : ""}` : ` · ${planted} month(s) planted`),
   );
 
   // A run where EVERY account failed is a failure, not a quiet success across

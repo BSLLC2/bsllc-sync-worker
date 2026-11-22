@@ -52,10 +52,17 @@ export interface CtmCallRow {
   tagsGoogleAdsConversion: boolean | null;
   tagsRepeat: boolean | null;
   callerHash: string | null;
+  /** The paid keyword CTM recorded for the visit (`keyword`, else `utm_term`); cleaned like every text. Not a search query typed into a form. */
+  keyword: string | null;
+  /** CTM's own id for the tracking number dialled (never the digits). */
+  lineId: string | null;
+  /** The source assigned to that tracking number in CTM, from the numbers list (`readLineSources`). null = not read. */
+  lineSource: string | null;
 }
 export const CTM_ROW_KEYS = [
   "ctmCallId", "calledAt", "trackingSource", "trackingLabel", "status", "talkSeconds", "ringSeconds", "durationSeconds", "direction", "city", "state",
   "gclid", "utmSource", "utmMedium", "utmCampaign", "device", "tagsGoogleAdsConversion", "tagsRepeat", "callerHash",
+  "keyword", "lineId", "lineSource",
 ] as const satisfies ReadonlyArray<keyof CtmCallRow>;
 
 /**
@@ -67,7 +74,7 @@ export const CTM_ROW_KEYS = [
  * answer has been seen. A field with no alias present in a record is simply unanswered.
  */
 export interface FieldAlias { json: string[]; csv: string[]; verified: boolean }
-export const CTM_FIELDS: Record<"id" | "calledAt" | "unixTime" | "trackingSource" | "trackingLabel" | "status" | "talk" | "ring" | "duration" | "direction" | "city" | "state" | "gclid" | "utmSource" | "utmMedium" | "utmCampaign" | "device" | "tags" | "callerNumber", FieldAlias> = {
+export const CTM_FIELDS: Record<"id" | "calledAt" | "unixTime" | "trackingSource" | "trackingLabel" | "status" | "talk" | "ring" | "duration" | "direction" | "city" | "state" | "gclid" | "utmSource" | "utmMedium" | "utmCampaign" | "device" | "tags" | "callerNumber" | "keyword" | "lineId", FieldAlias> = {
   id: { json: ["id", "call_id", "sid"], csv: ["Call ID", "ID"], verified: false },
   calledAt: { json: ["called_at", "start_time", "date"], csv: ["Date", "Call Date", "Date/Time", "Start Time"], verified: false },
   unixTime: { json: ["unix_time", "timestamp"], csv: ["Unix Time"], verified: false },
@@ -86,9 +93,24 @@ export const CTM_FIELDS: Record<"id" | "calledAt" | "unixTime" | "trackingSource
   utmCampaign: { json: ["utm_campaign"], csv: ["UTM Campaign"], verified: false },
   device: { json: ["device", "device_type"], csv: ["Device", "Device Type"], verified: false },
   tags: { json: ["tag_list", "tags", "call_tags"], csv: ["Tags", "Tag List"], verified: false },
+  // R24 (2026-11-22). UNVERIFIED like the rest: the paid keyword and the tracking number's id as CTM's call answer probably names them.
+  keyword: { json: ["keyword", "paid_keyword", "search_keyword", "utm_term"], csv: ["Keyword", "Paid Keyword", "UTM Term"], verified: false },
+  lineId: { json: ["tracking_number_id", "number_id", "tracking_number_sid"], csv: ["Tracking Number ID"], verified: false },
   callerNumber: { json: ["caller_number", "caller_number_bare", "from", "ani"], csv: ["Caller Number", "Caller", "Caller Phone"], verified: false },
 };
 
 /** Tag names compared after lower-casing and collapsing spaces. Ours; CTM's own tag text is whatever the account named it. */
 export const TAG_GOOGLE_ADS_CONVERSION = /^google ads conversion/;
 export const TAG_REPEAT = /^repeat( caller)?$/;
+
+/**
+ * The tracking numbers list (R24): each number's CTM id and the source assigned to it, so a call carries
+ * the source of the line it came in on even when the visitor's own source is blank. UNVERIFIED: the path
+ * `/accounts/{id}/numbers.json`, its paging and the field names are from memory of CTM's reference. The
+ * digits of a number are never kept; only its id and the source text.
+ */
+export const CTM_NUMBERS_MAX_PAGES = 10;
+export const CTM_NUMBER_FIELDS = {
+  id: { json: ["id", "number_id", "sid"], csv: [], verified: false },
+  source: { json: ["source", "tracking_source", "source_name"], csv: [], verified: false },
+} satisfies Record<string, FieldAlias>;

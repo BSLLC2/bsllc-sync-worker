@@ -83,6 +83,7 @@ ok("every account failing is a failed run", /read === 0\) process\.exit\(1\)/.te
 ok("a dry run writes nothing", /if \(dryRun\) \{[^}]*continue/.test(job) && /if \(!dryRun\) await recordClickFailure/.test(job));
 ok("the ceiling is a real number", MAX_DAY_ROWS >= 10_000);
 ok("the known click ids come from this client's enquiries only", /loadKnownClickIds\(c, slugify\(t\.clientName\)/.test(job));
+ok("the job passes the client id so the client's calls are known too (R24)", /loadKnownClickIds\(c, slugify\(t\.clientName\), today, t\.clientId\)/.test(job));
 
 section("6. The workflow");
 const wf = readFileSync(join(here, "..", ".github/workflows/ads-click-map.yml"), "utf8");
@@ -118,6 +119,12 @@ async function storeSection(url: string) {
     await c.query(`INSERT INTO web_inquiries VALUES ('och','G1', '2026-10-09'), ('och','  G3  ', '2026-10-09'), ('och', '', '2026-10-09'), ('och', NULL, '2026-10-09'), ('other','GX','2026-10-09'), ('och','OLD','2024-01-01')`);
     const ids = await loadKnownClickIds(c, "och", "2026-10-14");
     ok("the known click ids are this client's, trimmed, non-blank and recent", ids.size === 2 && ids.has("G1") && ids.has("G3") && !ids.has("GX") && !ids.has("OLD"), Array.from(ids).join(","));
+    const noCtm = await loadKnownClickIds(c, "och", "2026-10-14", "CL");
+    ok("with a client id and no ctm_calls table, the forms alone are known", noCtm.size === 2);
+    await c.query(`CREATE TABLE ctm_calls (client_id TEXT, gclid TEXT, called_at TIMESTAMPTZ)`);
+    await c.query(`INSERT INTO ctm_calls VALUES ('CL','C9','2026-10-09'), ('CL','G1','2026-10-09'), ('OTHER','CX','2026-10-09'), ('CL','COLD','2024-01-01'), ('CL',' ','2026-10-09')`);
+    const withCalls = await loadKnownClickIds(c, "och", "2026-10-14", "CL");
+    ok("a call's click id (R24) is known too, this client's and recent only, once", withCalls.size === 3 && withCalls.has("C9") && !withCalls.has("CX") && !withCalls.has("COLD"), Array.from(withCalls).join(","));
     const ACCT = "1112223334";
     const win = { start: "2026-10-01", end: "2026-10-05" };
     const mk = (g: string, camp: string, d: string): ClickRow => ({ gclid: g, campaignId: camp, adGroupId: "7", criterionId: null, date: d });

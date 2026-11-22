@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dealStatus, dealStageLabel, CLOSED_WON_STAGE, CLOSED_LOST_STAGE } from "./hubspot-deal-status";
+import { assocAll, sourceDetail } from "./hubspot-depth";
 
 /**
  * HubSpot → dashboard CRM import. The worker is the only place the HubSpot
@@ -91,6 +92,7 @@ function assocFirst(o: HSObj, type: string): string | null {
   return r && r.length ? String(r[0]!.id) : null;
 }
 
+
 async function main() {
   const token = reqEnv("HUBSPOT_TOKEN");
   const databaseUrl = reqEnv("DATABASE_URL");
@@ -112,15 +114,15 @@ async function main() {
     // to the import time, which is up to a day late and made a form submission
     // that came in overnight look like every other row imported that morning.
     // Two property names; nothing else in either repo had to change.
-    ["firstname", "lastname", "email", "phone", "jobtitle", "lifecyclestage", "hs_lead_status", "hs_analytics_source", "notes_last_contacted", "hubspot_owner_id", "createdate"],
+    ["firstname", "lastname", "email", "phone", "jobtitle", "lifecyclestage", "hs_lead_status", "hs_analytics_source", "hs_analytics_source_data_1", "hs_analytics_source_data_2", "notes_last_contacted", "hubspot_owner_id", "createdate"],
     ["companies"],
     limit,
   );
   const hsDeals = await fetchAll(
     token,
     "deals",
-    ["dealname", "amount", "dealstage", "pipeline", "closedate", "hubspot_owner_id", "hs_analytics_source", "hs_is_closed_won", "hs_is_closed", "dealtype", "hs_priority", "hs_forecast_category", "closed_lost_reason", "hs_deal_score", "notes_last_contacted", "createdate"],
-    ["companies"],
+    ["dealname", "amount", "dealstage", "pipeline", "closedate", "hubspot_owner_id", "hs_analytics_source", "hs_analytics_source_data_1", "hs_analytics_source_data_2", "hs_is_closed_won", "hs_is_closed", "dealtype", "hs_priority", "hs_forecast_category", "closed_lost_reason", "hs_deal_score", "notes_last_contacted", "createdate"],
+    ["companies", "contacts"],
     limit,
   );
   console.log(`Fetched ${hsCompanies.length} companies · ${hsContacts.length} contacts · ${hsDeals.length} deals · ${owners.size} owners`);
@@ -147,6 +149,8 @@ async function main() {
     lifecycleStage: c.properties.lifecyclestage || null,
     leadStatus: c.properties.hs_lead_status || null,
     originalSource: c.properties.hs_analytics_source || null,
+    sourceData1: sourceDetail(c.properties.hs_analytics_source_data_1),
+    sourceData2: sourceDetail(c.properties.hs_analytics_source_data_2),
     lastContactedAt: c.properties.notes_last_contacted || null,
     // The app fills a BLANK owner with this and never overwrites one somebody
     // set there — see the contact upsert in server/crm-import.ts.
@@ -199,6 +203,10 @@ async function main() {
       closeDate: d.properties.closedate ? String(d.properties.closedate).slice(0, 10) : null,
       ownerName: d.properties.hubspot_owner_id ? owners.get(String(d.properties.hubspot_owner_id)) ?? null : null,
       source: d.properties.hs_analytics_source || null,
+      sourceData1: sourceDetail(d.properties.hs_analytics_source_data_1),
+      sourceData2: sourceDetail(d.properties.hs_analytics_source_data_2),
+      // R24: every contact on the deal, so the app can fill deal_contacts (it imported none before).
+      contactHubspotIds: assocAll(d, "contacts"),
       dealType: d.properties.dealtype || null,
       priority: d.properties.hs_priority || null,
       forecastCategory: d.properties.hs_forecast_category || null,
