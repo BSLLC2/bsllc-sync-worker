@@ -40,8 +40,12 @@ jobs:
         run: npm run verify-ads-google-recs
       - name: Ads daily metrics reader (read-only, null versus zero, coverage)
         run: npm run verify-ads-daily-metrics
+      - name: Ads click map (read-only, keeps only a click that became a lead)
+        run: npm run verify-ads-click-map
       - name: Ads data gaps (keyword metrics, RSA and negatives in the snapshot, conversion actions)
         run: npm run verify-ads-gaps
+      - name: Ads share reads (impression share lost, quality score, hour and device, places)
+        run: npm run verify-ads-share-reads
       - name: Structure read keeps the campaigns when an optional query is refused
         run: npm run verify-ads-structure-read
       - name: Every GAQL field exists on the API version the library speaks
@@ -70,6 +74,8 @@ jobs:
         run: npm run verify-bing
       - name: Link audit guard, against a pretend link provider
         run: npm run verify-backlinks
+      - name: Tag Manager guard, against a pretend Tag Manager
+        run: npm run verify-gtm
       - name: CallTrackingMetrics guard, against a pretend CTM
         run: npm run verify-ctm
       - name: Page history guard (top results, pages above a client, pages by month)
@@ -148,8 +154,12 @@ jobs:
         run: npm run verify-ads-run-summary
       - name: Ads daily metrics store guard (real SQL)
         run: npm run verify-ads-daily-metrics
+      - name: Ads click map store guard (real SQL)
+        run: npm run verify-ads-click-map
       - name: Ads data gaps store guard (real SQL)
         run: npm run verify-ads-gaps
+      - name: Ads share reads store guard (real SQL)
+        run: npm run verify-ads-share-reads
       - name: Search terms and WordPress changes store guard (real SQL)
         run: npm run verify-term-days-wp
       - name: Website performance report store guard (real SQL)

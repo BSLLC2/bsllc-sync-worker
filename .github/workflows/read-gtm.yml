@@ -1,0 +1,74 @@
+name: Read Tag Manager (live container facts)
+
+# Reads the LIVE published version of each client's Google Tag Manager container, read-only,
+# for each client that has a container recorded in the dashboard (Admin, Connectors, Tag
+# Manager). Keeps declared facts only: which tag types are there (GA4 configuration, GA4
+# event tags by event name, Google Ads conversion tags, the conversion linker, Clarity, a
+# Meta pixel), whether each is paused and whether it has a firing trigger, plus trigger
+# types and variable names. Never a custom HTML body, a variable value or a secret. Writes
+# gtm_container_facts and a status per account in signal_runs.
+#
+# NO NEW SECRET. It uses the Google service account the other readers use
+# (GOOGLE_SERVICE_ACCOUNT_JSON), asked for the tagmanager.readonly scope and nothing else.
+# Each client has to add that service account as a user with Read access on their container
+# in Tag Manager (docs/INTEGRATIONS-SETUP.md in the dashboard repository). The Tag Manager
+# API also has to be enabled once in the Google Cloud project. Without either, that client's
+# row says exactly which in the dashboard.
+#
+# WHEN. Daily 11:30 UTC, after the other morning readers. A container changes when somebody
+# publishes it, so a daily read is plenty.
+#
+# NEEDS: DATABASE_URL and the dashboard on the schema block that creates gtm_container_facts.
+on:
+  schedule:
+    - cron: "30 11 * * *"
+  workflow_dispatch:
+    inputs:
+      client_id:
+        description: "Dashboard client UUID or slug. Blank = every client."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print the counts, write nothing (true/false)."
+        required: false
+        default: "true"
+
+concurrency:
+  group: read-gtm-${{ inputs.client_id || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read Tag Manager
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          CLIENT_ID: ${{ inputs.client_id }}
+          # A scheduled run has no inputs, so it is a real run; a hand dispatch defaults to a dry run.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: |
+          ARGS=""
+          [ -n "$CLIENT_ID" ] && ARGS="--client=$CLIENT_ID"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run read-gtm -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure, with the run's own
+      # last line as the reason. A dry run and a one-client run are excluded: the
+      # heartbeat is ONE row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client_id == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ steps.run.outputs.summary }}
+          STATUS: ${{ job.status }}
+        run: npm run heartbeat -- --job=read_gtm --status="$STATUS" --note="$NOTE" --log=run.log

@@ -1,0 +1,74 @@
+name: Ads share reads (read-only)
+
+# Why a campaign is limited, as the platform reports it: impression share lost to
+# budget and to ad rank by day, each keyword's quality score and first-page cost,
+# the hours and devices the spend went through, and the places it went.
+#
+# READ-ONLY. Every query is a SELECT. Nothing is written to any ad account.
+#
+# A DISPATCHED RUN IS A DRY ONE UNLESS YOU SAY OTHERWISE. A scheduled run is live.
+on:
+  schedule:
+    # 06:10 UTC daily: after the account day has closed in every US zone and clear
+    # of the structure snapshot (03:40), the campaign days (05:10), the keyword
+    # figures (05:40) and the search terms (05:55).
+    - cron: "10 6 * * *"
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Limit to one client slug. Blank = every mapped account."
+        required: false
+        default: ""
+      days:
+        description: "Days to read for the day parts. Blank = 60 the first time, then 14."
+        required: false
+        default: ""
+      dry_run:
+        description: "Read and print, write nothing (true/false). Defaults to true."
+        required: false
+        default: "true"
+
+concurrency:
+  group: ads-share-reads
+  cancel-in-progress: false
+
+jobs:
+  share:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Read the share, quality and segment figures
+        id: run
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DASHBOARD_DIR: ${{ github.workspace }}
+          GOOGLE_ADS_CLIENT_ID: ${{ secrets.GOOGLE_ADS_CLIENT_ID }}
+          GOOGLE_ADS_CLIENT_SECRET: ${{ secrets.GOOGLE_ADS_CLIENT_SECRET }}
+          GOOGLE_ADS_DEVELOPER_TOKEN: ${{ secrets.GOOGLE_ADS_DEVELOPER_TOKEN }}
+          GOOGLE_ADS_REFRESH_TOKEN: ${{ secrets.GOOGLE_ADS_REFRESH_TOKEN }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ secrets.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '2141712409' }}
+          # Inputs go through the environment, never into the command line.
+          IN_CLIENT: ${{ inputs.client }}
+          IN_DAYS: ${{ inputs.days }}
+          IN_DRY: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          [ -n "$IN_CLIENT" ] && ARGS="--client=$IN_CLIENT"
+          [ -n "$IN_DAYS" ] && ARGS="$ARGS --days=$IN_DAYS"
+          [ "$IN_DRY" = "true" ] && ARGS="$ARGS --dry-run"
+          set -o pipefail
+          npm run ads-share-reads -- $ARGS 2>&1 | tee run.log
+
+      # `if: always()` so a FAILED run is recorded as a failure rather than as
+      # silence. A dry run and a single-account run are excluded: the heartbeat
+      # is one row for the whole book.
+      - name: Heartbeat
+        if: always() && inputs.dry_run != 'true' && inputs.client == ''
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        # The note is the job's own counts, never text from an ad account.
+        run: npm run heartbeat -- --job=ads_share_reads --status=${{ job.status }} --note="${{ steps.run.outputs.summary }}" --log=run.log

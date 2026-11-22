@@ -11,9 +11,9 @@ import { signalsFakeBase } from "./common.js";
 
 export interface ServiceAccount { client_email: string; private_key: string }
 
-export function serviceAccount(env: Record<string, string | undefined> = process.env): ServiceAccount {
+export function serviceAccount(env: Record<string, string | undefined> = process.env, stops = "no Search Console page can be inspected"): ServiceAccount {
   const raw = env[SECRET_NAMES.serviceAccount];
-  if (!raw || !raw.trim()) throw new Error(missingSecretMessage(SECRET_NAMES.serviceAccount, "no Search Console page can be inspected"));
+  if (!raw || !raw.trim()) throw new Error(missingSecretMessage(SECRET_NAMES.serviceAccount, stops));
   let json: { client_email?: string; private_key?: string };
   try { json = JSON.parse(raw); } catch { throw new Error(`${SECRET_NAMES.serviceAccount} is not valid JSON.`); }
   if (!json.client_email || !json.private_key) throw new Error(`${SECRET_NAMES.serviceAccount} is missing client_email or private_key.`);
