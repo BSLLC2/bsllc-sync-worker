@@ -354,7 +354,7 @@ async function main() {
     // Send through the Data Manager API. The first pass is validate-only and sends nothing
     // to the account; a real send needs a validate pass on record within 14 days.
     const sending = args.api === "send";
-    // Identifiers: a validate pass carries them so Google checks them; a real OCH send carries them only when
+    // Identifiers: an OCH upload (send or validate) carries them only when
     // OCH_ENHANCED_IDENTIFIERS=send. Without the switch the admissions still go, by click id alone.
     const gate = identifierGate(args.clientSlug, sending, process.env);
     const candidates = fresh.map((m) => hashedIdentifiers({ phone: m.contactPhone, email: m.contactEmail }));

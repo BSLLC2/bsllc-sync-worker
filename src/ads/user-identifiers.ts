@@ -19,9 +19,9 @@
  * `identifierCounts()` (numbers only). `src/verify-enhanced-identifiers.ts` holds this file, the job and the Data
  * Manager module to that, and plants a leak to prove it would catch one.
  *
- * THE OCH GATE. OCH's identifiers go to Google on a real send only when the repo variable OCH_ENHANCED_IDENTIFIERS is
- * exactly "send" (default off: waiting on OCH's written compliance OK, 42 CFR Part 2 consent). A validate-only pass may
- * carry them, so Google checks their shape while nothing reaches the account. Other live clients carry them whenever
+ * THE OCH GATE. OCH's identifiers go to Google, on a send or a validate pass, only when the repo variable
+ * OCH_ENHANCED_IDENTIFIERS is exactly "send" (default off: waiting on OCH's written compliance OK, 42 CFR Part 2
+ * consent). A validate call still transmits, so it is gated too. Other live clients carry them whenever
  * their upload is live. A churned client never does.
  */
 import { createHash } from "node:crypto";
@@ -80,9 +80,10 @@ export function identifierGate(clientSlug: string, sending: boolean, env: Record
   if (CHURNED_SLUGS.has(clientSlug)) return { include: false, switchOn: false, reason: "churned client, nothing is sent" };
   if (clientSlug !== OCH_SLUG) return { include: true, switchOn: true, reason: "on for a live upload" };
   const switchOn = env[OCH_SWITCH_VAR]?.trim() === "send";
-  if (!sending) return { include: true, switchOn, reason: "validate only: Google checks them, nothing reaches the account" };
+  // A validate call still transmits the hashes to Google, so OCH's gate covers validate too:
+  // nothing about an OCH patient leaves us before OCH's written compliance OK.
   return switchOn
-    ? { include: true, switchOn, reason: `${OCH_SWITCH_VAR}=send` }
+    ? { include: true, switchOn, reason: sending ? `${OCH_SWITCH_VAR}=send` : `validate with ${OCH_SWITCH_VAR}=send` }
     : { include: false, switchOn, reason: `off until ${OCH_SWITCH_VAR}=send (waiting on OCH's compliance OK)` };
 }
 

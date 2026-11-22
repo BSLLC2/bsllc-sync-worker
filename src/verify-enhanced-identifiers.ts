@@ -38,7 +38,8 @@ ok(hashedIdentifiers({ phone: null, email: undefined }).length === 0, "nothing h
 ok(!identifierGate(OCH_SLUG, true, {}).include, "OCH send: off by default");
 ok(!identifierGate(OCH_SLUG, true, { OCH_ENHANCED_IDENTIFIERS: "on" }).include && !identifierGate(OCH_SLUG, true, { OCH_ENHANCED_IDENTIFIERS: "true" }).include, "OCH send: only the exact word send opens it");
 ok(identifierGate(OCH_SLUG, true, { OCH_ENHANCED_IDENTIFIERS: "send" }).include, "OCH send: on with the switch");
-ok(identifierGate(OCH_SLUG, false, {}).include && !identifierGate(OCH_SLUG, false, {}).switchOn, "OCH validate: carries them, switch still reads off");
+ok(!identifierGate(OCH_SLUG, false, {}).include, "OCH validate: no identifiers without the switch (a validate call still transmits)");
+ok(identifierGate(OCH_SLUG, false, { OCH_ENHANCED_IDENTIFIERS: "send" }).include, "OCH validate: carries them with the switch");
 ok(identifierGate("diesel-power-group", true, {}).include, "another live client: on");
 ok(!identifierGate("franklin-brazing", true, { OCH_ENHANCED_IDENTIFIERS: "send" }).include && !identifierGate("franklin-brazing", false, {}).include, "churned: never");
 
