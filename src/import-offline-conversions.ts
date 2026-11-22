@@ -11,6 +11,9 @@ import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolve
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 import { accessToken, sheetsBase } from "./och-google.js";
 import { getAccessToken as dmToken, buildIngestBody, chunk, ingest, requestStatus, validationAllows, actionFault, type DmRow } from "./ads/data-manager.js";
+// Enhanced conversions for leads (R25): hashed phone / email ride with each conversion when the gate allows.
+// Raw values and hashes stay in memory; only counts are logged or recorded.
+import { hashedIdentifiers, identifierGate, identifierCounts, identifierSummary, identifierRecord, identifierRecordKey } from "./ads/user-identifiers.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -128,7 +131,7 @@ function isAdmitted(cell: string | undefined): boolean {
   return isAdmittedStatus(cell, unrecognizedStatuses); // shared with import-och
 }
 
-interface Inquiry { gclid: string; phone10: string | null; lastDob: string | null; firstName: string | null; submittedAt: Date; }
+interface Inquiry { gclid: string; phone10: string | null; email: string | null; lastDob: string | null; firstName: string | null; submittedAt: Date; }
 interface Admission { name: string; phone10: string | null; lastDob: string | null; date: Date; }
 
 async function main() {
@@ -150,8 +153,8 @@ async function main() {
     console.log(`Per-admission value: $${valueDollars.toLocaleString()} (${matchClient?.customer_value_cents != null ? "dashboard Customer value" : "default"})`);
 
     // 1. Web inquiries with a gclid.
-    const { rows: inqRows } = await pgc.query<{ gclid: string | null; phone: string | null; dob: string | null; last_name: string | null; first_name: string | null; submitted_at: Date }>(
-      `SELECT gclid, phone, dob, last_name, first_name, submitted_at FROM web_inquiries
+    const { rows: inqRows } = await pgc.query<{ gclid: string | null; phone: string | null; email: string | null; dob: string | null; last_name: string | null; first_name: string | null; submitted_at: Date }>(
+      `SELECT gclid, phone, email, dob, last_name, first_name, submitted_at FROM web_inquiries
         WHERE client_slug = $1 AND gclid IS NOT NULL AND gclid <> ''
         ORDER BY submitted_at DESC`,
       [args.clientSlug],
@@ -159,6 +162,7 @@ async function main() {
     const inquiries: Inquiry[] = inqRows.map((r) => ({
       gclid: r.gclid!.trim(),
       phone10: phone10(r.phone),
+      email: r.email,
       lastDob: lastDobKey(r.last_name, r.dob),
       firstName: r.first_name,
       submittedAt: new Date(r.submitted_at),
@@ -232,14 +236,15 @@ async function main() {
     reportUnrecognizedStatuses(unrecognizedStatuses);
 
     // 3. Match.
-    interface Match { gclid: string; date: Date; matchedBy: "phone" | "name_dob"; name: string; }
+    // contactPhone / contactEmail: in memory only, hashed at send time and then dropped (never logged or stored).
+    interface Match { gclid: string; date: Date; matchedBy: "phone" | "name_dob"; name: string; contactPhone: string | null; contactEmail: string | null; }
     const matches: Match[] = [];
     for (const a of admissions) {
       let inq: Inquiry | undefined;
       let by: "phone" | "name_dob" | null = null;
       if (a.phone10 && byPhone.has(a.phone10)) { inq = pickFor(byPhone.get(a.phone10), a.date); by = "phone"; }
       else if (a.lastDob && byNameDob.has(a.lastDob)) { inq = pickFor(byNameDob.get(a.lastDob), a.date); by = "name_dob"; }
-      if (inq && by) matches.push({ gclid: inq.gclid, date: a.date, matchedBy: by, name: a.name });
+      if (inq && by) matches.push({ gclid: inq.gclid, date: a.date, matchedBy: by, name: a.name, contactPhone: a.phone10 ?? inq.phone10, contactEmail: inq.email });
     }
     console.log(`Matched admissions ↔ ad clicks: ${matches.length}`);
     if (matches.length === 0) {
@@ -348,10 +353,19 @@ async function main() {
 
     // Send through the Data Manager API. The first pass is validate-only and sends nothing
     // to the account; a real send needs a validate pass on record within 14 days.
-    const dmRows: DmRow[] = fresh.map((m) => ({ gclid: m.gclid, closed: ymd(m.date), valueDollars, transactionId: `och-${m.gclid.slice(0, 20)}-${ymd(m.date)}` }));
+    const sending = args.api === "send";
+    // Identifiers: an OCH upload (send or validate) carries them only when
+    // OCH_ENHANCED_IDENTIFIERS=send. Without the switch the admissions still go, by click id alone.
+    const gate = identifierGate(args.clientSlug, sending, process.env);
+    const candidates = fresh.map((m) => hashedIdentifiers({ phone: m.contactPhone, email: m.contactEmail }));
+    const idCounts = identifierCounts(candidates.map((userIdentifiers) => ({ userIdentifiers })));
+    console.log(identifierSummary(idCounts, gate));
+    const dmRows: DmRow[] = fresh.map((m, i) => ({
+      gclid: m.gclid, closed: ymd(m.date), valueDollars, transactionId: `och-${m.gclid.slice(0, 20)}-${ymd(m.date)}`,
+      ...(gate.include && candidates[i]!.length ? { userIdentifiers: candidates[i] } : {}),
+    }));
     const dest = { accountId: customerId, loginAccountId: cfg.loginCustomerId || null, actionId };
     const vKey = `dm_validated:${args.clientSlug}`;
-    const sending = args.api === "send";
     if (sending) {
       const { rows: vr } = await pgc.query<{ value: string }>("SELECT value FROM app_settings WHERE key=$1", [vKey]);
       if (!validationAllows(vr[0]?.value, new Date())) {
@@ -372,6 +386,8 @@ async function main() {
       }
     }
     if (failedBatches > 0) { console.error(`Data Manager did not take ${failedBatches} batch(es). First reason: ${firstReason ?? "not stated"}.`); process.exit(1); }
+    // Counts only, for the app's Setup row ("Matching by phone or email: on / off"). No hash, no raw value.
+    await pgc.query("INSERT INTO app_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [identifierRecordKey(args.clientSlug), identifierRecord(idCounts, gate, args.api, new Date())]);
     if (!sending) {
       await pgc.query("INSERT INTO app_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [vKey, new Date().toISOString()]);
       console.log(`Validate-only pass OK for ${accepted} conversion(s). Nothing was sent to the account. Run again with --api=send to send.`);
