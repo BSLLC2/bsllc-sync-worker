@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import { providerLocationName } from "./research-location.js";
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
@@ -96,10 +97,17 @@ async function main() {
       )).rows;
       if (!targets.length) { console.log(`· ${slug}: no active keywords, skipping`); continue; }
 
-      const defaultLoc = (client.seo_location || "").trim() || "United States";
+      // The provider takes one spelling of a place only ("Cincinnati,Ohio,United States"). "Cincinnati, OH" and
+      // form example text are rejected, so a place is sent in the provider's form or, where it cannot be read, not at all.
+      const sendable = (raw: string | null | undefined): string | null => {
+        const v = (raw ?? "").trim();
+        if (!v || /(^|,)\s*(city|state|town)\s*(,|$)/i.test(v)) return null;
+        return providerLocationName(v);
+      };
+      const defaultLoc = sendable(client.seo_location) ?? "United States";
       const tasks: SerpTask[] = targets.map((t) => ({
         keyword: t.keyword,
-        locationName: t.scope === "local" && t.location_name?.trim() ? t.location_name.trim() : defaultLoc,
+        locationName: t.scope === "local" ? (sendable(t.location_name) ?? defaultLoc) : defaultLoc,
         device: (t.device === "mobile" ? "mobile" : "desktop"),
       }));
 

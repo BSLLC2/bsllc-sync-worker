@@ -13,9 +13,9 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { normaliseEmail, normalisePhoneE164, hashedIdentifiers, identifierGate, identifierCounts, identifierSummary, identifierRecord, identifierRecordKey, OCH_SLUG } from "./ads/user-identifiers.js";
-import { buildIngestBody, interpret } from "./ads/data-manager.js";
+import { readFileSync, readdirSync } from "node:fs";
+import { normaliseEmail, normalisePhoneE164, hashedIdentifiers, identifierGate, identifierCounts, identifierSummary, identifierRecord, identifierRecordKey, identifiersCleanWithin, CHECK_SAMPLE_MAX, OCH_SLUG } from "./ads/user-identifiers.js";
+import { buildIngestBody, interpret, tallyBatch } from "./ads/data-manager.js";
 
 let n = 0; const ok = (c: unknown, m: string) => { assert.ok(c, m); n++; };
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -69,7 +69,32 @@ const printed = [
 for (const p of printed) ok(leaks(p).length === 0, `nothing personal in: ${p.slice(0, 60)}`);
 ok(identifierSummary(counts, identifierGate(OCH_SLUG, true, {})) === "Matching by phone or email: off (off until OCH_ENHANCED_IDENTIFIERS=send (waiting on OCH's compliance OK)). Would have been: 1 of 2 carried a phone hash, 1 an email hash.", "summary words");
 const rec = JSON.parse(printed[2]!);
-ok(rec.switchOn === false && rec.included === false && rec.withPhone === 1 && Object.keys(rec).sort().join(",") === "api,at,included,rows,switchOn,withEither,withEmail,withPhone", "record is counts and flags only");
+ok(rec.switchOn === false && rec.included === false && rec.withPhone === 1 && Object.keys(rec).sort().join(",") === "accepted,api,at,included,refused,rows,switchOn,withEither,withEmail,withPhone", "record is counts and flags only");
+ok(rec.accepted === null && rec.refused === null, "no answer recorded is null, never 0");
+
+// 4b. Google's answer (handoff 143): tally, the clean rule, and the check sample.
+const okAns = interpret(200, { requestId: "r1" }), badAns = interpret(400, { error: { status: "INVALID_ARGUMENT", message: "bad" } });
+let t = tallyBatch({ accepted: 0, refused: 0, failedBatches: 0, firstReason: null }, 12, okAns, null);
+ok(t.accepted === 12 && t.refused === 0, "an accepted batch with no status counts all rows accepted");
+t = tallyBatch(t, 5, okAns, { received: 5, failed: 2 });
+ok(t.accepted === 15 && t.refused === 2, "rows Google reports failed count as refused");
+t = tallyBatch(t, 3, badAns, null);
+ok(t.refused === 5 && t.failedBatches === 1 && t.firstReason === "INVALID_ARGUMENT: bad", "a refused batch refuses all its rows and keeps the first reason");
+const on = identifierGate(OCH_SLUG, false, { OCH_ENHANCED_IDENTIFIERS: "send" });
+const now = new Date("2026-11-27T09:00:00Z");
+const clean = identifierRecord(counts, on, "validate", new Date("2026-11-26T08:20:00Z"), { accepted: 12, refused: 0 });
+ok(identifiersCleanWithin(clean, now), "clean: identifiers rode, Google accepted, refused none, inside 14 days");
+ok(!identifiersCleanWithin(identifierRecord(counts, on, "validate", new Date("2026-11-26T08:20:00Z"), { accepted: 10, refused: 2 }), now), "any refusal is not clean");
+ok(!identifiersCleanWithin(identifierRecord(counts, on, "validate", new Date("2026-11-01T08:20:00Z"), { accepted: 12, refused: 0 }), now), "older than 14 days is not clean");
+ok(!identifiersCleanWithin(identifierRecord(counts, identifierGate(OCH_SLUG, false, {}), "validate", new Date("2026-11-26T08:20:00Z"), { accepted: 12, refused: 0 }), now), "identifiers left out is not clean");
+ok(!identifiersCleanWithin(identifierRecord(counts, on, "validate", new Date("2026-11-26T08:20:00Z")), now) && !identifiersCleanWithin(null, now) && !identifiersCleanWithin("{", now), "no answer, no record or junk is not clean");
+const job = codeOnly(readFileSync("src/import-offline-conversions.ts", "utf8"));
+ok(CHECK_SAMPLE_MAX === 20 && /slice\(0, CHECK_SAMPLE_MAX\)/.test(job) && /checkOnly = true/.test(job), "a run with 0 new rows builds a check sample of at most 20");
+ok(/wantCheck = !args\.dryRun && !args\.csvPath && \(!sending \|\| \(gate\.include && !idClean\)\)/.test(job), "validate runs always check; a send checks only while identifiers are not answered cleanly");
+ok(/ingestAll\(dmTok, dest, buildRows\(gate\.include\), true\)/.test(job), "the check is validate-only");
+const jobRaw = readFileSync("src/import-offline-conversions.ts", "utf8");
+const sendIdx = jobRaw.indexOf("buildRows(includeIds), false"), insIdx = jobRaw.indexOf("INSERT INTO offline_conversion_uploads", jobRaw.indexOf("ingestAll(dmTok"));
+ok(sendIdx > 0 && insIdx > sendIdx && /if \(!sending \|\| checkOnly\) \{[\s\S]*?return;\s*\}/.test(job), "only a real send records uploads; a check returns before");
 
 // 5. Static: no console call or query names an identifier.
 const FORBIDDEN_NAMES = /\b(email|emailAddress|phone|phoneNumber|contactPhone|contactEmail|userIdentifiers|candidates|hashedIdentifiers|sha256Hex|dmRows|inqRows|inquiries|fresh|matches|admissions)\b/;
@@ -114,7 +139,7 @@ function staticLeaks(src: string): string[] {
     .filter((s) => s.hit)
     .map((s) => `${s.kind} names ${s.hit}`);
 }
-for (const f of ["src/import-offline-conversions.ts", "src/ads/data-manager.ts", "src/ads/user-identifiers.ts"]) {
+for (const f of ["src/import-offline-conversions.ts", "src/ads/data-manager.ts", "src/ads/user-identifiers.ts", "src/upload-offline-conversions.ts", ...readdirSync("src/ads").filter((n) => /^offline-upload.*\.ts$/.test(n)).map((n) => `src/ads/${n}`)]) {
   const found = staticLeaks(readFileSync(f, "utf8"));
   ok(found.length === 0, `${f}: no log line or query names an identifier${found.length ? ` (${found.join("; ")})` : ""}`);
 }

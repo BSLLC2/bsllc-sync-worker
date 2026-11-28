@@ -141,6 +141,15 @@ export async function requestStatus(token: string, requestId: string): Promise<{
 }
 
 /** A validate-only pass older than this does not authorise a send. Our own line. */
+/** What one or more ingest requests came to, counts only. `refused` counts rows in refused batches plus rows Google reported failed. */
+export interface IngestTally { accepted: number; refused: number; failedBatches: number; firstReason: string | null }
+/** Add one batch's answer to a tally. Pure, so the guard can check it. */
+export function tallyBatch(t: IngestTally, size: number, ans: DmAnswer, status: { received: number | null; failed: number | null } | null): IngestTally {
+  if (!ans.ok) return { accepted: t.accepted, refused: t.refused + size, failedBatches: t.failedBatches + 1, firstReason: t.firstReason ?? ans.reason };
+  const failed = status?.failed != null ? Math.min(Math.max(0, status.failed), size) : 0;
+  return { ...t, accepted: t.accepted + size - failed, refused: t.refused + failed };
+}
+
 export const VALIDATION_FRESH_DAYS = 14;
 export function validationAllows(validatedAt: string | null | undefined, now: Date): boolean {
   if (!validatedAt) return false;

@@ -102,6 +102,8 @@ jobs:
         run: npm run verify-data-manager
       - name: Enhanced conversions, no raw phone or email in a log or the database
         run: npm run verify-enhanced-identifiers
+      - name: Sales-sheet upload, through the Data Manager only
+        run: npm run verify-offline-upload
       - name: OCH sheet connection, end to end against a pretend Google
         run: npm run verify-och-e2e
       - name: DPG tracker import, against a pretend Google
