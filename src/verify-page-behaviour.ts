@@ -410,8 +410,8 @@ hr("10. discipline read from the source");
   selfTest("an unlisted host is caught", (t) => Array.from(t.matchAll(/https:\/\/([a-z0-9.-]+)/g)).every((m) => allowed.includes(m[1]!)), "https://www.clarity.ms/x", "https://tracker.example.io/x");
 
   const writesToDb = Array.from(all.matchAll(/\b(INSERT INTO|UPDATE|DELETE FROM)\s+([a-z_]+)/g)).map((m) => `${m[1]} ${m[2]}`);
-  const allowedWrites = new Set(["INSERT INTO seo_page_behaviour", "INSERT INTO seo_page_events", "INSERT INTO seo_page_vitals", "INSERT INTO seo_clarity_days", "INSERT INTO seo_ux_runs", "DELETE FROM seo_clarity_days"]);
-  ok("it writes five tables and deletes only old Clarity days", writesToDb.every((w) => allowedWrites.has(w)), writesToDb.join("; "));
+  const allowedWrites = new Set(["INSERT INTO seo_page_behaviour", "INSERT INTO seo_page_events", "INSERT INTO seo_page_vitals", "INSERT INTO seo_clarity_days", "INSERT INTO seo_ux_runs", "DELETE FROM seo_clarity_days", "INSERT INTO seo_page_months", "DELETE FROM seo_page_months"]);
+  ok("it writes six tables and deletes only old Clarity days and its own page-month rows", writesToDb.every((w) => allowedWrites.has(w)), writesToDb.join("; "));
   selfTest("a stray write is caught", (t) => Array.from(t.matchAll(/\b(INSERT INTO|UPDATE|DELETE FROM)\s+([a-z_]+)/g)).every((m) => allowedWrites.has(`${m[1]} ${m[2]}`)), `${"INSERT"} ${"INTO"} seo_ux_runs (a) VALUES ($1)`, "UPDATE clients SET name = $1");
 
   const insertBlocks = Array.from(all.matchAll(/INSERT INTO ([a-z_]+)\s*\(([^)]*)\)/g)).map((m) => m[2]!);

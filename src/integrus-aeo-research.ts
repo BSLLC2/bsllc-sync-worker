@@ -232,7 +232,7 @@ async function partA(creds: DfsCreds) {
   // 2b. Discovery: what the LLM Mentions store holds for each seed phrase (real asked questions, both platforms)
   const seen = new Map<string, { q: string; tag: string; volume: number | null; platforms: Set<string>; sources: Set<string>; seeds: Set<string> }>();
   block("2b_discovered_questions", ["seed", "tag", "platform", "question", "ai_search_volume", "web_search_based", "n_sources", "sources", "last_response_at", "source", "date"]);
-  const disc = await pool(SEEDS, 4, async ([seed, tag]) => { try { return { seed, tag, r: await searchMentions(creds, seed, 40) }; } catch (e) { return { seed, tag, r: null as any, err: String(e).slice(0, 140) }; } });
+  const disc = await pool(SEEDS, 4, async ([seed, tag]) => { try { return { seed, tag, r: await searchMentions(creds, seed, 40) }; } catch (e) { return { seed, tag, r: null, err: String(e).slice(0, 140) }; } });
   for (const d of disc) {
     if (!d.r) { row(d.seed, d.tag, "", `error: ${(d as any).err}`, "", "", "", "", "", "llm_mentions/search_mentions", RUN); continue; }
     console.log(`# seed "${d.seed}": ${d.r.total ?? "n/a"} stored questions match, showing ${d.r.items.length}`);
@@ -247,7 +247,7 @@ async function partA(creds: DfsCreds) {
   // 3a. Who holds each candidate's answer now: stored prompts matching the probe, their sources, concentration
   block("3a_candidate_holders", ["question", "tag", "vertical", "seeded", "probe", "stored_prompts_matching", "shown", "chatgpt_prompts", "google_prompts", "distinct_source_domains", "top_domain", "top_domain_share_of_citations", "top5_domains", "integrus_cited", "competitor_domains_cited", "example_prompts", "source", "date"]);
   const compDomains = new Set(COMPETITORS.map(([, d]) => d).filter(Boolean));
-  const holders = await pool(C, 4, async (c) => { try { return { c, r: await searchMentions(creds, c.probe, 30) }; } catch (e) { return { c, r: null as any, err: String(e).slice(0, 140) }; } });
+  const holders = await pool(C, 4, async (c) => { try { return { c, r: await searchMentions(creds, c.probe, 30) }; } catch (e) { return { c, r: null, err: String(e).slice(0, 140) }; } });
   const holderMap = new Map<string, any>();
   for (const h of holders) {
     if (!h.r) { row(h.c.q, h.c.tag, h.c.vertical, h.c.seeded ? "yes" : "", h.c.probe, `error: ${(h as any).err}`, "", "", "", "", "", "", "", "", "", "", "llm_mentions/search_mentions", RUN); continue; }
@@ -439,7 +439,7 @@ async function partB(creds: DfsCreds) {
   // concentration per shortlisted question across the whole LLM Mentions store (aggregated domains)
   block("4b_shortlist_top_domains", ["question", "probe_used", "total_mentions_matching", "distinct_domains_returned", "top_domain", "top_mentions", "top_share", "top8", "source", "date"]);
   const probes = new Map<string, string>(JSON.parse(process.env.PROBES || "{}"));
-  const conc = await pool(shortlist, 3, async (q) => { const probe = probes.get(q) || norm(q).split(" ").filter((w) => !/^(how|what|when|is|do|i|my|a|an|the|to|of|in|for|should|does|it|be|if|me|am|are|can|and|or)$/.test(w)).slice(0, 4).join(" "); try { return { q, probe, d: await topDomains(creds, [{ keyword: probe, search_scope: ["question"] }], 40) }; } catch (e) { return { q, probe, d: null as any, err: String(e).slice(0, 120) }; } });
+  const conc = await pool(shortlist, 3, async (q) => { const probe = probes.get(q) || norm(q).split(" ").filter((w) => !/^(how|what|when|is|do|i|my|a|an|the|to|of|in|for|should|does|it|be|if|me|am|are|can|and|or)$/.test(w)).slice(0, 4).join(" "); try { return { q, probe, d: await topDomains(creds, [{ keyword: probe, search_scope: ["question"] }], 40) }; } catch (e) { return { q, probe, d: null, err: String(e).slice(0, 120) }; } });
   for (const c of conc) {
     if (!c.d) { row(c.q, c.probe, `error: ${(c as any).err}`, "", "", "", "", "", "llm_mentions/top_mentioned_domains", RUN); continue; }
     const top = c.d.items[0]; const tot = c.d.totalMentions;
