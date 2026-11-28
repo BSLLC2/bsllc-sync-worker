@@ -96,7 +96,7 @@ async function main() {
       }
       if (ph === "gap") {
         const mine = await rankedFor(creds, TARGET, 1000);
-        const have = new Map(mine.items.map((x: any) => [x.k, x.pos]));
+        const have = new Map<string, number | undefined>(mine.items.map((x: any) => [x.k, x.pos]));
         for (const c of PARAMS.competitors || []) {
           const r = await rankedFor(creds, c, Number(PARAMS.gapLimit || 400));
           const gaps = r.items.filter((x: any) => { const mp = have.get(x.k); return (mp == null || mp > 20) && (x.pos ?? 100) <= 20; });

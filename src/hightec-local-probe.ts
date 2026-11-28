@@ -155,7 +155,7 @@ async function grid(creds: DfsCreds) {
   for (const job of cellJobs) {
     if (capped()) { console.log(`# COST CAP HIT before ${job.c.id} ${job.q.q} ${job.device}`); break; }
     const pts = gridPoints(job.c.lat, job.c.lng, size, 5);
-    const per: Record<string, (number | null)[]> = { HT: [], AVS: [] };
+    const per: { HT: (number | null)[]; AVS: (number | null)[] } = { HT: [], AVS: [] };
     const comp = new Map<string, any>(); const lookalikes = new Map<string, number>(); let err = 0; let nResults = 0; const errMsgs = new Map<string, number>();
     await pool(pts, 25, async (p) => {
       try {

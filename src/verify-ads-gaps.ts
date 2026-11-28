@@ -172,7 +172,7 @@ ok("the action id is the tail of the resource name", car.every((r) => /^\d+$/.te
 
 // ── 6. The jobs ──────────────────────────────────────────────────────────────
 section("6. The jobs");
-const snapJob = codeOnly(read("ads-structure-snapshot.ts"));
+const snapJob = codeOnly(read("ads/structure-read.ts"));
 ok("a failed ad-label query drops the ad kind", /adLabels\.rows !== null/.test(snapJob) && /completeKinds\.push\("ad"\)/.test(snapJob));
 ok("a failed attachment or set query drops the shared lists", /sets\.rows !== null && attach\.rows !== null/.test(snapJob));
 for (const k of ["account_negative", "shared_negative", "conversion_action", "campaign_conversion_goal"]) {

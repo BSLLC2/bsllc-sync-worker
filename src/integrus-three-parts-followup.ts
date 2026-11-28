@@ -27,7 +27,7 @@ const P3: Array<{ q: string; dallas?: boolean }> = [
   "how much do veterinary practices sell for", "how much can you sell a vet practice for", "what multiple of ebitda do veterinary practices sell for",
   "veterinary practice ebitda multiple", "veterinary private equity", "should i sell my veterinary practice", "veterinary consolidators",
   "how much are corporations paying for veterinary practices", "what is private equity in veterinary medicine",
-].map((q) => ({ q })).concat([{ q: "vet practice broker dallas", dallas: true }, { q: "m&a advisory firm dallas", dallas: true }, { q: "integrus partners" }]);
+].map((q): { q: string; dallas?: boolean } => ({ q })).concat([{ q: "vet practice broker dallas", dallas: true }, { q: "m&a advisory firm dallas", dallas: true }, { q: "integrus partners" }]);
 
 const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const csv = (v: unknown) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
