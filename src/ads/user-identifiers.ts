@@ -110,6 +110,27 @@ export function identifierSummary(c: IdentifierCounts, gate: IdentifierGate): st
 
 /** What the job records in app_settings under `enhanced_identifiers:<slug>` for the app's Setup row. Counts only. */
 export const identifierRecordKey = (clientSlug: string): string => `enhanced_identifiers:${clientSlug}`;
-export function identifierRecord(c: IdentifierCounts, gate: IdentifierGate, api: "validate" | "send", at: Date): string {
-  return JSON.stringify({ at: at.toISOString(), api, switchOn: gate.switchOn, included: gate.include, ...c });
+/** Google's answer to the request, counts only (handoff 143). Null when the run made no request or could not read it. */
+export interface IdentifierAnswer { accepted: number | null; refused: number | null }
+export function identifierRecord(c: IdentifierCounts, gate: IdentifierGate, api: "validate" | "send", at: Date, answer?: IdentifierAnswer): string {
+  return JSON.stringify({ at: at.toISOString(), api, switchOn: gate.switchOn, included: gate.include, ...c, accepted: answer?.accepted ?? null, refused: answer?.refused ?? null });
+}
+
+/** At most this many already-sent matches make up the check sample when a run has nothing new (handoff 143). */
+export const CHECK_SAMPLE_MAX = 20;
+export const IDENTIFIER_CHECK_FRESH_DAYS = 14;
+
+/**
+ * The same rule as the app's identifiersValidated() (shared/offline-tracing.ts), plus freshness: within the last 14 days
+ * Google answered a request that carried hashed identifiers, accepted more than none and refused none. Anything else,
+ * including an unreadable record or one written before handoff 143 (no accepted / refused), is not clean.
+ */
+export function identifiersCleanWithin(raw: string | null | undefined, now: Date, days = IDENTIFIER_CHECK_FRESH_DAYS): boolean {
+  if (!raw) return false;
+  let r: any;
+  try { r = JSON.parse(raw); } catch { return false; }
+  const at = Date.parse(r?.at ?? "");
+  if (!Number.isFinite(at) || now.getTime() - at > days * 86_400_000 || at > now.getTime() + 60_000) return false;
+  return r.included === true && Number(r.rows) > 0 && (Number(r.withPhone) > 0 || Number(r.withEmail) > 0)
+    && typeof r.accepted === "number" && r.accepted > 0 && r.refused === 0;
 }

@@ -10,10 +10,10 @@ import { phone10, lastDobKey, lastNameOf, parseSheetDate, ymd, isAdmittedStatus,
 import { findHeaderRow, resolveAdmissionColumns, describeColumns, contentResolvedNote } from "./och-sheet-columns.js";
 import { ochSheetId, pickAdmissionTab, boardRange, rowsCapped, ROW_LIMIT } from "./och-sheet-target.js";
 import { accessToken, sheetsBase } from "./och-google.js";
-import { getAccessToken as dmToken, buildIngestBody, chunk, ingest, requestStatus, validationAllows, actionFault, type DmRow } from "./ads/data-manager.js";
+import { getAccessToken as dmToken, buildIngestBody, chunk, ingest, requestStatus, validationAllows, actionFault, tallyBatch, type DmRow, type DmDestination, type IngestTally } from "./ads/data-manager.js";
 // Enhanced conversions for leads (R25): hashed phone / email ride with each conversion when the gate allows.
 // Raw values and hashes stay in memory; only counts are logged or recorded.
-import { hashedIdentifiers, identifierGate, identifierCounts, identifierSummary, identifierRecord, identifierRecordKey } from "./ads/user-identifiers.js";
+import { hashedIdentifiers, identifierGate, identifierCounts, identifierSummary, identifierRecord, identifierRecordKey, identifiersCleanWithin, CHECK_SAMPLE_MAX } from "./ads/user-identifiers.js";
 
 /**
  * CLOSE-THE-LOOP: real admissions → Google Ads offline conversions.
@@ -263,7 +263,26 @@ async function main() {
       if (seen.length === 0) fresh.push(m);
     }
     console.log(`New (not yet uploaded): ${fresh.length}`);
-    if (fresh.length === 0) { console.log("All matches already uploaded. Exiting cleanly."); return; }
+
+    // Identifiers (R25): an OCH upload (send or validate) carries them only when OCH_ENHANCED_IDENTIFIERS=send.
+    // Without the switch the admissions still go, by click id alone.
+    const sending = args.api === "send";
+    const gate = identifierGate(args.clientSlug, sending, process.env);
+    const { rows: idRec } = await pgc.query<{ value: string }>("SELECT value FROM app_settings WHERE key=$1", [identifierRecordKey(args.clientSlug)]);
+    const idClean = identifiersCleanWithin(idRec[0]?.value, new Date());
+
+    // Check sample (handoff 143). With nothing new, a validate run (or a scheduled send whose identifiers Google has not
+    // yet answered cleanly) still asks Google to check the request, built from the most recent already-sent matches.
+    // validateOnly: Google records nothing, and nothing is written to offline_conversion_uploads, so it cannot double-count.
+    let batch: Match[] = fresh;
+    let checkOnly = false;
+    if (fresh.length === 0) {
+      const wantCheck = !args.dryRun && !args.csvPath && (!sending || (gate.include && !idClean));
+      if (!wantCheck) { console.log("All matches already uploaded. Exiting cleanly."); return; }
+      batch = [...matches].sort((a, b) => b.date.getTime() - a.date.getTime()).slice(0, CHECK_SAMPLE_MAX);
+      checkOnly = true;
+      console.log(`All matches already uploaded. Asking Google to check the ${batch.length} most recent (validate only: nothing is sent or recorded).`);
+    }
 
     if (args.dryRun) {
       for (const m of fresh.slice(0, 25)) console.log(`  ${ymd(m.date)} · ${m.name} · gclid=${m.gclid.slice(0, 12)}… · via ${m.matchedBy} · $${valueDollars.toLocaleString()}`);
@@ -351,60 +370,80 @@ async function main() {
     const actionId = String(ca.id);
     console.log(`Conversion action ${CONVERSION_ACTION_NAME}: enabled, upload from clicks, secondary.`);
 
-    // Send through the Data Manager API. The first pass is validate-only and sends nothing
-    // to the account; a real send needs a validate pass on record within 14 days.
-    const sending = args.api === "send";
-    // Identifiers: an OCH upload (send or validate) carries them only when
-    // OCH_ENHANCED_IDENTIFIERS=send. Without the switch the admissions still go, by click id alone.
-    const gate = identifierGate(args.clientSlug, sending, process.env);
-    const candidates = fresh.map((m) => hashedIdentifiers({ phone: m.contactPhone, email: m.contactEmail }));
+    // Send through the Data Manager API. A real send needs a validate pass on record within 14 days. Before the first send
+    // that carries identifiers (none answered cleanly in 14 days) the same job validates them first (handoff 143).
+    const candidates = batch.map((m) => hashedIdentifiers({ phone: m.contactPhone, email: m.contactEmail }));
     const idCounts = identifierCounts(candidates.map((userIdentifiers) => ({ userIdentifiers })));
     console.log(identifierSummary(idCounts, gate));
-    const dmRows: DmRow[] = fresh.map((m, i) => ({
+    const buildRows = (withIds: boolean): DmRow[] => batch.map((m, i) => ({
       gclid: m.gclid, closed: ymd(m.date), valueDollars, transactionId: `och-${m.gclid.slice(0, 20)}-${ymd(m.date)}`,
-      ...(gate.include && candidates[i]!.length ? { userIdentifiers: candidates[i] } : {}),
+      ...(withIds && candidates[i]!.length ? { userIdentifiers: candidates[i] } : {}),
     }));
-    const dest = { accountId: customerId, loginAccountId: cfg.loginCustomerId || null, actionId };
+    const dest: DmDestination = { accountId: customerId, loginAccountId: cfg.loginCustomerId || null, actionId };
     const vKey = `dm_validated:${args.clientSlug}`;
-    if (sending) {
-      const { rows: vr } = await pgc.query<{ value: string }>("SELECT value FROM app_settings WHERE key=$1", [vKey]);
-      if (!validationAllows(vr[0]?.value, new Date())) {
-        console.error("Not sending: no validate-only pass on record in the last 14 days. Run this job with --api=validate first and read the result.");
-        process.exit(1);
-      }
-    }
     let dmTok: string;
     try { dmTok = await dmToken(process.env); } catch (e: any) { console.error(e?.message ?? String(e)); process.exit(1); }
-    let accepted = 0, failedBatches = 0, firstReason: string | null = null;
-    for (const part of chunk(dmRows)) {
-      const ans = await ingest(dmTok, buildIngestBody(dest, part, !sending));
-      if (!ans.ok) { failedBatches++; firstReason ??= ans.reason; console.error(`Data Manager refused ${part.length} row(s) (HTTP ${ans.status}): ${ans.reason}${ans.scopeProblem ? " The credential needs the Data Manager scope and the account must be linked as a destination." : ""}`); continue; }
-      accepted += part.length;
-      if (ans.requestId) {
-        const st = await requestStatus(dmTok, ans.requestId);
-        console.log(`Request ${ans.requestId}: ${st ? `received ${st.received ?? "?"}, failed ${st.failed ?? "?"}` : "status not readable yet"}.`);
+    const saveIdRecord = (api: "validate" | "send", t: IngestTally) =>
+      pgc.query("INSERT INTO app_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+        [identifierRecordKey(args.clientSlug), identifierRecord(idCounts, gate, api, new Date(), { accepted: t.accepted, refused: t.refused })]);
+
+    let includeIds = gate.include;
+    let idRefusal: string | null = null;
+    if (!sending || checkOnly || (gate.include && idCounts.withEither > 0 && !idClean)) {
+      const v = await ingestAll(dmTok, dest, buildRows(gate.include), true);
+      // Counts only, for the app's Setup row ("Google accepted all 12 on ..."). No hash, no raw value.
+      await saveIdRecord("validate", v);
+      if (v.failedBatches === 0 && v.refused === 0) {
+        await pgc.query("INSERT INTO app_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [vKey, new Date().toISOString()]);
+      }
+      if (!sending || checkOnly) {
+        if (v.failedBatches > 0 || v.refused > 0) { console.error(`Google refused ${v.refused} of ${batch.length} row(s) in the validate-only check. First reason: ${v.firstReason ?? "not stated"}.`); process.exit(1); }
+        console.log(`Validate-only pass OK: Google accepted ${v.accepted} of ${batch.length}. Nothing was sent to the account.${checkOnly ? "" : " Run again with --api=send to send."}`);
+        return;
+      }
+      if (v.failedBatches > 0 || v.refused > 0) {
+        includeIds = false;
+        idRefusal = `Google refused ${v.refused} of ${batch.length} row(s) carrying phone or email in the check before this send. First reason: ${v.firstReason ?? "not stated"}. Sent by click id alone; fix the identifiers before they ride again.`;
+        console.error(idRefusal);
+      } else {
+        console.log(`Identifier check OK: Google accepted ${v.accepted} of ${batch.length}. Sending with phone or email.`);
       }
     }
-    if (failedBatches > 0) { console.error(`Data Manager did not take ${failedBatches} batch(es). First reason: ${firstReason ?? "not stated"}.`); process.exit(1); }
-    // Counts only, for the app's Setup row ("Matching by phone or email: on / off"). No hash, no raw value.
-    await pgc.query("INSERT INTO app_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [identifierRecordKey(args.clientSlug), identifierRecord(idCounts, gate, args.api, new Date())]);
-    if (!sending) {
-      await pgc.query("INSERT INTO app_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", [vKey, new Date().toISOString()]);
-      console.log(`Validate-only pass OK for ${accepted} conversion(s). Nothing was sent to the account. Run again with --api=send to send.`);
-      return;
+    const { rows: vr } = await pgc.query<{ value: string }>("SELECT value FROM app_settings WHERE key=$1", [vKey]);
+    if (!validationAllows(vr[0]?.value, new Date())) {
+      console.error("Not sending: no validate-only pass on record in the last 14 days. Run this job with --api=validate first and read the result.");
+      process.exit(1);
     }
-    // Accepted by the API (the request status above says how many Google then processed).
-    for (const m of fresh) {
+    const sent = await ingestAll(dmTok, dest, buildRows(includeIds), false);
+    if (sent.failedBatches > 0) { console.error(`Data Manager did not take ${sent.failedBatches} batch(es). First reason: ${sent.firstReason ?? "not stated"}.`); process.exit(1); }
+    // Keep the refusal on the Setup row when this send went without identifiers.
+    if (!idRefusal) await saveIdRecord("send", sent);
+    // Accepted by the API (the request status says how many Google then processed).
+    for (const m of batch) {
       await pgc.query(
         `INSERT INTO offline_conversion_uploads (id, client_slug, gclid, conversion_action, admission_date, value_cents, matched_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
         [randomUUID(), args.clientSlug, m.gclid, ca.resource_name, ymd(m.date), valueCents, `${m.matchedBy}+data_manager`],
       );
     }
-    console.log(`Sent ${accepted} conversion(s) through the Data Manager API and recorded them. Google may take hours to show them in the conversion action.`);
+    console.log(`Sent ${sent.accepted} conversion(s) through the Data Manager API and recorded them. Google may take hours to show them in the conversion action.`);
+    if (idRefusal) { console.error(idRefusal); process.exit(1); }
   } finally {
     await pgc.end();
   }
+}
+
+/** Every batch through ingest, tallied. Counts and scrubbed reasons only reach the log. */
+async function ingestAll(tok: string, dest: DmDestination, rows: DmRow[], validateOnly: boolean): Promise<IngestTally> {
+  let t: IngestTally = { accepted: 0, refused: 0, failedBatches: 0, firstReason: null };
+  for (const part of chunk(rows)) {
+    const ans = await ingest(tok, buildIngestBody(dest, part, validateOnly));
+    if (!ans.ok) console.error(`Data Manager refused ${part.length} row(s) (HTTP ${ans.status}): ${ans.reason}${ans.scopeProblem ? " The credential needs the Data Manager scope and the account must be linked as a destination." : ""}`);
+    const st = ans.ok && ans.requestId ? await requestStatus(tok, ans.requestId) : null;
+    if (ans.ok && ans.requestId) console.log(`Request ${ans.requestId}: ${st ? `received ${st.received ?? "?"}, failed ${st.failed ?? "?"}` : "status not readable yet"}.`);
+    t = tallyBatch(t, part.length, ans, st);
+  }
+  return t;
 }
 
 main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });

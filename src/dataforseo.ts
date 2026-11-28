@@ -192,6 +192,11 @@ export async function serpRanks(
         }
       }
       const organicCount = items.filter((it) => it?.type === "organic").length;
+      // Zero organic results is the provider answering with nothing (a place it could not resolve, a blocked
+      // request). It is a failed check. Storing it as rank null with no error reads as "not in the top 100".
+      if (organicCount === 0 && rank == null) {
+        return { keyword: t.keyword, rank: null, aiOverview, itemsReturned: 0, error: "empty answer: the provider returned no organic results for this search" };
+      }
       return { keyword: t.keyword, rank, aiOverview, url: rankingUrl, organic: topOrganic(items), itemsReturned: organicCount, error: null };
     } catch (e) {
       return { keyword: t.keyword, rank: null, aiOverview: false, error: e instanceof Error ? e.message : String(e) };

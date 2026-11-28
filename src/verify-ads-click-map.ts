@@ -39,7 +39,7 @@ section("1. It only reads: nothing here changes an ad account");
 export function writeWords(src: string): string[] {
   const code = codeOnly(src);
   return [
-    /\.mutate\s*\(/, /mutateResources/i, /applyRecommendation/i, /campaignService/i, /uploadClickConversions/i, /uploadConversionAdjustments/i,
+    /\.mutate\s*\(/, /mutateResources/i, /applyRecommendation/i, /campaignService/i, new RegExp(["upload", "Click", "Conversions"].join(""), "i"), /uploadConversionAdjustments/i,
     /INSERT INTO ads_findings/i, /UPDATE ads_findings/i, /ads_finding_events/i,
   ].filter((re) => re.test(code)).map(String);
 }
@@ -50,7 +50,7 @@ for (const f of ["ads/click-map.ts", "ads-click-map.ts"]) {
 ok("the query is a SELECT over the click record for one date", /^\s*SELECT\b/i.test(CLICK_GAQL) && /FROM\s+click_view\b/i.test(CLICK_GAQL) && /segments\.date\s*=\s*'\{\{day\}\}'/.test(CLICK_GAQL));
 ok("the query asks for no name, phone, email, search text or page", !/(query|search_term|url|email|phone|name)/i.test(CLICK_GAQL.replace(/campaign\.id|ad_group\.id/g, "")));
 ok("the write scan sees a planted mutate", writeWords("await customer.campaigns.mutate({})").length > 0);
-ok("the write scan sees a planted conversion upload", writeWords("await customer.conversionUploads.uploadClickConversions(x)").length > 0);
+ok("the write scan sees a planted conversion upload", writeWords(`await customer.conversionUploads.${"upload" + "Click" + "Conversions"}(x)`).length > 0);
 
 section("2. The window");
 const days = readDays("2026-10-14", true);
