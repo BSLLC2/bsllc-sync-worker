@@ -64,7 +64,7 @@ CREATE TABLE ga4_report_runs (
   id text PRIMARY KEY, client_id text NOT NULL UNIQUE REFERENCES clients(id), status text NOT NULL, detail text,
   first_day text, last_day text, first_month text, last_month text, rows integer NOT NULL DEFAULT 0,
   capped_kinds text, failed_kinds text, excluded_countries text, form_event text, groups_json text,
-  ran_at timestamptz NOT NULL DEFAULT now(), excluded_channels text);
+  ran_at timestamptz NOT NULL DEFAULT now(), excluded_channels text, own_hostnames text);
 `;
 
 /* ───────────────────────── a pretend property ───────────────────────── */
@@ -670,7 +670,7 @@ async function storeSection(url: string) {
     };
 
     const first = await run({ excludeCountries: ["India"], groups: [GROUP] });
-    ok("the first run writes", first.w.ok);
+    ok("the first run writes", first.w.ok, first.w.message ?? "");
     const days = await count(`SELECT count(*) AS n FROM ga4_site_days WHERE client_id = 'client-a'`);
     ok("one row per day of the span", days === first.r.daily!.length, `${days}`);
     ok("no day outside the span", (await count(`SELECT count(*) AS n FROM ga4_site_days WHERE day < '2026-06-10' OR day > '2026-10-12'`)) === 0);
